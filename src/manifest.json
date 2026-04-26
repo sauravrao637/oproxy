@@ -1,0 +1,17 @@
+{
+  "name": "oproxy",
+  "short_name": "oproxy",
+  "description": "Programmable HTTP proxy for inspection and debugging",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#0A7AFF",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

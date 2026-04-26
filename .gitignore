@@ -1,0 +1,39 @@
+# ── Rust ───────────────────────────────────────────────────────────────────────
+/target
+
+# ── CA certificates ────────────────────────────────────────────────────────────
+# Generated automatically on first run — NEVER commit the private key.
+certs/root.key
+certs/root.crt
+
+# ── Runtime state ──────────────────────────────────────────────────────────────
+# Created and managed by the proxy at runtime; user-specific.
+storage/
+
+# ── Log files ──────────────────────────────────────────────────────────────────
+server.log
+server.log.*
+
+# ── IDE / editor ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── AI assistant workspace files ───────────────────────────────────────────────
+.roo/
+.claude/
+
+# ── Environment overrides ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── OS noise ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+plans/
+
+PRD.md
