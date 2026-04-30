@@ -1,0 +1,19 @@
+services:
+  oproxy:
+    image: oproxy:latest
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      OPROXY_MITM_ENABLED: "true"
+    volumes:
+      # Persist root CA key/cert across container replacements.
+      # Trust /app/certs/root.crt once; it never changes between restarts.
+      - oproxy-certs:/app/certs
+      # Persist rules, sessions, and other state.
+      - oproxy-storage:/app/storage
+    restart: unless-stopped
+
+volumes:
+  oproxy-certs:
+  oproxy-storage:

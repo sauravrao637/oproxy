@@ -321,6 +321,7 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
 .tree-req-status{flex-shrink:0;width:52px}
 .tree-req-size{flex-shrink:0;width:60px;text-align:right;font-size:11px;color:var(--text3);padding-right:6px}
 .tree-req-dur{flex-shrink:0;width:52px;text-align:right;font-size:11px;color:var(--text3)}
+.tree-req-qs{font-size:10.5px;color:var(--text4);font-family:var(--mono);margin-left:2px}
 
 /* ── Status bar ───────────────────────────────────────────────────────────── */
 .statusbar{display:flex;align-items:center;gap:10px;padding:0 14px;height:24px;background:var(--surf2);border-top:0.5px solid var(--border);font-size:11px;color:var(--text4);flex-shrink:0}
@@ -360,6 +361,109 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
 .eopt:hover .eopt-icon,.eopt.sel .eopt-icon{opacity:1}
 .eopt-label{font-size:12px;font-weight:600;color:var(--text);display:block}
 .eopt-desc{font-size:10.5px;color:var(--text3);display:block;margin-top:2px}
+
+/* ── v2 additions ─────────────────────────────────────────────────────────── */
+
+/* Toggle switch */
+.toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.toggle{width:28px;height:16px;border-radius:8px;background:var(--border2);position:relative;transition:background .18s;flex-shrink:0}
+.toggle.on{background:var(--accent)}
+.toggle::after{content:'';position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:transform .18s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.toggle.on::after{transform:translateX(12px)}
+
+/* Regex tester */
+.regex-tester{display:flex;flex-direction:column;gap:4px;flex:1}
+.regex-tester-input{padding:6px 9px;border-radius:7px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:11px;font-family:var(--mono);outline:none;transition:border-color .14s;width:100%}
+.regex-tester-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,122,255,.10)}
+.regex-status{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;padding:2px 7px;border-radius:4px;font-weight:500;transition:all .15s;min-height:19px}
+.regex-status.match{background:rgba(52,199,89,.12);color:#1A7F3C}
+.regex-status.no-match{background:rgba(0,0,0,.05);color:var(--text4)}
+.regex-status.error{background:rgba(255,59,47,.10);color:var(--danger)}
+[data-theme="dark"] .regex-status.match{color:#30D158}
+[data-theme="dark"] .regex-status.no-match{background:rgba(255,255,255,.05)}
+
+/* Order arrows */
+.order-btns{display:inline-flex;flex-direction:column;gap:1px}
+.order-btn{display:flex;align-items:center;justify-content:center;width:18px;height:14px;border-radius:3px;cursor:pointer;color:var(--text4);transition:all .12s}
+.order-btn:hover{background:var(--accent-l);color:var(--accent)}
+.order-btn.disabled{opacity:0.25;pointer-events:none}
+
+/* Breakpoint edit panel */
+.bpe-panel{border-top:0.5px solid var(--border);padding:12px 15px;background:var(--surf2)}
+.bpe-section-title{font-size:10px;font-weight:600;color:var(--text4);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px}
+.cmp-kv-table{width:100%;border-collapse:collapse;font-size:12px}
+.cmp-kv-table thead th{padding:5px 8px;text-align:left;font-size:10px;font-weight:600;color:var(--text4);text-transform:uppercase;letter-spacing:0.4px;border-bottom:0.5px solid var(--border)}
+.cmp-kv-table td{padding:4px 6px;border-bottom:0.5px solid var(--border)}
+.cmp-kv-table tr:last-child td{border-bottom:none}
+.cmp-kv-input{width:100%;padding:4px 7px;border-radius:5px;border:0.5px solid transparent;background:transparent;color:var(--text);font-size:11.5px;font-family:var(--mono);outline:none;transition:all .14s}
+.cmp-kv-input:focus{border-color:var(--accent);background:var(--surface);box-shadow:0 0 0 3px rgba(10,122,255,.08)}
+.cmp-kv-input::placeholder{color:var(--text4)}
+.cmp-kv-del{padding:3px 6px;border-radius:4px;border:none;background:transparent;color:var(--text4);cursor:pointer;font-size:12px;font-family:inherit}
+.cmp-kv-del:hover{color:var(--danger);background:rgba(255,59,47,.08)}
+
+/* Compose workspace */
+#v-compose.view{flex-direction:row}
+.cmp-sidebar{width:200px;flex-shrink:0;border-right:0.5px solid var(--border);background:var(--surf2);display:flex;flex-direction:column;overflow:hidden}
+.cmp-sidebar-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 12px 6px;border-bottom:0.5px solid var(--border);flex-shrink:0}
+.cmp-sidebar-title{font-size:10px;font-weight:600;color:var(--text4);letter-spacing:0.6px;text-transform:uppercase}
+.cmp-coll-item{display:flex;align-items:center;gap:6px;padding:5px 10px;cursor:pointer;font-size:12px;color:var(--text);transition:background .1s}
+.cmp-coll-item:hover{background:var(--row-hover)}
+.cmp-coll-item.active{background:var(--accent-l);color:var(--accent)}
+.cmp-saved-req{display:flex;align-items:center;gap:6px;padding:3px 10px 3px 22px;cursor:pointer;font-size:11.5px;color:var(--text3);transition:background .1s}
+.cmp-saved-req:hover{background:var(--row-hover)}
+.cmp-saved-req.active{color:var(--accent)}
+.cmp-saved-method{font-family:var(--mono);font-size:10px;font-weight:700;min-width:30px;flex-shrink:0}
+.cmp-saved-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp-vars-section{border-top:0.5px solid var(--border);flex-shrink:0;margin-top:auto}
+.cmp-vars-list{padding:6px 8px;display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto}
+.cmp-var-row{display:flex;align-items:center;gap:4px}
+.cmp-var-key{flex:1;padding:3px 6px;border-radius:5px;border:0.5px solid var(--border2);background:var(--surface);color:var(--accent);font-size:11px;font-family:var(--mono);outline:none}
+.cmp-var-key:focus{border-color:var(--accent)}
+.cmp-var-val{flex:2;padding:3px 6px;border-radius:5px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:11px;font-family:var(--mono);outline:none}
+.cmp-var-val:focus{border-color:var(--accent)}
+.cmp-editor-area{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.cmp-tab-strip{display:flex;align-items:stretch;background:var(--surf2);border-bottom:0.5px solid var(--border);flex-shrink:0;overflow-x:auto}
+.cmp-tab{display:flex;align-items:center;gap:5px;padding:7px 12px;font-size:11.5px;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;border-right:0.5px solid var(--border);transition:all .14s;white-space:nowrap;min-width:90px;max-width:180px}
+.cmp-tab:hover{background:var(--row-hover);color:var(--text)}
+.cmp-tab.active{background:var(--surface);color:var(--text);border-bottom-color:var(--accent)}
+.cmp-tab-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp-tab-dirty{color:var(--warning);font-size:9px;flex-shrink:0}
+.cmp-tab-x{opacity:0;padding:1px 3px;border-radius:3px;cursor:pointer;font-size:11px;color:var(--text4);transition:opacity .12s;flex-shrink:0}
+.cmp-tab:hover .cmp-tab-x,.cmp-tab.active .cmp-tab-x{opacity:1}
+.cmp-tab-x:hover{color:var(--danger);background:rgba(255,59,47,.1)}
+.cmp-tab-new{padding:7px 10px;border:none;background:transparent;cursor:pointer;color:var(--text4);display:flex;align-items:center;transition:color .12s;font-family:inherit}
+.cmp-tab-new:hover{color:var(--accent)}
+.cmp-editor{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:14px;gap:8px}
+.cmp-req-line{display:flex;gap:6px;align-items:center}
+.cmp-resolved-url{font-family:var(--mono);font-size:10.5px;color:var(--text4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp-resolved-url .var-resolved{color:var(--success)}
+.cmp-kv-editor{overflow-y:auto;padding:4px 0}
+.cmp-body-pane{display:flex;flex-direction:column;overflow:hidden}
+.cmp-body-mode-bar{display:flex;align-items:center;gap:8px;padding:4px 0;flex-shrink:0}
+.cmp-history-details{border-top:0.5px solid var(--border);flex-shrink:0;font-size:12px}
+.cmp-history-summary{padding:7px 14px;cursor:pointer;font-size:11px;font-weight:500;color:var(--text3);display:flex;align-items:center;user-select:none;list-style:none}
+.cmp-history-summary::-webkit-details-marker{display:none}
+.cmp-save-form{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:0.5px solid var(--border);background:var(--surf2);flex-shrink:0}
+.cmp-save-form .finput{padding:5px 8px;font-size:12px}
+.cmp-coll-new-row{padding:5px 10px;border-bottom:0.5px solid var(--border)}
+.cmp-coll-new-row input{width:100%;padding:4px 7px;border-radius:5px;border:0.5px solid var(--accent);background:var(--surface);color:var(--text);font-size:12px;outline:none;font-family:inherit}
+.cmp-saved-req .cmp-req-edit-btn{opacity:0;padding:1px 4px;border-radius:3px;font-size:10px;cursor:pointer;color:var(--text4);background:transparent;border:none;transition:opacity .12s;flex-shrink:0}
+.cmp-saved-req:hover .cmp-req-edit-btn{opacity:1}
+.cmp-req-rename-row{padding:3px 10px 3px 22px;display:flex;gap:4px;align-items:center}
+.cmp-req-rename-row input{flex:1;padding:3px 6px;border-radius:4px;border:0.5px solid var(--accent);background:var(--surface);color:var(--text);font-size:11.5px;font-family:inherit;outline:none}
+.cmp-del-confirm{display:flex;align-items:center;gap:5px;padding:4px 10px;background:rgba(255,59,47,.07);border-bottom:0.5px solid var(--border);font-size:11px;color:var(--text3)}
+.cmp-del-confirm span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp-history-summary:hover{color:var(--text)}
+.cmp-history-list{max-height:180px;overflow-y:auto}
+.cmp-history-row{display:flex;align-items:center;gap:8px;padding:5px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;font-size:11px;transition:background .1s}
+.cmp-history-row:last-child{border-bottom:none}
+.cmp-history-row:hover{background:var(--row-hover)}
+.cmp-response{border-top:0.5px solid var(--border);display:flex;flex-direction:column;max-height:45%;flex-shrink:0;overflow:hidden}
+.cmp-res-line{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:var(--surf2)}
+.cmp-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:10px;color:var(--text4);font-size:12px}
+
+/* Request Mapping - Header Map section */
+.hdrmap-scope-chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;font-size:10.5px;background:var(--accent-l);color:var(--accent);font-weight:500}
 </style>
 </head>
 <body>
@@ -448,9 +552,9 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.5h10M4.5 2L2 4.5l2.5 2.5M9.5 12H4M9.5 9l2.5 2.5-2.5 2.5"/></svg></div>
     Rewrite Rules
   </div>
-  <div class="nav-item" data-v="routes" onclick="navItem(this)">
+  <div class="nav-item" data-v="mapping" onclick="navItem(this)">
     <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 5.5h11M5 2.5L1.5 5.5 5 8.5M9 11.5H4M9 8.5l3.5 3-3.5 3" stroke-linejoin="round"/></svg></div>
-    Map Remote
+    Request Mapping
   </div>
   <div class="nav-item" data-v="dns" onclick="navItem(this)">
     <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="5"/><path d="M7 2v10M2 7h10M3 4.5Q5 6 7 6t4-1.5M3 9.5Q5 8 7 8t4 1.5"/></svg></div>
@@ -464,6 +568,19 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 11l2.5-5 2 3 2.5-6 3 4.5"/></svg></div>
     Throttle
   </div>
+
+  <div class="nav-divider"></div>
+  <div class="sec-label">Compose</div>
+  <div class="nav-item" data-v="compose" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M11 1.5L12.5 3 5 10.5H3.5V9L11 1.5z"/><path d="M9.5 3l1.5 1.5"/></svg></div>
+    Compose
+  </div>
+
+  <div class="nav-divider"></div>
+  <div class="nav-item" data-v="settings" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="2"/><path d="M7 1v1.5M7 11.5V13M1 7h1.5M11.5 7H13M2.6 2.6l1.1 1.1M10.3 10.3l1.1 1.1M2.6 11.4l1.1-1.1M10.3 3.7l1.1-1.1"/></svg></div>
+    Settings
+  </div>
 </nav>
 
 <!-- Main views -->
@@ -476,8 +593,8 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
       <button class="chip on" data-sc="3xx" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--warning)"></span>3xx</button>
       <button class="chip on" data-sc="4xx" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--danger)"></span>4xx</button>
       <button class="chip on" data-sc="5xx" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--purple)"></span>5xx</button>
-      <div class="chip-sep"></div>
-      <button class="chip on" data-sc="pending" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--text4)"></span>Pending</button>
+      <div class="chip-sep" id="chip-sep-pending"></div>
+      <button class="chip on" id="chip-pending" data-sc="pending" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--text4)"></span>Pending</button>
       <button id="chip-reset" onclick="resetChips()" style="display:none;padding:2px 7px;border-radius:5px;border:none;background:transparent;color:var(--accent);font-size:11px;cursor:pointer;font-family:inherit">Reset filters</button>
       <button id="sort-reset" onclick="resetSort()" style="display:none;padding:2px 7px;border-radius:5px;border:none;background:transparent;color:var(--accent);font-size:11px;cursor:pointer;font-family:inherit">Reset sort</button>
       <span class="filter-count" id="filter-count"></span>
@@ -561,7 +678,7 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     <div class="card">
       <div class="card-hdr">
         <span class="card-title">Rewrite Rules</span>
-        <button class="btn btn-sm btn-primary" onclick="toggleRwForm()">+ Add Rule</button>
+        <button class="btn btn-sm btn-primary" onclick="toggleRwForm()" id="rw-add-btn">+ Add Rule</button>
       </div>
       <div id="rw-form" style="display:none;padding:14px 15px;border-bottom:0.5px solid var(--border)">
         <div class="form-row">
@@ -578,17 +695,32 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
               <option value="Header">Header value</option>
             </select>
           </div>
-          <div class="fgroup" id="rw-crit-a">
-            <label class="flabel">Pattern</label>
-            <input class="finput" id="rw-crit-v" placeholder="/api/v1/(.*)">
+          <div class="fgroup" style="max-width:120px">
+            <label class="flabel">Applies to</label>
+            <select class="finput fselect" id="rw-scope">
+              <option value="Both">Both</option>
+              <option value="Request">Request only</option>
+              <option value="Response">Response only</option>
+            </select>
           </div>
           <div class="fgroup" id="rw-hdr-name-wrap" style="display:none;max-width:120px">
             <label class="flabel">Header name</label>
             <input class="finput" id="rw-hdr-name" placeholder="X-Auth">
           </div>
         </div>
+        <div class="form-row" style="align-items:flex-start">
+          <div class="fgroup" id="rw-crit-a">
+            <label class="flabel">Pattern</label>
+            <input class="finput" id="rw-crit-v" placeholder="/api/v1/(.*)" oninput="onRegexTest('rw-crit-v','rw-crit-sample','rw-crit-status')">
+          </div>
+          <div class="regex-tester" id="rw-crit-tester">
+            <label class="flabel">Test sample</label>
+            <input class="regex-tester-input" id="rw-crit-sample" placeholder="Paste a sample URL/header/body…" oninput="onRegexTest('rw-crit-v','rw-crit-sample','rw-crit-status')" aria-label="Sample to test regex">
+            <span class="regex-status" id="rw-crit-status" role="status" aria-live="polite"></span>
+          </div>
+        </div>
         <div class="form-row">
-          <div class="fgroup" style="max-width:150px">
+          <div class="fgroup" style="max-width:170px">
             <label class="flabel">Action</label>
             <select class="finput fselect" id="rw-action" onchange="onRwActionChange()">
               <option value="ReplaceBody">Replace body</option>
@@ -611,14 +743,53 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
           </div>
         </div>
         <div style="display:flex;gap:8px">
-          <button class="btn btn-primary btn-sm" onclick="saveRw()">Save</button>
-          <button class="btn btn-ghost btn-sm" onclick="toggleRwForm()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="saveRw()" id="rw-save-btn">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="cancelRwForm()">Cancel</button>
         </div>
       </div>
       <table class="tlist" id="rw-table">
-        <thead><tr><th>Name</th><th>Match</th><th>Action</th><th style="width:40px"></th></tr></thead>
+        <thead><tr><th>Name</th><th>Match</th><th>Scope</th><th>Action</th><th style="width:46px">On</th><th style="width:30px"></th><th style="width:84px"></th></tr></thead>
         <tbody id="rw-tbody"></tbody>
       </table>
+    </div>
+
+    <!-- Static Modifications card -->
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr">
+        <span class="card-title">Static Modifications</span>
+        <button class="btn btn-sm btn-primary" onclick="toggleModForm()" id="mod-add-btn">+ Add Rule</button>
+      </div>
+      <div id="mod-form" style="display:none;padding:14px 15px;border-bottom:0.5px solid var(--border)">
+        <div class="form-row">
+          <div class="fgroup" style="flex:1">
+            <label class="flabel">URI contains (substring)</label>
+            <input class="finput" id="mod-pattern" placeholder="/api/v1/resource">
+          </div>
+        </div>
+        <div class="fgroup" style="margin-top:10px">
+          <label class="flabel" style="margin-bottom:4px">Inject Headers</label>
+          <table class="cmp-kv-table" id="mod-hdrs-table">
+            <thead><tr><th>Header Name</th><th>Value</th><th style="width:28px"></th></tr></thead>
+            <tbody id="mod-hdrs-tbody"></tbody>
+          </table>
+          <button class="btn btn-sm btn-ghost" style="margin-top:4px" onclick="modAddHdrRow()">+ Add header</button>
+        </div>
+        <div class="fgroup" style="margin-top:10px">
+          <label class="flabel">Replace Body (optional)</label>
+          <textarea class="finput" id="mod-body" rows="3" style="font-family:var(--mono);font-size:11px;resize:vertical" placeholder="Leave blank to keep original body"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn btn-primary btn-sm" onclick="saveMod()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleModForm()">Cancel</button>
+        </div>
+      </div>
+      <table class="tlist" id="mod-table">
+        <thead><tr><th>URI Pattern</th><th>Headers</th><th>Body</th><th style="width:60px"></th></tr></thead>
+        <tbody id="mod-tbody"></tbody>
+      </table>
+      <div class="card-body" style="padding-top:6px">
+        <p class="note">Matches request URI by substring. Injects headers and optionally replaces the request body before forwarding.</p>
+      </div>
     </div>
   </div>
 
@@ -647,10 +818,17 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     </div>
   </div>
 
-  <!-- Map Remote -->
-  <div id="v-routes" class="view tool-panel" style="display:none">
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">Map Remote</span></div>
+  <!-- Request Mapping (Host Remap + Header Map) -->
+  <div id="v-mapping" class="view tool-panel" style="display:none">
+    <div style="padding:10px 15px 0;flex-shrink:0;display:flex;gap:4px">
+      <button class="chip on" data-mv="host-remap" onclick="setMappingTab(this)">Host Remap</button>
+      <button class="chip" data-mv="header-map" onclick="setMappingTab(this)">Header Map</button>
+      <button class="chip" data-mv="map-local" onclick="setMappingTab(this)">Map Local</button>
+    </div>
+
+    <!-- Host Remap sub-panel -->
+    <div id="mv-host-remap" class="card" style="margin-top:8px">
+      <div class="card-hdr"><span class="card-title">Host Remapping</span></div>
       <div class="card-body">
         <div class="form-row">
           <div class="fgroup">
@@ -668,6 +846,80 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
       <table class="tlist">
         <thead><tr><th>Source Host</th><th>Destination</th><th style="width:70px"></th></tr></thead>
         <tbody id="rt-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Header Map sub-panel -->
+    <div id="mv-header-map" class="card" style="display:none;margin-top:8px">
+      <div class="card-hdr">
+        <span class="card-title">Header Map</span>
+        <button class="btn btn-sm btn-primary" onclick="toggleHdrMapForm()">+ Add Rule</button>
+      </div>
+      <div id="hdrmap-form" style="display:none;padding:14px 15px;border-bottom:0.5px solid var(--border)">
+        <div class="form-row">
+          <div class="fgroup" style="max-width:130px">
+            <label class="flabel">Scope</label>
+            <select class="finput fselect" id="hm-scope" onchange="onHmScopeChange()">
+              <option value="all">All requests</option>
+              <option value="host">Match host</option>
+              <option value="path">Match path (regex)</option>
+            </select>
+          </div>
+          <div class="fgroup" id="hm-match-wrap" style="display:none">
+            <label class="flabel" id="hm-match-label">Match pattern</label>
+            <input class="finput" id="hm-match" placeholder="example.com or /api/.*">
+          </div>
+          <div class="fgroup" style="max-width:110px">
+            <label class="flabel">Action</label>
+            <select class="finput fselect" id="hm-action" onchange="onHmActionChange()">
+              <option value="Set">Set</option>
+              <option value="Append">Append</option>
+              <option value="Remove">Remove</option>
+            </select>
+          </div>
+          <div class="fgroup" style="max-width:160px">
+            <label class="flabel">Header Name</label>
+            <input class="finput" id="hm-name" placeholder="X-Custom-Header">
+          </div>
+          <div class="fgroup" id="hm-value-wrap">
+            <label class="flabel">Value</label>
+            <input class="finput" id="hm-value" placeholder="header value">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="saveHdrMapRule()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleHdrMapForm()">Cancel</button>
+        </div>
+      </div>
+      <table class="tlist">
+        <thead><tr><th>Scope</th><th>Action</th><th>Header</th><th>Value</th><th style="width:46px">On</th><th style="width:44px"></th></tr></thead>
+        <tbody id="hdrmap-tbody"></tbody>
+      </table>
+      <div class="card-body" style="padding-top:6px">
+        <p class="note">Header Map rules inject, override, or remove headers on matching requests. Rules execute before Rewrite Rules.</p>
+      </div>
+    </div>
+
+    <!-- Map Local sub-panel -->
+    <div id="mv-map-local" class="card" style="display:none;margin-top:8px">
+      <div class="card-hdr"><span class="card-title">Map Local</span></div>
+      <div class="card-body">
+        <div class="form-row">
+          <div class="fgroup">
+            <label class="flabel">Host</label>
+            <input class="finput" id="ml-host" placeholder="local.test">
+          </div>
+          <div class="fgroup">
+            <label class="flabel">Local File Path</label>
+            <input class="finput" id="ml-path" placeholder="/tmp/mock.html">
+          </div>
+          <button class="btn btn-primary btn-sm" style="margin-top:16px" onclick="addMapLocal()">Add</button>
+        </div>
+        <p class="note">Requests matching <em>Host</em> are served from <em>Local File Path</em> instead of forwarding upstream.</p>
+      </div>
+      <table class="tlist">
+        <thead><tr><th>Host</th><th>Local File</th><th style="width:70px"></th></tr></thead>
+        <tbody id="ml-tbody"></tbody>
       </table>
     </div>
   </div>
@@ -737,6 +989,174 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     </div>
   </div>
 
+  <!-- Compose Workspace -->
+  <div id="v-compose" class="view" style="display:none;flex-direction:row">
+
+    <!-- Collections sidebar -->
+    <div class="cmp-sidebar">
+      <div class="cmp-sidebar-hdr">
+        <span class="cmp-sidebar-title">Collections</span>
+        <button class="btn btn-sm btn-ghost" onclick="cmpNewCollection()" title="New collection" aria-label="New collection" style="padding:3px 6px">+</button>
+      </div>
+      <div id="cmp-collections-list" style="flex:1;overflow-y:auto"></div>
+      <div class="cmp-vars-section">
+        <div class="cmp-sidebar-hdr">
+          <span class="cmp-sidebar-title">Variables</span>
+          <button class="btn btn-sm btn-ghost" onclick="cmpAddVar()" aria-label="Add variable" style="padding:3px 6px">+</button>
+        </div>
+        <div id="cmp-vars-list" class="cmp-vars-list"></div>
+      </div>
+    </div>
+
+    <!-- Tab bar + editor area -->
+    <div class="cmp-editor-area">
+      <div class="cmp-tab-strip" id="cmp-tab-strip" role="tablist">
+        <button class="cmp-tab-new" onclick="cmpNewTab()" title="New request (⌘T)" aria-label="New request tab">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 2v8M2 6h8"/></svg>
+        </button>
+      </div>
+
+      <!-- No tabs open -->
+      <div id="cmp-no-tab" class="cmp-empty" style="flex:1">
+        <svg width="30" height="30" viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.25"><path d="M22 3L27 8 13 22H8V17L22 3z"/><path d="M19 6l5 5"/></svg>
+        <span>Open a new tab to compose a request</span>
+        <button class="btn btn-sm btn-primary" onclick="cmpNewTab()">New Request</button>
+      </div>
+
+      <!-- Editor (shown when tab active) -->
+      <div id="cmp-editor" class="cmp-editor" style="display:none">
+        <div class="cmp-req-line">
+          <select class="compose-method finput" id="cmp-method" style="width:90px;font-weight:700;color:var(--accent)" onchange="cmpDirty()" aria-label="HTTP method">
+            <option>GET</option><option>POST</option><option>PUT</option>
+            <option>DELETE</option><option>PATCH</option><option>HEAD</option><option>OPTIONS</option>
+          </select>
+          <input class="compose-url" id="cmp-url" spellcheck="false" placeholder="https://{{base_url}}/api/resource" oninput="cmpDirty();cmpResolveVars()" onpaste="cmpMaybeImportCurl(event)" aria-label="Request URL" style="flex:1">
+          <button class="btn btn-primary" onclick="sendCmpRequest()" id="cmp-send-btn" aria-label="Send request">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.5 6H1.5M7.5 3l3 3-3 3"/></svg>
+            Send
+          </button>
+          <button class="btn btn-ghost" onclick="copyCurlCompose()" title="Copy as cURL">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="3" width="8" height="8" rx="1.5"/><path d="M3 3V2a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1h-1"/></svg>
+            cURL
+          </button>
+          <button class="btn btn-ghost" onclick="cmpToggleSaveForm()" id="cmp-save-btn" title="Save request">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 2h6.5L10 3.5V10a1 1 0 01-1 1H3a1 1 0 01-1-1V2z"/><rect x="3.5" y="6.5" width="5" height="4.5" rx="0.5"/><rect x="3.5" y="2" width="4" height="2.5" rx="0.5"/></svg>
+            Save
+          </button>
+        </div>
+        <div id="cmp-resolved-url" class="cmp-resolved-url" style="display:none"></div>
+        <!-- Inline save form -->
+        <div id="cmp-save-form" class="cmp-save-form" style="display:none">
+          <input class="finput" id="cmp-save-name" placeholder="Request name" style="flex:1;min-width:120px" onkeydown="if(event.key==='Enter')cmpConfirmSave();if(event.key==='Escape')cmpToggleSaveForm()">
+          <select class="finput fselect" id="cmp-save-coll" style="width:auto;font-size:12px"></select>
+          <button class="btn btn-primary btn-sm" onclick="cmpConfirmSave()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="cmpToggleSaveForm()">Cancel</button>
+        </div>
+
+        <div class="ctab-bar">
+          <div class="ctab on" data-ctab="headers" onclick="setCmpBodyTab(this)">Headers</div>
+          <div class="ctab" data-ctab="params" onclick="setCmpBodyTab(this)">Params</div>
+          <div class="ctab" data-ctab="body" onclick="setCmpBodyTab(this)">Body</div>
+        </div>
+
+        <!-- Headers -->
+        <div id="cmp-pane-headers" class="cmp-kv-editor">
+          <table class="cmp-kv-table" id="cmp-headers-table" aria-label="Request headers">
+            <thead><tr><th style="width:24px"><input type="checkbox" id="cmp-hdr-all" onchange="cmpToggleAllKv('headers',this.checked)" aria-label="Toggle all headers"></th><th>Header</th><th>Value</th><th style="width:28px"></th></tr></thead>
+            <tbody id="cmp-headers-tbody"></tbody>
+          </table>
+          <button class="btn btn-sm btn-ghost" onclick="cmpAddKvRow('headers')" style="margin:6px 0 0 8px">+ Add Header</button>
+        </div>
+
+        <!-- Params -->
+        <div id="cmp-pane-params" class="cmp-kv-editor" style="display:none">
+          <table class="cmp-kv-table" id="cmp-params-table" aria-label="Query parameters">
+            <thead><tr><th style="width:24px"><input type="checkbox" id="cmp-param-all" onchange="cmpToggleAllKv('params',this.checked)" aria-label="Toggle all params"></th><th>Key</th><th>Value</th><th style="width:28px"></th></tr></thead>
+            <tbody id="cmp-params-tbody"></tbody>
+          </table>
+          <button class="btn btn-sm btn-ghost" onclick="cmpAddKvRow('params')" style="margin:6px 0 0 8px">+ Add Param</button>
+        </div>
+
+        <!-- Body -->
+        <div id="cmp-pane-body" class="cmp-body-pane" style="display:none;flex:1">
+          <div class="cmp-body-mode-bar">
+            <div class="vmode-wrap">
+              <button class="vmode-btn on" id="cmp-body-raw-btn" onclick="setCmpBodyMode('raw')" aria-pressed="true">Raw</button>
+              <button class="vmode-btn" id="cmp-body-form-btn" onclick="setCmpBodyMode('form')" aria-pressed="false">Form</button>
+            </div>
+            <select class="finput fselect" id="cmp-body-ct" style="font-size:11px;padding:3px 22px 3px 7px;width:auto" onchange="cmpDirty()" aria-label="Content-Type">
+              <option value="application/json">JSON</option>
+              <option value="text/plain">Text</option>
+              <option value="application/x-www-form-urlencoded">Form URL-encoded</option>
+            </select>
+          </div>
+          <textarea class="compose-ta" id="cmp-body-raw-ta" placeholder="Request body…" oninput="cmpDirty()" aria-label="Request body" style="flex:1"></textarea>
+          <div id="cmp-body-form-editor" class="cmp-kv-editor" style="display:none;flex:1">
+            <table class="cmp-kv-table" aria-label="Form fields">
+              <thead><tr><th style="width:24px"></th><th>Key</th><th>Value</th><th style="width:28px"></th></tr></thead>
+              <tbody id="cmp-form-tbody"></tbody>
+            </table>
+            <button class="btn btn-sm btn-ghost" onclick="cmpAddKvRow('form')" style="margin:6px 0 0 8px">+ Add Field</button>
+          </div>
+        </div>
+
+        <details class="cmp-history-details" id="cmp-history-section">
+          <summary class="cmp-history-summary">Send History <span id="cmp-history-count" class="nav-badge" style="margin-left:6px">0</span></summary>
+          <div id="cmp-history-list" class="cmp-history-list"></div>
+        </details>
+      </div>
+
+      <!-- Response panel -->
+      <div id="cmp-response" class="cmp-response" style="display:none">
+        <div class="cmp-res-line">
+          <span id="cmp-res-status"></span>
+          <span id="cmp-res-time" style="font-size:11px;color:var(--text3)"></span>
+          <span id="cmp-res-size" style="font-size:11px;color:var(--text3)"></span>
+          <div style="flex:1"></div>
+          <button class="btn btn-sm btn-ghost" onclick="document.getElementById('cmp-response').style.display='none'" aria-label="Close response">✕</button>
+        </div>
+        <div class="ctab-bar" id="cmp-res-tabs">
+          <div class="ctab on" data-ctab="body" onclick="setCmpResTab(this)">Body</div>
+          <div class="ctab" data-ctab="headers" onclick="setCmpResTab(this)">Headers</div>
+        </div>
+        <div id="cmp-res-body-pane" class="dbody" style="flex:1;overflow-y:auto"></div>
+        <div id="cmp-res-headers-pane" class="dbody" style="flex:1;overflow-y:auto;display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div id="v-settings" class="view tool-panel" style="display:none">
+    <div class="card">
+      <div class="card-hdr"><span class="card-title">Server</span></div>
+      <div class="card-body">
+        <div class="form-row" style="flex-wrap:wrap;gap:14px 24px">
+          <div class="fgroup"><label class="flabel">Port</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-port">—</div></div>
+          <div class="fgroup"><label class="flabel">Bind Host</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-bind">—</div></div>
+          <div class="fgroup"><label class="flabel">MITM</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-mitm">—</div></div>
+          <div class="fgroup"><label class="flabel">Uptime</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-uptime">—</div></div>
+          <div class="fgroup"><label class="flabel">Storage Path</label><div class="finput" style="background:var(--code-bg);color:var(--text3);font-family:var(--mono);font-size:11px" id="cfg-storage">—</div></div>
+          <div class="fgroup"><label class="flabel">Max Sessions</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-max-sessions">—</div></div>
+          <div class="fgroup"><label class="flabel">Timeout</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-timeout">—</div></div>
+          <div class="fgroup"><label class="flabel">WS Inspection</label><div class="finput" style="background:var(--code-bg);color:var(--text3)" id="cfg-ws">—</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr"><span class="card-title">Hot-Reload</span></div>
+      <div class="card-body">
+        <div class="form-row" style="align-items:flex-end;gap:10px">
+          <div class="fgroup" style="max-width:200px">
+            <label class="flabel">Max Body Bytes</label>
+            <input class="finput" id="cfg-max-body" type="number" min="1024" placeholder="10485760">
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="applyMaxBody()">Apply</button>
+        </div>
+        <p class="note" style="margin-top:8px">Other settings require a proxy restart to take effect.</p>
+      </div>
+    </div>
+  </div>
+
 </div><!-- .main -->
 
 <!-- Detail panel -->
@@ -759,7 +1179,7 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     <div class="dtab" data-tab="response" onclick="switchDTab(this)">Res</div>
     <div class="dtab" data-tab="timing" onclick="switchDTab(this)">Timing</div>
     <div class="dtab" id="dtab-frames" data-tab="frames" onclick="switchDTab(this)" style="display:none">Frames</div>
-    <div class="dtab" data-tab="compose" onclick="switchDTab(this)">Compose</div>
+    <div class="dtab" data-tab="compose" onclick="goCompose()" title="Open in Compose workspace">Compose</div>
   </div>
   <div class="dbody" id="dbody">
     <div class="dempty">
@@ -885,6 +1305,19 @@ const G = {
   treeMode: false,
   treeExpanded: new Set(),  // path sub-folder keys (default closed)
   treeClosed: new Set(),    // host keys explicitly collapsed (default open)
+  rwEditIdx: null,          // null=add mode, number=edit mode index
+  headerMaps: [],           // Array<HeaderMapRule>
+  modifications: [],        // Array<ModificationRule>
+  mapLocal: {},             // Record<host, filePath>
+  compose: {
+    tabs: [],
+    activeTabId: null,
+    collections: [],
+    vars: {},
+    _newCollRow: false,
+    _renamingReq: null,
+    _pendingDelete: null,  // {type:'collection'|'request', collId, reqId?}
+  },
 };
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
@@ -940,8 +1373,23 @@ function prettyJson(raw) {
       .replace(/:\s*(null)\b/g, ': <span class="json-null">$1</span>');
   } catch { return esc(raw); }
 }
+function isImageCt(headers) {
+  const ct = Object.entries(headers||{}).find(([k])=>k.toLowerCase()==='content-type');
+  return ct && (ct[1]||'').split(';')[0].trim().startsWith('image/');
+}
+function getCtMime(headers) {
+  const ct = Object.entries(headers||{}).find(([k])=>k.toLowerCase()==='content-type');
+  return ct ? (ct[1]||'').split(';')[0].trim() : '';
+}
 function renderBody(body, headers) {
   if (!body) return '<span style="color:var(--text4);font-size:12px">Empty body</span>';
+  if (isImageCt(headers)) {
+    const mime = getCtMime(headers);
+    return `<div style="padding:12px;text-align:center">
+      <img src="data:${esc(mime)};base64,${body}" style="max-width:100%;max-height:480px;border-radius:4px;border:0.5px solid var(--border)" onerror="this.style.display='none';this.nextSibling.style.display=''">
+      <span style="display:none;color:var(--text4);font-size:12px">Image could not be decoded</span>
+    </div>`;
+  }
   const html = isJsonCt(headers) ? prettyJson(body) : esc(body);
   // Store body ref instead of interpolating into onclick — body may contain ' or <
   // which would split or corrupt the HTML attribute string.
@@ -1034,7 +1482,7 @@ function renderTable() {
       <td>${mbadge(s.request?.method||'?')}</td>
       <td class="trunc" style="color:var(--text3)">${esc(s.request?.host||'')}</td>
       <td class="trunc">${pathDisplay}</td>
-      <td>${pending ? '<span class="pending-spinner"></span>' : sbadge(status)}</td>
+      <td>${pending ? (G.sideFil==='all' ? '<span class="pending-spinner"></span>' : '<span class="sbadge s0">—</span>') : sbadge(status)}</td>
       <td style="color:var(--text3)">${esc(fmtSz(sz))}</td>
       <td><div class="dur-wrap"><span class="dur-txt ${durCls}">${pending ? '<span style="color:var(--text4)">—</span>' : esc(fmtMs(lat))}</span>${lat?`<div class="dur-track"><div class="dur-fill" style="width:${pct}%"></div></div>`:''}</div></td>
       <td>${tlsIcon(tls)}</td>
@@ -1100,16 +1548,29 @@ const CARET = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="c
 let _nodeKeys = [];
 function _nk(key) { const i = _nodeKeys.length; _nodeKeys.push(key); return i; }
 
-function reqRow(s, indent) {
+function reqRow(s, indent, compact=false) {
   const status = s.metrics?.status_code || s.response?.status || null;
   const lat = s.metrics?.latency_ms;
   const sz = s.metrics?.response_size_bytes;
-  const path = getPath(s.request?.uri);
   const sel = G.sel?.id === s.id;
+  let pathLabel = '';
+  if (compact) {
+    const uri = s.request?.uri || '';
+    const q = uri.indexOf('?');
+    if (q >= 0) {
+      const qs = uri.slice(q + 1);
+      const first = qs.split('&')[0];
+      pathLabel = `<span class="tree-req-qs">(${esc(first)}${qs.includes('&') ? '…' : ''})</span>`;
+    }
+  } else {
+    const path = getPath(s.request?.uri);
+    const qIdx = path.indexOf('?');
+    pathLabel = `<span class="tree-req-path" title="${esc(path)}">${qIdx >= 0 ? esc(path.slice(0,qIdx)) + `<span style="color:var(--text4)">${esc(path.slice(qIdx))}</span>` : esc(path)}</span>`;
+  }
   return `<div class="tree-req-row${sel?' sel':''}" onclick="clickRow('${s.id}')">
     <span class="tree-indent" style="width:${indent}px"></span>
     <span class="tree-req-method">${mbadge(s.request?.method||'?')}</span>
-    <span class="tree-req-path" title="${esc(path)}">${esc(path)}</span>
+    ${pathLabel}
     <span class="tree-req-status">${sbadge(status)}</span>
     <span class="tree-req-size">${esc(fmtSz(sz))}</span>
     <span class="tree-req-dur">${esc(fmtMs(lat))}</span>
@@ -1120,24 +1581,32 @@ function renderNodeChildren(node, depth, hostKey, pathSoFar) {
   let html = '';
   const indent = depth * 14 + 10;
 
-  // Direct requests that landed exactly at this path level (e.g. GET /v1 when /v1/sub also exists)
-  for (const s of node.requests) html += reqRow(s, indent);
+  // Direct requests at this path level (e.g. GET /v1 when /v1/sub also exists)
+  for (const s of node.requests) html += reqRow(s, indent, true);
 
   // Children, sorted alphabetically, with path compression applied
   for (const seg of [...node.children.keys()].sort()) {
     const { label, node: child } = compressNode(seg, node.children.get(seg));
     const fullPath = pathSoFar + '/' + label;
+    const cnt = trieCount(child);
+    const hasErr = trieHasErr(child);
 
     if (child.children.size === 0) {
-      // Leaf after compression: no folder wrapper — render request rows inline at this depth
-      for (const s of child.requests) html += reqRow(s, indent);
+      // Leaf folder: always expanded, no toggle caret
+      html += `<div>
+        <div class="tree-folder-hdr" style="cursor:default">
+          <span class="tree-indent" style="width:${indent}px"></span>
+          <span class="tree-seg">${esc(label)}</span>
+          <span class="tree-seg-count">${cnt}</span>
+          ${hasErr?'<span class="tree-err-dot"></span>':''}
+        </div>
+        ${child.requests.map(s => reqRow(s, indent + 14, true)).join('')}
+      </div>`;
     } else {
-      // Has sub-children: collapsible folder with compressed label
+      // Has sub-children: collapsible folder
       const nodeKey = hostKey + '\x00' + fullPath;
       const ki = _nk(nodeKey);
       const open = G.treeExpanded.has(nodeKey);
-      const cnt = trieCount(child);
-      const hasErr = trieHasErr(child);
       html += `<div>
         <div class="tree-folder-hdr" onclick="toggleTreeNode(${ki})">
           <span class="tree-indent" style="width:${indent}px"></span>
@@ -1267,6 +1736,9 @@ async function clickRow(id) {
     const r = await fetch(`/api/sessions/${id}`);
     const d = await r.json();
     G.sel = d.exchange;
+    // Keep G.sessions in sync so the row status reflects the fetched state
+    const si = G.sessions.findIndex(s => s.id === G.sel.id);
+    if (si >= 0) G.sessions[si] = G.sel;
     if (G.treeMode) renderTree(); else renderTable();
     renderDetail();
     const label = (G.sel.request?.method||'') + ' ' + getPath(G.sel.request?.uri);
@@ -1285,13 +1757,517 @@ function switchDTab(el) {
 }
 
 function goCompose() {
-  const tab = document.querySelector('.dtab[data-tab="compose"]');
-  if (tab) switchDTab(tab);
+  // Create a compose tab pre-filled from the selected session, then navigate there
+  if (G.sel) cmpNewTab(G.sel);
+  const navEl=document.querySelector('.nav-item[data-v="compose"]');
+  if (navEl) navItem(navEl);
+}
+
+// ── Compose Workspace ─────────────────────────────────────────────────────────
+function cmpMakeId() { return Math.random().toString(36).slice(2,10); }
+function cmpSaveState() {
+  try {
+    localStorage.setItem('oproxy-compose-collections', JSON.stringify(G.compose.collections));
+    localStorage.setItem('oproxy-compose-vars', JSON.stringify(G.compose.vars));
+  } catch {}
+}
+function cmpSubstVars(str) {
+  return str.replace(/\{\{([^}]+)\}\}/g, (_,k)=>G.compose.vars[k.trim()]??`{{${k}}}`);
+}
+
+function cmpNewTab(fromSession=null) {
+  const tab = {
+    id: cmpMakeId(), name: 'New Request', dirty: false, collectionId: null, savedReqId: null,
+    method: fromSession?.request?.method||'GET',
+    url: (() => {
+      const uri = fromSession?.request?.uri||'';
+      if (!fromSession || /^https?:\/\//i.test(uri)) return uri;
+      const dest = fromSession.request?.headers?.['x-oproxy-destination'] || fromSession.request?.headers?.['X-Oproxy-Destination'] || '';
+      const host = fromSession.request?.host || '';
+      const scheme = dest ? dest.split('://')[0] : (host.endsWith(':443') || G.routes[host]?.startsWith('https') ? 'https' : 'https');
+      return host ? `${scheme}://${host}${uri}` : uri;
+    })(),
+    headers: Object.entries(fromSession?.request?.headers||{}).filter(([k])=>!INTERNAL_HDRS.has(k.toLowerCase())).map(([k,v])=>({enabled:true,key:k,val:v})),
+    params: [],
+    bodyMode: 'raw', bodyRaw: fromSession?.request?.body||'', bodyForm: [],
+    contentType: 'application/json',
+    history: [],
+  };
+  if (fromSession?.request?.uri) tab.name = (fromSession.request.method||'GET') + ' ' + getPath(fromSession.request.uri);
+  G.compose.tabs.push(tab);
+  cmpActivateTab(tab.id);
+}
+function cmpActivateTab(tabId) {
+  G.compose.activeTabId = tabId;
+  renderCmpTabs();
+  renderCmpEditor();
+}
+function cmpCloseTab(tabId) {
+  const idx = G.compose.tabs.findIndex(t=>t.id===tabId);
+  if (idx===-1) return;
+  G.compose.tabs.splice(idx,1);
+  if (G.compose.activeTabId===tabId) {
+    const next = G.compose.tabs[Math.min(idx,G.compose.tabs.length-1)];
+    G.compose.activeTabId = next?.id||null;
+  }
+  renderCmpTabs();
+  renderCmpEditor();
+}
+function cmpDirty() {
+  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId);
+  if (!tab) return;
+  tab.dirty = true;
+  cmpSyncTabFromDom(tab);
+  renderCmpTabs();
+}
+function parseCurl(raw) {
+  // Normalize multi-line cURL (join continuation lines, collapse whitespace)
+  const src = raw.replace(/\\\n/g, ' ').replace(/\r/g, '');
+  // Tokenize respecting single/double quotes
+  const tokens = [];
+  let cur = '', inSq = false, inDq = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === "'" && !inDq) { inSq = !inSq; continue; }
+    if (c === '"' && !inSq) { inDq = !inDq; continue; }
+    if (c === ' ' && !inSq && !inDq) { if (cur) { tokens.push(cur); cur = ''; } continue; }
+    cur += c;
+  }
+  if (cur) tokens.push(cur);
+
+  // Must start with 'curl'
+  if (!tokens.length || tokens[0].toLowerCase() !== 'curl') return null;
+
+  let method = null, url = null, body = null;
+  const headers = [];
+  let i = 1;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t === '-X' || t === '--request') { method = tokens[++i]; i++; continue; }
+    if (t === '-H' || t === '--header') {
+      const hdr = tokens[++i]; i++;
+      const ci = hdr.indexOf(':');
+      if (ci > 0) headers.push({ key: hdr.slice(0, ci).trim(), val: hdr.slice(ci + 1).trim(), enabled: true });
+      continue;
+    }
+    if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary') { body = tokens[++i]; i++; continue; }
+    if (t === '-u' || t === '--user') {
+      const cred = tokens[++i]; i++;
+      headers.push({ key: 'Authorization', val: 'Basic ' + btoa(cred), enabled: true });
+      continue;
+    }
+    // Skip boolean flags
+    if (t.startsWith('-')) { i++; continue; }
+    // Positional URL
+    if (!url && (t.startsWith('http://') || t.startsWith('https://'))) { url = t; i++; continue; }
+    i++;
+  }
+  if (!url) return null;
+  if (!method) method = body ? 'POST' : 'GET';
+  return { method: method.toUpperCase(), url, headers, body: body || '' };
+}
+
+function cmpMaybeImportCurl(e) {
+  const pasted = (e.clipboardData || window.clipboardData).getData('text').trim();
+  if (!pasted.toLowerCase().startsWith('curl ')) return; // let normal paste proceed
+  e.preventDefault();
+  const parsed = parseCurl(pasted);
+  if (!parsed) return;
+  const tab = G.compose.tabs.find(t => t.id === G.compose.activeTabId); if (!tab) return;
+  tab.method  = parsed.method;
+  tab.url     = parsed.url;
+  tab.headers = parsed.headers;
+  tab.bodyRaw = parsed.body;
+  if (parsed.body) {
+    tab.bodyMode = 'raw';
+    const ctHdr = parsed.headers.find(h => h.key.toLowerCase() === 'content-type');
+    if (ctHdr) tab.contentType = ctHdr.val.split(';')[0].trim();
+  }
+  tab.dirty = true;
+  renderCmpEditor();
+  renderCmpTabs();
+  // Switch to body tab if body present
+  if (parsed.body) {
+    const bodyTab = document.querySelector('.ctab[data-ctab="body"]');
+    if (bodyTab) setCmpBodyTab(bodyTab);
+  }
+  toast('Imported from cURL');
+}
+
+function cmpSyncTabFromDom(tab) {
+  tab.method = document.getElementById('cmp-method')?.value||tab.method;
+  tab.url = document.getElementById('cmp-url')?.value||tab.url;
+  tab.bodyMode = document.getElementById('cmp-body-raw-btn')?.getAttribute('aria-pressed')==='true'?'raw':'form';
+  tab.bodyRaw = document.getElementById('cmp-body-raw-ta')?.value||tab.bodyRaw;
+  tab.contentType = document.getElementById('cmp-body-ct')?.value||tab.contentType;
+  // Sync headers
+  const hdrRows=[]; document.querySelectorAll('#cmp-headers-tbody tr').forEach(row=>{
+    const cb=row.querySelector('input[type=checkbox]'),k=row.querySelector('.cmp-kv-input:nth-of-type(1)'),v=row.querySelector('.cmp-kv-input:nth-of-type(2)');
+    if(k&&v) hdrRows.push({enabled:cb?.checked!==false,key:k.value,val:v.value});
+  }); tab.headers=hdrRows;
+  // Sync params
+  const paramRows=[]; document.querySelectorAll('#cmp-params-tbody tr').forEach(row=>{
+    const cb=row.querySelector('input[type=checkbox]'),k=row.querySelector('.cmp-kv-input:nth-of-type(1)'),v=row.querySelector('.cmp-kv-input:nth-of-type(2)');
+    if(k&&v) paramRows.push({enabled:cb?.checked!==false,key:k.value,val:v.value});
+  }); tab.params=paramRows;
+}
+
+function renderCmpTabs() {
+  const strip = document.getElementById('cmp-tab-strip'); if (!strip) return;
+  // Remove old tabs (leave the + button)
+  strip.querySelectorAll('.cmp-tab').forEach(el=>el.remove());
+  const btn = strip.querySelector('.cmp-tab-new');
+  G.compose.tabs.forEach(tab=>{
+    const el=document.createElement('div');
+    el.className='cmp-tab'+(tab.id===G.compose.activeTabId?' active':'');
+    el.setAttribute('role','tab'); el.setAttribute('aria-selected',tab.id===G.compose.activeTabId);
+    el.innerHTML=`<span class="cmp-tab-name">${esc(tab.name)}</span>${tab.dirty?'<span class="cmp-tab-dirty">●</span>':''}<span class="cmp-tab-x" onclick="event.stopPropagation();cmpCloseTab('${tab.id}')" aria-label="Close tab">✕</span>`;
+    el.addEventListener('click', ()=>cmpActivateTab(tab.id));
+    strip.insertBefore(el, btn);
+  });
+}
+function renderCmpEditor() {
+  const noTab=document.getElementById('cmp-no-tab'), editor=document.getElementById('cmp-editor');
+  if (!noTab||!editor) return;
+  const tab=G.compose.tabs.find(t=>t.id===G.compose.activeTabId);
+  if (!tab) { noTab.style.display=''; editor.style.display='none'; document.getElementById('cmp-response').style.display='none'; return; }
+  noTab.style.display='none'; editor.style.display='';
+  document.getElementById('cmp-method').value=tab.method;
+  document.getElementById('cmp-url').value=tab.url;
+  document.getElementById('cmp-body-ct').value=tab.contentType;
+  document.getElementById('cmp-body-raw-ta').value=tab.bodyRaw;
+  renderCmpKvTable('headers', tab.headers, 'cmp-headers-tbody');
+  renderCmpKvTable('params', tab.params, 'cmp-params-tbody');
+  renderCmpKvTable('form', tab.bodyForm, 'cmp-form-tbody');
+  renderCmpHistory(tab);
+  cmpResolveVars();
+}
+function renderCmpKvTable(type, rows, tbodyId) {
+  const tb=document.getElementById(tbodyId); if (!tb) return;
+  tb.innerHTML=(rows||[]).map((r,i)=>`<tr>
+    <td><input type="checkbox" ${r.enabled!==false?'checked':''} onchange="cmpDirty()"></td>
+    <td><input class="cmp-kv-input" placeholder="${type==='headers'?'Header-Name':'key'}" value="${esc(r.key||'')}" oninput="cmpDirty()"></td>
+    <td><input class="cmp-kv-input" placeholder="value" value="${esc(r.val||'')}" oninput="cmpDirty()"></td>
+    <td><button class="cmp-kv-del" onclick="this.closest('tr').remove();cmpDirty()">✕</button></td>
+  </tr>`).join('');
+}
+function renderCmpHistory(tab) {
+  const el=document.getElementById('cmp-history-list'); if (!el) return;
+  const count=document.getElementById('cmp-history-count'); if(count) count.textContent=tab.history.length;
+  if (!tab.history.length) { el.innerHTML='<div style="padding:10px 14px;color:var(--text4);font-size:11px">No history</div>'; return; }
+  el.innerHTML=[...tab.history].reverse().map(h=>`<div class="cmp-history-row" onclick="cmpRestoreHistory(${JSON.stringify(h)})">
+    ${mbadge(h.method)} <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(getPath(h.url))}</span>
+    ${h.status?sbadge(h.status):'<span style="color:var(--text4)">—</span>'}
+    <span style="color:var(--text4)">${fmtMs(h.ms)}</span>
+  </div>`).join('');
+}
+function cmpRestoreHistory(h) {
+  const tab=G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
+  tab.url=h.url; tab.method=h.method;
+  document.getElementById('cmp-url').value=h.url;
+  document.getElementById('cmp-method').value=h.method;
+  cmpResolveVars();
+}
+
+function cmpAddKvRow(type) {
+  const tbodyId=type==='headers'?'cmp-headers-tbody':type==='params'?'cmp-params-tbody':'cmp-form-tbody';
+  const tb=document.getElementById(tbodyId); if (!tb) return;
+  const ph=type==='headers'?'Header-Name':'key';
+  const row=document.createElement('tr');
+  row.innerHTML=`<td><input type="checkbox" checked onchange="cmpDirty()"></td><td><input class="cmp-kv-input" placeholder="${ph}" oninput="cmpDirty()"></td><td><input class="cmp-kv-input" placeholder="value" oninput="cmpDirty()"></td><td><button class="cmp-kv-del" onclick="this.closest('tr').remove();cmpDirty()">✕</button></td>`;
+  tb.appendChild(row); row.querySelector('input:nth-of-type(2)')?.focus();
+}
+function cmpToggleAllKv(type, checked) {
+  const tbodyId=type==='headers'?'cmp-headers-tbody':'cmp-params-tbody';
+  document.querySelectorAll(`#${tbodyId} input[type=checkbox]`).forEach(cb=>cb.checked=checked);
+  cmpDirty();
+}
+function setCmpBodyTab(el) {
+  document.querySelectorAll('.ctab[data-ctab]').forEach(t=>t.classList.remove('on'));
+  el.classList.add('on');
+  const tab=el.dataset.ctab;
+  document.getElementById('cmp-pane-headers').style.display=tab==='headers'?'':'none';
+  document.getElementById('cmp-pane-params').style.display=tab==='params'?'':'none';
+  document.getElementById('cmp-pane-body').style.display=tab==='body'?'':'none';
+}
+function setCmpBodyMode(mode) {
+  const isRaw=mode==='raw';
+  document.getElementById('cmp-body-raw-btn').setAttribute('aria-pressed',isRaw);
+  document.getElementById('cmp-body-form-btn').setAttribute('aria-pressed',!isRaw);
+  document.getElementById('cmp-body-raw-btn').className='vmode-btn'+(isRaw?' on':'');
+  document.getElementById('cmp-body-form-btn').className='vmode-btn'+(!isRaw?' on':'');
+  document.getElementById('cmp-body-raw-ta').style.display=isRaw?'':'none';
+  document.getElementById('cmp-body-form-editor').style.display=isRaw?'none':'';
+}
+function setCmpResTab(el) {
+  document.querySelectorAll('#cmp-res-tabs .ctab').forEach(t=>t.classList.remove('on'));
+  el.classList.add('on');
+  const t=el.dataset.ctab;
+  document.getElementById('cmp-res-body-pane').style.display=t==='body'?'':'none';
+  document.getElementById('cmp-res-headers-pane').style.display=t==='headers'?'':'none';
+}
+function cmpResolveVars() {
+  const raw=document.getElementById('cmp-url')?.value||'';
+  const resolved=cmpSubstVars(raw);
+  const el=document.getElementById('cmp-resolved-url'); if (!el) return;
+  if (resolved!==raw && raw.includes('{{')) {
+    el.style.display=''; el.innerHTML='→ '+raw.replace(/\{\{([^}]+)\}\}/g,(_,k)=>{
+      const v=G.compose.vars[k.trim()];
+      return v?`<span class="var-resolved">${esc(v)}</span>`:`<span style="color:var(--warning)">{{${esc(k)}}}</span>`;
+    });
+  } else { el.style.display='none'; }
+}
+async function sendCmpRequest() {
+  const tab=G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
+  cmpSyncTabFromDom(tab);
+  let url=cmpSubstVars(tab.url);
+  if (!url){toast('URL is required',true);return;}
+  // Append enabled params
+  const ps=tab.params.filter(p=>p.enabled&&p.key);
+  if (ps.length) {
+    const q=new URLSearchParams(ps.map(p=>[p.key,cmpSubstVars(p.val)]));
+    url+=( url.includes('?')?'&':'?')+q.toString();
+  }
+  const headers={};
+  tab.headers.filter(h=>h.enabled&&h.key&&!INTERNAL_HDRS.has(h.key.toLowerCase())).forEach(h=>{ headers[cmpSubstVars(h.key)]=cmpSubstVars(h.val); });
+  const method=tab.method;
+  let body=undefined;
+  if (method!=='GET'&&method!=='HEAD') {
+    if (tab.bodyMode==='form') {
+      const fd=new URLSearchParams(); tab.bodyForm.filter(f=>f.key).forEach(f=>fd.append(cmpSubstVars(f.key),cmpSubstVars(f.val)));
+      body=fd.toString(); if (!headers['Content-Type']) headers['Content-Type']='application/x-www-form-urlencoded';
+    } else if (tab.bodyRaw) {
+      body=tab.bodyRaw; if (!headers['Content-Type']) headers['Content-Type']=tab.contentType;
+    }
+  }
+  const t0=Date.now();
+  document.getElementById('cmp-send-btn').disabled=true;
+  try {
+    const fwdRes=await fetch('/admin/forward',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({method,url,headers,body:body||null})
+    });
+    const ms=Date.now()-t0;
+    if (!fwdRes.ok && fwdRes.status!==502) throw new Error('Forward endpoint error '+fwdRes.status);
+    const data=await fwdRes.json().catch(()=>null);
+    if (!data) throw new Error('Invalid response from forward endpoint');
+    const resHdrs=data.headers||{};
+    const resBody=data.body||'';
+    const resSize=new TextEncoder().encode(resBody).length;
+    // Show response panel
+    const rp=document.getElementById('cmp-response'); rp.style.display='';
+    document.getElementById('cmp-res-status').innerHTML=sbadge(data.status)+` ${esc(HTTP_REASONS[data.status]||'')}`;
+    document.getElementById('cmp-res-time').textContent=fmtMs(ms);
+    document.getElementById('cmp-res-size').textContent=fmtSz(resSize);
+    document.getElementById('cmp-res-body-pane').innerHTML=renderBody(resBody,resHdrs);
+    document.getElementById('cmp-res-headers-pane').innerHTML=Object.entries(resHdrs).map(([k,v])=>`<div class="hdr-row"><span class="hdr-name">${esc(k)}</span><span class="hdr-val">${esc(v)}</span></div>`).join('');
+    // Record in history
+    tab.history.push({ts:Date.now(),method,url:tab.url,status:data.status,ms});
+    tab.dirty=true; renderCmpHistory(tab); renderCmpTabs();
+    toast('Response received');
+  } catch(e) { toast('Request failed — '+e.message,true); }
+  finally { document.getElementById('cmp-send-btn').disabled=false; }
+}
+
+// ── Compose collections & variables ──────────────────────────────────────────
+function renderCmpCollections() {
+  const el=document.getElementById('cmp-collections-list'); if (!el) return;
+  let html='';
+  if (G.compose._newCollRow) {
+    html+=`<div class="cmp-coll-new-row"><input id="cmp-new-coll-input" placeholder="Collection name" onkeydown="cmpCommitNewColl(event)" onblur="cmpCommitNewColl({key:'Blur'})"></div>`;
+  }
+  if (!G.compose.collections.length && !G.compose._newCollRow) {
+    el.innerHTML='<div style="padding:12px;color:var(--text4);font-size:11px">No collections yet.<br>Click + to create one.</div>'; renderCmpVars(); return;
+  }
+  const pd = G.compose._pendingDelete;
+  html+=G.compose.collections.map(coll=>{
+    const collDelPending = pd?.type==='collection' && pd.collId===coll.id;
+    let rows = `<div class="cmp-coll-item">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 3.5h10M3 1.5h6L10 3.5H2L3 1.5zM1 3.5v7h10v-7"/></svg>
+      <span style="flex:1;cursor:pointer" ondblclick="cmpStartRenameCollection('${coll.id}')" onclick="cmpToggleColl('${coll.id}')">${esc(coll.name)}</span>
+      <button class="cmp-kv-del" onclick="event.stopPropagation();cmpAskDelCollection('${coll.id}')" title="Delete collection" style="font-size:11px">✕</button>
+    </div>`;
+    if (collDelPending) {
+      rows += `<div class="cmp-del-confirm">
+        <span>Delete "${esc(coll.name)}" and all its requests?</span>
+        <button class="btn btn-sm btn-danger" onclick="cmpConfirmDelCollection('${coll.id}')">Delete</button>
+        <button class="btn btn-sm btn-ghost" onclick="G.compose._pendingDelete=null;renderCmpCollections()">Cancel</button>
+      </div>`;
+    }
+    if (coll.expanded) {
+      rows += coll.requests.map(req => {
+        const isActive = G.compose.tabs.find(t=>t.savedReqId===req.id);
+        const reqDelPending = pd?.type==='request' && pd.reqId===req.id;
+        if (G.compose._renamingReq===req.id) {
+          return `<div class="cmp-req-rename-row">
+            <input id="cmp-rename-req-input" value="${esc(req.name||getPath(req.url))}" onkeydown="cmpCommitRenameReq(event,'${coll.id}','${req.id}')" onblur="cmpCommitRenameReq({key:'Blur'},'${coll.id}','${req.id}')">
+            <button class="btn btn-sm btn-ghost" onclick="G.compose._renamingReq=null;renderCmpCollections()">✕</button>
+          </div>`;
+        }
+        let reqRow = `<div class="cmp-saved-req${isActive?' active':''}" onclick="cmpLoadRequest('${coll.id}','${req.id}')">
+          <span class="cmp-saved-method" style="color:var(--accent)">${esc(req.method)}</span>
+          <span class="cmp-saved-name">${esc(req.name||getPath(req.url))}</span>
+          <button class="cmp-req-edit-btn" onclick="event.stopPropagation();cmpStartRenameReq('${req.id}')" title="Rename">✎</button>
+          <button class="cmp-kv-del" onclick="event.stopPropagation();cmpAskDelRequest('${coll.id}','${req.id}')" title="Delete" style="font-size:11px">✕</button>
+        </div>`;
+        if (reqDelPending) {
+          reqRow += `<div class="cmp-del-confirm" style="padding-left:22px">
+            <span>Delete "${esc(req.name||getPath(req.url))}"?</span>
+            <button class="btn btn-sm btn-danger" onclick="cmpConfirmDelRequest('${coll.id}','${req.id}')">Delete</button>
+            <button class="btn btn-sm btn-ghost" onclick="G.compose._pendingDelete=null;renderCmpCollections()">Cancel</button>
+          </div>`;
+        }
+        return reqRow;
+      }).join('');
+    }
+    return rows;
+  }).join('');
+  el.innerHTML=html;
+  if (G.compose._newCollRow) { const i=document.getElementById('cmp-new-coll-input'); if(i) i.focus(); }
+  if (G.compose._renamingReq) { const i=document.getElementById('cmp-rename-req-input'); if(i){i.focus();i.select();} }
+  renderCmpVars();
+}
+function renderCmpVars() {
+  const el=document.getElementById('cmp-vars-list'); if (!el) return;
+  el.innerHTML=Object.entries(G.compose.vars).map(([k,v])=>`<div class="cmp-var-row">
+    <input class="cmp-var-key" value="${esc(k)}" placeholder="name" onchange="cmpUpdateVar('${esc(k)}',this.value,document.querySelector('.cmp-var-row:has(input.cmp-var-key[value=\\'${esc(k)}\\']) .cmp-var-val')?.value||'${esc(v)}')">
+    <input class="cmp-var-val" value="${esc(v)}" placeholder="value" oninput="G.compose.vars['${esc(k)}']=this.value;cmpSaveState();">
+    <button class="cmp-kv-del" onclick="cmpDelVar('${esc(k)}')">✕</button>
+  </div>`).join('');
+}
+function cmpAddVar() {
+  const key=prompt('Variable name (used as {{key}} in URLs/values):'); if (!key) return;
+  G.compose.vars[key]=''; cmpSaveState(); renderCmpVars();
+}
+function cmpDelVar(key) { delete G.compose.vars[key]; cmpSaveState(); renderCmpVars(); }
+function cmpUpdateVar(oldKey,newKey,val) {
+  if (oldKey!==newKey) delete G.compose.vars[oldKey];
+  G.compose.vars[newKey]=val; cmpSaveState(); renderCmpVars();
+}
+function cmpNewCollection() {
+  G.compose._newCollRow = true;
+  renderCmpCollections();
+}
+function cmpCommitNewColl(e) {
+  if (e.key !== 'Enter' && e.key !== 'Blur') return;
+  if (!G.compose._newCollRow) return;   // blur re-fires when DOM removes input; ignore
+  const inp = document.getElementById('cmp-new-coll-input'); if (!inp) return;
+  const name = inp.value.trim();
+  G.compose._newCollRow = false;
+  if (name) G.compose.collections.push({id:cmpMakeId(), name, expanded:true, requests:[]});
+  cmpSaveState(); renderCmpCollections();
+  // Re-populate collection select in save form if open
+  cmpPopulateSaveCollSelect();
+}
+function cmpStartRenameCollection(id) {
+  const c = G.compose.collections.find(x=>x.id===id); if (!c) return;
+  const name = prompt('Rename collection:', c.name); // keep simple for collection-level rename
+  if (name && name.trim()) { c.name = name.trim(); cmpSaveState(); renderCmpCollections(); }
+}
+function cmpStartRenameReq(reqId) {
+  G.compose._renamingReq = reqId;
+  G.compose._pendingDelete = null;
+  renderCmpCollections();
+}
+function cmpCommitRenameReq(e, collId, reqId) {
+  if (e.key !== 'Enter' && e.key !== 'Blur') return;
+  if (!G.compose._renamingReq) return;
+  const inp = document.getElementById('cmp-rename-req-input'); if (!inp) return;
+  const name = inp.value.trim();
+  if (name) {
+    const coll = G.compose.collections.find(c=>c.id===collId); if (!coll) return;
+    const req = coll.requests.find(r=>r.id===reqId); if (!req) return;
+    req.name = name;
+    // Also update tab name if open
+    const tab = G.compose.tabs.find(t=>t.savedReqId===reqId);
+    if (tab) { tab.name = name; renderCmpTabs(); }
+    cmpSaveState();
+  }
+  G.compose._renamingReq = null;
+  renderCmpCollections();
+}
+function cmpAskDelCollection(id) {
+  G.compose._pendingDelete = {type:'collection', collId:id};
+  G.compose._renamingReq = null;
+  renderCmpCollections();
+}
+function cmpConfirmDelCollection(id) {
+  G.compose.collections = G.compose.collections.filter(c=>c.id!==id);
+  G.compose._pendingDelete = null;
+  cmpSaveState(); renderCmpCollections();
+}
+function cmpToggleColl(id) {
+  const c=G.compose.collections.find(x=>x.id===id); if(c) c.expanded=!c.expanded; cmpSaveState(); renderCmpCollections();
+}
+function cmpLoadRequest(collId, reqId) {
+  const coll=G.compose.collections.find(c=>c.id===collId); if (!coll) return;
+  const req=coll.requests.find(r=>r.id===reqId); if (!req) return;
+  const existing=G.compose.tabs.find(t=>t.collectionId===collId&&t.savedReqId===reqId);
+  if (existing) { cmpActivateTab(existing.id); return; }
+  const tab={id:cmpMakeId(),name:req.name||getPath(req.url),dirty:false,collectionId:collId,savedReqId:reqId,
+    method:req.method||'GET',url:req.url||'',
+    headers:[...(req.headers||[])],params:[...(req.params||[])],
+    bodyMode:req.bodyMode||'raw',bodyRaw:req.bodyRaw||'',bodyForm:[...(req.bodyForm||[])],
+    contentType:req.contentType||'application/json',history:[]};
+  G.compose.tabs.push(tab); cmpActivateTab(tab.id);
+}
+function cmpAskDelRequest(collId, reqId) {
+  G.compose._pendingDelete = {type:'request', collId, reqId};
+  G.compose._renamingReq = null;
+  renderCmpCollections();
+}
+function cmpConfirmDelRequest(collId, reqId) {
+  const coll = G.compose.collections.find(c=>c.id===collId); if (!coll) return;
+  coll.requests = coll.requests.filter(r=>r.id!==reqId);
+  G.compose._pendingDelete = null;
+  cmpSaveState(); renderCmpCollections();
+}
+function cmpToggleSaveForm() {
+  const form = document.getElementById('cmp-save-form'); if (!form) return;
+  if (form.style.display !== 'none') { form.style.display = 'none'; return; }
+  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
+  cmpSyncTabFromDom(tab);
+  cmpPopulateSaveCollSelect();
+  document.getElementById('cmp-save-name').value = tab.name || '';
+  form.style.display = '';
+  document.getElementById('cmp-save-name').focus();
+  document.getElementById('cmp-save-name').select();
+}
+function cmpPopulateSaveCollSelect() {
+  const sel = document.getElementById('cmp-save-coll'); if (!sel) return;
+  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId);
+  sel.innerHTML = G.compose.collections.map(c =>
+    `<option value="${esc(c.id)}"${tab?.collectionId===c.id?' selected':''}>${esc(c.name)}</option>`
+  ).join('');
+  if (!G.compose.collections.length) sel.innerHTML = '<option disabled>No collections</option>';
+}
+function cmpConfirmSave() {
+  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
+  cmpSyncTabFromDom(tab);
+  const name = (document.getElementById('cmp-save-name')?.value||'').trim() || tab.url || 'Untitled';
+  const collId = document.getElementById('cmp-save-coll')?.value;
+  if (!collId) { toast('Create a collection first', true); return; }
+  const coll = G.compose.collections.find(c=>c.id===collId);
+  if (!coll) { toast('Collection not found', true); return; }
+  const reqData = {name, method:tab.method, url:tab.url, headers:tab.headers, params:tab.params, bodyMode:tab.bodyMode, bodyRaw:tab.bodyRaw, bodyForm:tab.bodyForm, contentType:tab.contentType};
+  if (tab.collectionId===collId && tab.savedReqId) {
+    const idx = coll.requests.findIndex(r=>r.id===tab.savedReqId);
+    if (idx>=0) { coll.requests[idx]={...reqData, id:tab.savedReqId}; }
+    else { const rid=cmpMakeId(); coll.requests.push({...reqData, id:rid}); tab.savedReqId=rid; }
+  } else {
+    const rid = cmpMakeId();
+    coll.requests.push({...reqData, id:rid});
+    tab.collectionId=coll.id; tab.savedReqId=rid;
+  }
+  tab.name=name; tab.dirty=false;
+  document.getElementById('cmp-save-form').style.display='none';
+  cmpSaveState(); renderCmpTabs(); renderCmpCollections(); toast('Saved to '+coll.name);
 }
 
 function renderDetail() {
   const body = document.getElementById('dbody');
-  if (!G.sel && G.dtab !== 'compose') {
+  if (!G.sel) {
     body.innerHTML=`<div class="dempty"><svg width="30" height="30" viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.25"><rect x="3" y="3" width="24" height="24" rx="4"/><path d="M9 11h12M9 15h12M9 19h8"/></svg><span>Select a request to inspect</span></div>`;
     return;
   }
@@ -1299,7 +2275,7 @@ function renderDetail() {
   const hasFrames = G.sel?.ws_frames?.length > 0;
   if (framesTab) framesTab.style.display = hasFrames ? '' : 'none';
   if (!hasFrames && G.dtab === 'frames') G.dtab = 'overview';
-  const fn = {overview:renderOverview,request:renderRequest,response:renderResponse,timing:renderTiming,frames:renderFrames,compose:renderCompose}[G.dtab]||renderOverview;
+  const fn = {overview:renderOverview,request:renderRequest,response:renderResponse,timing:renderTiming,frames:renderFrames}[G.dtab]||renderOverview;
   body.innerHTML = fn();
 }
 
@@ -1337,7 +2313,7 @@ function renderOverview() {
     </div>`;
 }
 
-const INTERNAL_HDRS = new Set(['x-oproxy-session-id', 'x-proxy-destination']);
+const INTERNAL_HDRS = new Set(['x-oproxy-session-id', 'x-oproxy-destination', 'x-oproxy-map-local-file']);
 function renderHeaders(hdrs) {
   const entries = Object.entries(hdrs||{}).filter(([k]) => !INTERNAL_HDRS.has(k.toLowerCase()));
   if (!entries.length) return '<span style="color:var(--text4);font-size:12px">No headers</span>';
@@ -1467,7 +2443,7 @@ function renderCompose() {
         <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.5 6H1.5M7.5 3l3 3-3 3"/></svg>
         Send
       </button>
-      <button class="btn btn-ghost btn-sm" onclick="copyCurl()">Copy as cURL</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyCurlCompose()">Copy as cURL</button>
     </div>
     <p class="note" style="font-size:11px">Sends the request through your configured proxy. The response will appear in the traffic table.</p>
   </div>`;
@@ -1516,6 +2492,43 @@ function copyCurl() {
   if (bodyLine) parts.push(bodyLine);
   parts.push(`  '${s.request.uri}'`);
   navigator.clipboard.writeText(parts.join('\n')).then(()=>toast('Copied as cURL'));
+}
+
+function copyCurlCompose() {
+  const tab = G.compose.tabs.find(t => t.id === G.compose.activeTabId);
+  if (!tab) { toast('No active Compose tab', true); return; }
+  cmpSyncTabFromDom(tab);
+  let url = cmpSubstVars(tab.url);
+  if (!url) { toast('No URL in Compose tab', true); return; }
+  const ps = tab.params.filter(p => p.enabled && p.key);
+  if (ps.length) {
+    const q = new URLSearchParams(ps.map(p => [p.key, cmpSubstVars(p.val)]));
+    url += (url.includes('?') ? '&' : '?') + q.toString();
+  }
+  const hdrs = {};
+  tab.headers.filter(h => h.enabled && h.key).forEach(h => { hdrs[cmpSubstVars(h.key)] = cmpSubstVars(h.val); });
+  const method = tab.method;
+  let body = '';
+  if (method !== 'GET' && method !== 'HEAD') {
+    if (tab.bodyMode === 'form') {
+      const fd = new URLSearchParams();
+      tab.bodyForm.filter(f => f.key).forEach(f => fd.append(cmpSubstVars(f.key), cmpSubstVars(f.val)));
+      body = fd.toString();
+      if (!hdrs['Content-Type']) hdrs['Content-Type'] = 'application/x-www-form-urlencoded';
+    } else if (tab.bodyRaw) {
+      body = tab.bodyRaw;
+      if (!hdrs['Content-Type']) hdrs['Content-Type'] = tab.contentType;
+    }
+  }
+  const hdrLines = Object.entries(hdrs)
+    .map(([k,v]) => `  -H '${k}: ${v.replace(/'/g,"'\\''")}' \\`)
+    .join('\n');
+  const bodyLine = body ? `  -d '${body.replace(/'/g,"'\\''")}' \\` : '';
+  const parts = [`curl -X ${method} \\`];
+  if (hdrLines) parts.push(hdrLines);
+  if (bodyLine) parts.push(bodyLine);
+  parts.push(`  '${url}'`);
+  navigator.clipboard.writeText(parts.join('\n')).then(() => toast('Copied as cURL'));
 }
 
 // ── Sort ──────────────────────────────────────────────────────────────────────
@@ -1705,24 +2718,46 @@ async function handleImportFile(input) {
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
+function syncChipBar() {
+  const f = G.sideFil;
+  // Pending chip: only useful in 'all' tab
+  const pchip = document.getElementById('chip-pending');
+  const psep  = document.getElementById('chip-sep-pending');
+  const showPending = f === 'all';
+  if (pchip) pchip.style.display = showPending ? '' : 'none';
+  if (psep)  psep.style.display  = showPending ? '' : 'none';
+  // Status chips: irrelevant in 'pending' tab (nothing has a status code)
+  const showStatus = f !== 'pending';
+  document.querySelectorAll('.chip[data-sc]:not(#chip-pending)').forEach(c => {
+    c.style.display = showStatus ? '' : 'none';
+  });
+}
 function navItem(el) {
   document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
   el.classList.add('active');
   G.sideFil = el.dataset.f||'all';
+  syncChipBar();
   nav(el.dataset.v||'traffic');
+  // Re-render immediately so filter applies to already-loaded sessions
+  // (fetchSessions skips renderTable when there are no new sessions since lastTs)
+  if ((el.dataset.v||'traffic')==='traffic' && G.sessions.length) {
+    if (G.treeMode) renderTree(); else renderTable();
+  }
 }
 function nav(v) {
   document.querySelectorAll('.view').forEach(e=>e.style.display='none');
   const el = document.getElementById('v-'+v);
-  if (el) el.style.display = v==='traffic'?'flex':'block';
+  if (el) el.style.display = (v==='traffic'||v==='compose')?'flex':'block';
   document.getElementById('detail').className = 'detail'+(v==='traffic'?'':' hide');
   G.view = v;
   if (v==='traffic')      fetchSessions();
-  else if (v==='routes')      fetchRoutes();
-  else if (v==='dns')         fetchDns();
-  else if (v==='rewrites')    fetchRewrites();
-  else if (v==='throttle')    fetchThrottle();
+  else if (v==='mapping') { fetchRoutes(); fetchHeaderMaps(); }
+  else if (v==='dns')     fetchDns();
+  else if (v==='rewrites') { fetchRewrites(); fetchModifications(); }
+  else if (v==='throttle') fetchThrottle();
   else if (v==='breakpoints') fetchBreakpoints();
+  else if (v==='compose') renderCmpCollections();
+  else if (v==='settings') fetchConfig();
 }
 
 // ── Record ────────────────────────────────────────────────────────────────────
@@ -1857,29 +2892,76 @@ function descCriteria(c) {
 function descAction(a) {
   if (!a) return '—';
   const [k,v]=Object.entries(a)[0]||[];
-  if (k==='ReplaceBody') return `Replace body /${v?.pattern}/ → ${v?.replacement}`;
+  if (k==='ReplaceBody') return `Replace /${v?.pattern}/→${v?.replacement}`;
   if (k==='AddHeader') return `Add ${v?.name}: ${v?.value}`;
-  if (k==='RemoveHeader') return `Remove header ${v?.name}`;
-  if (k==='ReplaceHeader') return `Replace header ${v?.name} /${v?.pattern}/→${v?.replacement}`;
+  if (k==='RemoveHeader') return `Remove ${v?.name}`;
+  if (k==='ReplaceHeader') return `Replace hdr ${v?.name}`;
   return k;
 }
 function renderRewrites() {
   const tb=document.getElementById('rw-tbody');
-  if (!G.rewrites.length) { tb.innerHTML=`<tr><td colspan="4" style="text-align:center;color:var(--text4);padding:20px">No rewrite rules</td></tr>`; return; }
+  if (!G.rewrites.length) { tb.innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--text4);padding:20px">No rewrite rules — click + Add Rule</td></tr>`; return; }
+  const n=G.rewrites.length;
   tb.innerHTML=G.rewrites.map((r,i)=>`<tr>
     <td>${esc(r.name)}</td>
-    <td class="mono" style="color:var(--text3)">${esc(descCriteria(r.criteria))}</td>
-    <td style="color:var(--text3)">${esc(descAction(r.action))}</td>
-    <td><button class="btn btn-sm btn-danger" onclick="delRw(${i})">✕</button></td>
+    <td class="mono" style="color:var(--text3);font-size:11px">${esc(descCriteria(r.criteria))}</td>
+    <td style="color:var(--text3);font-size:11px">${esc(r.scope||'Both')}</td>
+    <td style="color:var(--text3);font-size:11px">${esc(descAction(r.action))}</td>
+    <td>
+      <div class="toggle-wrap" onclick="toggleRwEnabled(${i})" role="switch" aria-checked="${!!r.enabled}" aria-label="Enable rule ${esc(r.name)}">
+        <div class="toggle${r.enabled!==false?' on':''}"></div>
+      </div>
+    </td>
+    <td>
+      <div class="order-btns">
+        <div class="order-btn${i===0?' disabled':''}" onclick="${i>0?`moveRw(${i},-1)`:''}" role="button" aria-label="Move up" aria-disabled="${i===0}">
+          <svg width="8" height="6" viewBox="0 0 8 6"><path d="M1 5l3-4 3 4" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        </div>
+        <div class="order-btn${i===n-1?' disabled':''}" onclick="${i<n-1?`moveRw(${i},1)`:''}" role="button" aria-label="Move down" aria-disabled="${i===n-1}">
+          <svg width="8" height="6" viewBox="0 0 8 6"><path d="M1 1l3 4 3-4" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        </div>
+      </div>
+    </td>
+    <td style="display:flex;gap:4px">
+      <button class="btn btn-sm btn-ghost" onclick="editRw(${i})" aria-label="Edit rule">Edit</button>
+      <button class="btn btn-sm btn-danger" onclick="delRw(${i})" aria-label="Delete rule">✕</button>
+    </td>
   </tr>`).join('');
 }
 function toggleRwForm() {
-  const f=document.getElementById('rw-form'); f.style.display=f.style.display?'':'none';
+  G.rwEditIdx=null;
+  const f=document.getElementById('rw-form');
+  const open=!f.style.display;
+  if (open) { f.style.display='none'; } else {
+    // Reset form for add mode
+    document.getElementById('rw-name').value='';
+    document.getElementById('rw-crit-v').value='';
+    document.getElementById('rw-crit-sample').value='';
+    document.getElementById('rw-crit-status').className='regex-status';
+    document.getElementById('rw-crit-status').textContent='';
+    document.getElementById('rw-act-pat').value='';
+    document.getElementById('rw-act-rep').value='';
+    document.getElementById('rw-act-hdr').value='';
+    document.getElementById('rw-hdr-name').value='';
+    document.getElementById('rw-scope').value='Both';
+    document.getElementById('rw-crit').value='Path';
+    document.getElementById('rw-action').value='ReplaceBody';
+    document.getElementById('rw-save-btn').textContent='Save';
+    onRwCritChange(); onRwActionChange();
+    f.style.display='';
+    document.getElementById('rw-name').focus();
+  }
+}
+function cancelRwForm() {
+  G.rwEditIdx=null;
+  document.getElementById('rw-form').style.display='none';
 }
 function onRwCritChange() {
-  const v=document.getElementById('rw-crit').value, isHdr=v==='Header';
-  document.getElementById('rw-crit-a').querySelector('label').textContent=isHdr?'Header value pattern':v+' pattern';
+  const v=document.getElementById('rw-crit').value, isHdr=v==='Header', isHost=v==='Host';
+  document.getElementById('rw-crit-a').querySelector('label').textContent=
+    isHdr?'Header value pattern':isHost?'Hostname (contains)':v+' pattern (regex)';
   document.getElementById('rw-hdr-name-wrap').style.display=isHdr?'':'none';
+  document.getElementById('rw-crit-tester').style.display=isHost?'none':'';
 }
 function onRwActionChange() {
   const v=document.getElementById('rw-action').value;
@@ -1891,25 +2973,84 @@ function onRwActionChange() {
   if (v==='ReplaceBody') document.getElementById('rw-act-pat').placeholder='regex pattern';
   else if (v==='AddHeader') document.getElementById('rw-act-pat').placeholder='header value';
 }
+function onRegexTest(patId, sampleId, statusId) {
+  const pattern=document.getElementById(patId)?.value||'';
+  const sample=document.getElementById(sampleId)?.value||'';
+  const el=document.getElementById(statusId); if (!el) return;
+  if (!pattern) { el.className='regex-status'; el.textContent=''; return; }
+  try {
+    const re=new RegExp(pattern);
+    if (!sample) { el.className='regex-status no-match'; el.textContent='Enter sample to test'; return; }
+    if (re.test(sample)) { el.className='regex-status match'; el.textContent='✓ Match'; }
+    else { el.className='regex-status no-match'; el.textContent='No match'; }
+  } catch(e) { el.className='regex-status error'; el.textContent='Invalid regex'; }
+}
 function buildRwRule() {
   const crit=document.getElementById('rw-crit').value, critVal=document.getElementById('rw-crit-v').value.trim();
   const act=document.getElementById('rw-action').value, pat=document.getElementById('rw-act-pat').value.trim();
   const rep=document.getElementById('rw-act-rep').value, hdrName=document.getElementById('rw-act-hdr').value.trim();
   const critHdrName=document.getElementById('rw-hdr-name').value.trim();
+  const scope=document.getElementById('rw-scope').value;
   let criteria = crit==='Header' ? {Header:{name:critHdrName,value:critVal}} : {[crit]:critVal};
   let action;
   if (act==='ReplaceBody') action={ReplaceBody:{pattern:pat,replacement:rep}};
   else if (act==='AddHeader') action={AddHeader:{name:hdrName,value:pat}};
   else if (act==='RemoveHeader') action={RemoveHeader:{name:hdrName}};
   else if (act==='ReplaceHeader') action={ReplaceHeader:{name:hdrName,pattern:pat,replacement:rep}};
-  return {name:document.getElementById('rw-name').value.trim()||'Rule '+(G.rewrites.length+1),criteria,action,enabled:true};
+  return {name:document.getElementById('rw-name').value.trim()||'Rule '+(G.rewrites.length+1),criteria,action,scope,enabled:true};
+}
+function editRw(i) {
+  G.rwEditIdx=i;
+  const r=G.rewrites[i];
+  const f=document.getElementById('rw-form'); f.style.display='';
+  document.getElementById('rw-name').value=r.name||'';
+  document.getElementById('rw-scope').value=r.scope||'Both';
+  const crit=Object.keys(r.criteria)[0];
+  document.getElementById('rw-crit').value=crit;
+  if (crit==='Header') {
+    document.getElementById('rw-hdr-name').value=r.criteria.Header.name||'';
+    document.getElementById('rw-crit-v').value=r.criteria.Header.value||'';
+  } else {
+    document.getElementById('rw-crit-v').value=r.criteria[crit]||'';
+  }
+  const act=Object.keys(r.action)[0];
+  document.getElementById('rw-action').value=act;
+  if (act==='ReplaceBody')   { document.getElementById('rw-act-pat').value=r.action.ReplaceBody.pattern||''; document.getElementById('rw-act-rep').value=r.action.ReplaceBody.replacement||''; }
+  if (act==='AddHeader')     { document.getElementById('rw-act-hdr').value=r.action.AddHeader.name||''; document.getElementById('rw-act-pat').value=r.action.AddHeader.value||''; }
+  if (act==='RemoveHeader')  { document.getElementById('rw-act-hdr').value=r.action.RemoveHeader.name||''; }
+  if (act==='ReplaceHeader') { document.getElementById('rw-act-hdr').value=r.action.ReplaceHeader.name||''; document.getElementById('rw-act-pat').value=r.action.ReplaceHeader.pattern||''; document.getElementById('rw-act-rep').value=r.action.ReplaceHeader.replacement||''; }
+  document.getElementById('rw-save-btn').textContent='Update';
+  onRwCritChange(); onRwActionChange();
+  document.getElementById('rw-name').focus();
+}
+async function toggleRwEnabled(i) {
+  const rule={...G.rewrites[i], enabled:!G.rewrites[i].enabled};
+  try {
+    await fetch(`/admin/rewrites/${i}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
+    G.rewrites[i]=rule; renderRewrites();
+  } catch { toast('Failed to toggle rule',true); }
+}
+async function moveRw(i,dir) {
+  const rules=[...G.rewrites], j=i+dir;
+  if (j<0||j>=rules.length) return;
+  [rules[i],rules[j]]=[rules[j],rules[i]];
+  try {
+    await fetch('/admin/rewrites/replace-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rules)});
+    G.rewrites=rules; renderRewrites();
+  } catch { toast('Failed to reorder',true); }
 }
 async function saveRw() {
   const rule=buildRwRule();
   if (!rule.criteria||!rule.action){toast('Fill in all fields',true);return;}
   try {
-    await fetch('/admin/rewrites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
-    G.rewrites.push(rule); renderRewrites(); toggleRwForm(); toast('Rule added');
+    if (G.rwEditIdx!==null) {
+      await fetch(`/admin/rewrites/${G.rwEditIdx}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
+      G.rewrites[G.rwEditIdx]=rule; G.rwEditIdx=null; toast('Rule updated');
+    } else {
+      await fetch('/admin/rewrites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
+      G.rewrites.push(rule); toast('Rule added');
+    }
+    renderRewrites(); cancelRwForm();
   } catch { toast('Failed to save rule',true); }
 }
 async function delRw(i) {
@@ -1917,6 +3058,183 @@ async function delRw(i) {
     await fetch(`/admin/rewrites/${i}`,{method:'DELETE'});
     G.rewrites.splice(i,1); renderRewrites(); toast('Rule removed');
   } catch { toast('Failed to remove rule',true); }
+}
+
+// ── Header Map ────────────────────────────────────────────────────────────────
+function setMappingTab(el) {
+  document.querySelectorAll('.chip[data-mv]').forEach(c=>c.classList.remove('on'));
+  el.classList.add('on');
+  const mv=el.dataset.mv;
+  document.getElementById('mv-host-remap').style.display=mv==='host-remap'?'':'none';
+  document.getElementById('mv-header-map').style.display=mv==='header-map'?'':'none';
+  document.getElementById('mv-map-local').style.display=mv==='map-local'?'':'none';
+  if (mv==='map-local') fetchMapLocal();
+}
+function toggleHdrMapForm() {
+  const f=document.getElementById('hdrmap-form'); f.style.display=f.style.display?'':'none';
+}
+function onHmScopeChange() {
+  const v=document.getElementById('hm-scope').value;
+  const wrap=document.getElementById('hm-match-wrap');
+  wrap.style.display=v==='all'?'none':'';
+  document.getElementById('hm-match-label').textContent=v==='host'?'Host pattern':'Path pattern (regex)';
+}
+function onHmActionChange() {
+  const v=document.getElementById('hm-action').value;
+  document.getElementById('hm-value-wrap').style.display=v==='Remove'?'none':'';
+}
+async function fetchHeaderMaps() {
+  try {
+    const r=await fetch('/admin/header-maps');
+    if (!r.ok) { G.headerMaps=[]; return; }
+    G.headerMaps=await r.json(); renderHdrMap();
+  } catch { G.headerMaps=[]; }
+}
+function renderHdrMap() {
+  const tb=document.getElementById('hdrmap-tbody');
+  if (!tb) return;
+  if (!G.headerMaps.length) { tb.innerHTML=`<tr><td colspan="6" style="text-align:center;color:var(--text4);padding:20px">No header map rules</td></tr>`; return; }
+  tb.innerHTML=G.headerMaps.map(r=>`<tr>
+    <td><span class="hdrmap-scope-chip">${esc(r.scope==='all'?'All':r.scope==='host'?'Host':'Path')}</span>${r.match?` <span style="font-size:11px;color:var(--text3)">${esc(r.match)}</span>`:''}</td>
+    <td style="font-size:11px;font-weight:600;color:var(--${r.action==='Remove'?'danger':r.action==='Append'?'warning':'accent'})">${esc(r.action)}</td>
+    <td class="mono" style="font-size:11px">${esc(r.name)}</td>
+    <td style="font-size:11px;color:var(--text3)">${esc(r.value||'—')}</td>
+    <td><div class="toggle-wrap" onclick="toggleHdrMapEnabled('${esc(r.id)}')" role="switch" aria-checked="${!!r.enabled}"><div class="toggle${r.enabled!==false?' on':''}"></div></div></td>
+    <td><button class="btn btn-sm btn-danger" onclick="delHdrMapRule('${esc(r.id)}')">✕</button></td>
+  </tr>`).join('');
+}
+async function saveHdrMapRule() {
+  const scope=document.getElementById('hm-scope').value;
+  const match=document.getElementById('hm-match').value.trim();
+  const action=document.getElementById('hm-action').value;
+  const name=document.getElementById('hm-name').value.trim();
+  const value=document.getElementById('hm-value').value.trim();
+  if (!name){toast('Header name required',true);return;}
+  const rule={id:'',scope,match,action,name,value,enabled:true};
+  try {
+    const r=await fetch('/admin/header-maps',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
+    const saved=await r.json(); G.headerMaps.push(saved); renderHdrMap();
+    document.getElementById('hm-name').value=''; document.getElementById('hm-value').value='';
+    toggleHdrMapForm(); toast('Header map rule added');
+  } catch { toast('Failed to save rule',true); }
+}
+async function delHdrMapRule(id) {
+  try {
+    await fetch(`/admin/header-maps/${id}`,{method:'DELETE'});
+    G.headerMaps=G.headerMaps.filter(r=>r.id!==id); renderHdrMap(); toast('Rule removed');
+  } catch { toast('Failed to remove rule',true); }
+}
+async function toggleHdrMapEnabled(id) {
+  const r=G.headerMaps.find(x=>x.id===id); if (!r) return;
+  const updated={...r,enabled:!r.enabled};
+  try {
+    await fetch(`/admin/header-maps/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(updated)});
+    Object.assign(r,updated); renderHdrMap();
+  } catch { toast('Failed to toggle',true); }
+}
+
+// ── Modifications ─────────────────────────────────────────────────────────────
+async function fetchModifications() {
+  try {
+    const r = await fetch('/admin/modifications');
+    G.modifications = await r.json();
+    renderModifications();
+  } catch { toast('Failed to load modifications', true); }
+}
+function toggleModForm() {
+  const f = document.getElementById('mod-form');
+  const btn = document.getElementById('mod-add-btn');
+  const open = f.style.display === 'none' || f.style.display === '';
+  if (open) {
+    f.style.display = 'block'; btn.textContent = '✕ Cancel';
+    document.getElementById('mod-pattern').value = '';
+    document.getElementById('mod-body').value = '';
+    document.getElementById('mod-hdrs-tbody').innerHTML = '';
+    modAddHdrRow();
+  } else { f.style.display = 'none'; btn.textContent = '+ Add Rule'; }
+}
+function modAddHdrRow() {
+  const tb = document.getElementById('mod-hdrs-tbody');
+  const i = tb.rows.length;
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><input class="cmp-kv-input" id="mod-hk-${i}" placeholder="Header-Name" style="width:100%"></td><td><input class="cmp-kv-input" id="mod-hv-${i}" placeholder="value" style="width:100%"></td><td><button class="cmp-kv-del" onclick="this.closest('tr').remove()">✕</button></td>`;
+  tb.appendChild(tr);
+}
+async function saveMod() {
+  const pattern = document.getElementById('mod-pattern').value.trim();
+  if (!pattern) { toast('URI pattern is required', true); return; }
+  const header_replacements = {};
+  document.getElementById('mod-hdrs-tbody').querySelectorAll('tr').forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    if (inputs.length >= 2) { const k = inputs[0].value.trim(), v = inputs[1].value.trim(); if (k) header_replacements[k] = v; }
+  });
+  const body = document.getElementById('mod-body').value.trim();
+  const rule = { request_uri_pattern: pattern, header_replacements, body_replacement: body || null };
+  try {
+    await fetch('/admin/modifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rule) });
+    toggleModForm();
+    toast('Modification rule added');
+    await fetchModifications();
+  } catch { toast('Failed to save rule', true); }
+}
+async function delMod(i) {
+  try {
+    await fetch(`/admin/modifications/${i}`, { method: 'DELETE' });
+    toast('Rule removed');
+    await fetchModifications();
+  } catch { toast('Failed to remove rule', true); }
+}
+function renderModifications() {
+  const tb = document.getElementById('mod-tbody'); if (!tb) return;
+  if (!G.modifications.length) {
+    tb.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--text4);padding:20px">No modification rules — click + Add Rule</td></tr>`;
+    return;
+  }
+  tb.innerHTML = G.modifications.map((r, i) => {
+    const hdrs = Object.entries(r.header_replacements || {}).map(([k, v]) => `<span class="hdrmap-scope-chip" style="margin-right:3px">${esc(k)}: ${esc(v)}</span>`).join('');
+    const body = r.body_replacement ? `<span style="font-family:var(--mono);font-size:10px;color:var(--text3)">${esc(r.body_replacement.slice(0, 40))}${r.body_replacement.length > 40 ? '…' : ''}</span>` : `<span style="color:var(--text4)">—</span>`;
+    return `<tr>
+      <td class="trunc" style="font-family:var(--mono);font-size:11px">${esc(r.request_uri_pattern)}</td>
+      <td style="max-width:240px">${hdrs || '<span style="color:var(--text4)">—</span>'}</td>
+      <td>${body}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="delMod(${i})">Delete</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function fetchConfig() {
+  try {
+    const [cfgR, hlthR] = await Promise.all([fetch('/admin/config'), fetch('/health')]);
+    const cfg = await cfgR.json();
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    set('cfg-port', cfg.port);
+    set('cfg-bind', cfg.bind_host);
+    set('cfg-mitm', cfg.mitm_enabled ? 'Enabled' : 'Disabled');
+    set('cfg-uptime', fmtDuration(cfg.uptime_secs));
+    set('cfg-storage', cfg.storage_path);
+    set('cfg-max-sessions', cfg.max_sessions.toLocaleString());
+    set('cfg-timeout', cfg.timeout_secs + 's');
+    set('cfg-ws', cfg.inspect_ws_frames ? 'On' : 'Off');
+    const inp = document.getElementById('cfg-max-body');
+    if (inp && !inp._dirty) inp.value = cfg.max_body_bytes;
+  } catch { toast('Failed to load config', true); }
+}
+function fmtDuration(secs) {
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
+  return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+}
+async function applyMaxBody() {
+  const v = parseInt(document.getElementById('cfg-max-body').value);
+  if (!v || v < 1024) { toast('Must be ≥ 1024 bytes', true); return; }
+  try {
+    const r = await fetch('/admin/config/reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max_body_bytes: v }) });
+    const d = await r.json();
+    toast('max_body_bytes → ' + d.max_body_bytes.toLocaleString());
+    document.getElementById('cfg-max-body')._dirty = false;
+    await fetchConfig();
+  } catch { toast('Failed to apply', true); }
 }
 
 // ── Throttle ──────────────────────────────────────────────────────────────────
@@ -1953,6 +3271,45 @@ async function saveThrottle() {
   } catch { toast('Failed to apply throttle',true); }
 }
 
+// ── Map Local ─────────────────────────────────────────────────────────────────
+async function fetchMapLocal() {
+  try {
+    const r = await fetch('/admin/map-local');
+    G.mapLocal = await r.json();
+    renderMapLocal();
+  } catch { toast('Failed to load map-local rules', true); }
+}
+function renderMapLocal() {
+  const tb = document.getElementById('ml-tbody');
+  if (!tb) return;
+  const entries = Object.entries(G.mapLocal || {});
+  if (!entries.length) { tb.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--text4);padding:14px">No rules</td></tr>`; return; }
+  tb.innerHTML = entries.map(([host, fp]) => `<tr>
+    <td><code>${esc(host)}</code></td>
+    <td><code style="color:var(--text3)">${esc(fp)}</code></td>
+    <td><button class="btn btn-sm btn-danger" onclick="delMapLocal('${esc(host)}')">✕</button></td>
+  </tr>`).join('');
+}
+async function addMapLocal() {
+  const host = document.getElementById('ml-host').value.trim();
+  const fp   = document.getElementById('ml-path').value.trim();
+  if (!host || !fp) { toast('Fill host and file path', true); return; }
+  try {
+    await fetch('/admin/map-local', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({host, file_path: fp})});
+    document.getElementById('ml-host').value = '';
+    document.getElementById('ml-path').value = '';
+    await fetchMapLocal();
+    toast('Rule added');
+  } catch { toast('Failed to add rule', true); }
+}
+async function delMapLocal(host) {
+  try {
+    await fetch(`/admin/map-local/${encodeURIComponent(host)}`, {method:'DELETE'});
+    await fetchMapLocal();
+    toast('Rule removed');
+  } catch { toast('Failed to remove rule', true); }
+}
+
 // ── Breakpoints ───────────────────────────────────────────────────────────────
 async function fetchBreakpoints() {
   try {
@@ -1977,26 +3334,73 @@ function renderBpRules() {
 function renderBpPending() {
   const el = document.getElementById('bp-pending-list');
   if (!G.bpPending.length) { el.innerHTML='<div class="card-body"><p class="note">No breakpoints are paused right now.</p></div>'; return; }
-  el.innerHTML = G.bpPending.map(bp=>{
-    const isReq=!!bp.context.Request, ctx=isReq?bp.context.Request:bp.context.Response;
-    const label=isReq?`${ctx.method} ${ctx.uri}`:`${ctx.status} ${ctx.request_uri}`;
-    return `<div style="padding:13px 15px;border-bottom:0.5px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <span class="mbadge ${isReq?'mGET':'mPOST'}">${isReq?'REQ':'RES'}</span>
-        <span class="mono" style="font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span>
+  el.innerHTML = G.bpPending.map(bp=>renderBpItem(bp)).join('');
+}
+function renderBpItem(bp) {
+  const isReq=!!bp.context.Request, ctx=isReq?bp.context.Request:bp.context.Response;
+  const label=isReq?`${ctx.method} ${ctx.uri}`:`${ctx.status} ${ctx.request_uri||ctx.uri||''}`;
+  const hdrs=ctx.headers||{};
+  const hdrRows=Object.entries(hdrs).map(([k,v],i)=>`<tr>
+    <td><input class="cmp-kv-input" id="bpe-hk-${bp.id}-${i}" value="${esc(k)}" placeholder="Header-Name" style="width:100%"></td>
+    <td><input class="cmp-kv-input" id="bpe-hv-${bp.id}-${i}" value="${esc(v)}" placeholder="value" style="width:100%"></td>
+    <td><button class="cmp-kv-del" onclick="this.closest('tr').remove()">✕</button></td>
+  </tr>`).join('');
+  const methodOpts=['GET','POST','PUT','DELETE','PATCH','HEAD','OPTIONS'].map(m=>`<option${m===(ctx.method||'')?'selected':''}>${m}</option>`).join('');
+  return `<div style="border-bottom:0.5px solid var(--border)">
+    <div style="padding:13px 15px;display:flex;align-items:center;gap:8px">
+      <span class="mbadge ${isReq?'mGET':'mPOST'}">${isReq?'REQ':'RES'}</span>
+      <span class="mono" style="font-size:11.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span>
+      <button class="btn btn-sm btn-primary" onclick="resolveBp('${bp.id}','continue')">Continue</button>
+      <button class="btn btn-sm" onclick="toggleBpEdit('${bp.id}')">Edit…</button>
+      <button class="btn btn-sm btn-danger" onclick="resolveBp('${bp.id}','drop')">Drop</button>
+    </div>
+    <div id="bp-edit-${bp.id}" class="bpe-panel" style="display:none">
+      <div class="bpe-section-title">Edit ${isReq?'Request':'Response'}</div>
+      ${isReq?`
+      <div class="form-row" style="margin-bottom:8px">
+        <div class="fgroup" style="max-width:90px">
+          <label class="flabel">Method</label>
+          <select class="finput fselect" id="bpe-method-${bp.id}">${methodOpts}</select>
+        </div>
+        <div class="fgroup">
+          <label class="flabel">URL</label>
+          <input class="finput" id="bpe-url-${bp.id}" value="${esc(ctx.uri||'')}" style="font-family:var(--mono)">
+        </div>
+      </div>`:
+      `<div class="form-row" style="margin-bottom:8px">
+        <div class="fgroup" style="max-width:90px">
+          <label class="flabel">Status</label>
+          <input class="finput" type="number" id="bpe-status-${bp.id}" value="${esc(ctx.status||200)}" style="font-family:var(--mono)">
+        </div>
+      </div>`}
+      <div class="fgroup" style="margin-bottom:8px">
+        <label class="flabel" style="margin-bottom:4px">Headers</label>
+        <table class="cmp-kv-table" style="margin-top:2px">
+          <thead><tr><th>Name</th><th>Value</th><th style="width:28px"></th></tr></thead>
+          <tbody id="bpe-hdrs-${bp.id}">${hdrRows}</tbody>
+        </table>
+        <button class="btn btn-sm btn-ghost" style="margin-top:4px" onclick="bpeAddHdrRow('${bp.id}')">+ Add header</button>
       </div>
-      <div id="bp-edit-${bp.id}" style="display:none;margin-bottom:10px">
-        <label class="flabel" style="display:block;margin-bottom:4px">Body</label>
-        <textarea class="finput" id="bp-body-${bp.id}" rows="5" style="font-family:var(--mono);font-size:11px;resize:vertical">${esc(ctx.body||'')}</textarea>
-        <button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="resolveBpModify('${bp.id}')">Send Modified</button>
+      <div class="fgroup" style="margin-bottom:10px">
+        <label class="flabel" style="margin-bottom:4px">Body</label>
+        <textarea class="finput" id="bpe-body-${bp.id}" rows="5" style="font-family:var(--mono);font-size:11px;resize:vertical">${esc(ctx.body||'')}</textarea>
       </div>
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-sm btn-primary" onclick="resolveBp('${bp.id}','continue')">Continue</button>
-        <button class="btn btn-sm" onclick="toggleBpEdit('${bp.id}')">Edit…</button>
-        <button class="btn btn-sm btn-danger" onclick="resolveBp('${bp.id}','drop')">Drop</button>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button class="btn btn-primary btn-sm" onclick="resolveBpModify('${bp.id}')">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.5 6H1.5M7.5 3l3 3-3 3"/></svg>
+          Send Modified
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleBpEdit('${bp.id}')">Cancel</button>
       </div>
-    </div>`;
-  }).join('');
+    </div>
+  </div>`;
+}
+function bpeAddHdrRow(id) {
+  const tbody=document.getElementById(`bpe-hdrs-${id}`); if (!tbody) return;
+  const i=tbody.rows.length;
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td><input class="cmp-kv-input" id="bpe-hk-${id}-${i}" placeholder="Header-Name" style="width:100%"></td><td><input class="cmp-kv-input" id="bpe-hv-${id}-${i}" placeholder="value" style="width:100%"></td><td><button class="cmp-kv-del" onclick="this.closest('tr').remove()">✕</button></td>`;
+  tbody.appendChild(tr);
 }
 function toggleBpForm() { const f=document.getElementById('bp-form'); f.style.display=f.style.display?'':'none'; }
 function toggleBpEdit(id) { const el=document.getElementById(`bp-edit-${id}`); el.style.display=el.style.display?'':'none'; }
@@ -2021,9 +3425,27 @@ async function resolveBp(id, action, context=null) {
   } catch { toast('Failed to resolve',true); }
 }
 async function resolveBpModify(id) {
-  const bp=G.bpPending.find(b=>b.id===id); if(!bp) return;
-  const newBody=document.getElementById(`bp-body-${id}`)?.value??'', ctx=bp.context;
-  const context=ctx.Request?{Request:{...ctx.Request,body:newBody}}:{Response:{...ctx.Response,body:newBody}};
+  const bp=G.bpPending.find(b=>b.id===id); if (!bp) return;
+  const isReq=!!bp.context.Request, orig=isReq?bp.context.Request:bp.context.Response;
+  const newBody=document.getElementById(`bpe-body-${id}`)?.value??orig.body??'';
+  // Collect headers from edit table
+  const newHeaders={};
+  const tbody=document.getElementById(`bpe-hdrs-${id}`);
+  if (tbody) {
+    tbody.querySelectorAll('tr').forEach(row=>{
+      const inputs=row.querySelectorAll('input');
+      if (inputs.length>=2) { const k=inputs[0].value.trim(),v=inputs[1].value.trim(); if(k) newHeaders[k]=v; }
+    });
+  }
+  let context;
+  if (isReq) {
+    const method=document.getElementById(`bpe-method-${id}`)?.value||orig.method;
+    const uri=document.getElementById(`bpe-url-${id}`)?.value||orig.uri;
+    context={Request:{...orig,method,uri,headers:newHeaders,body:newBody}};
+  } else {
+    const status=parseInt(document.getElementById(`bpe-status-${id}`)?.value)||orig.status;
+    context={Response:{...orig,status,headers:newHeaders,body:newBody}};
+  }
   await resolveBp(id,'modify',context);
 }
 
@@ -2062,6 +3484,10 @@ document.addEventListener('keydown', e => {
     document.getElementById('ic-moon').style.display='none';
     document.getElementById('ic-sun').style.display='';
   }
+
+  // Restore compose collections and vars
+  try { const sc=localStorage.getItem('oproxy-compose-collections'); if(sc) G.compose.collections=JSON.parse(sc); } catch {}
+  try { const sv=localStorage.getItem('oproxy-compose-vars'); if(sv) G.compose.vars=JSON.parse(sv); } catch {}
 
   // Hydrate MITM indicators from /health
   try {

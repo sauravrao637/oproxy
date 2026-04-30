@@ -33,7 +33,7 @@ impl Middleware for RoutingMiddleware {
                 Ok(contents) => {
                     // Stash the file contents in the body and mark as a local response via header.
                     ctx.body = contents;
-                    ctx.headers.insert("x-map-local-file".to_string(), file_path.clone());
+                    ctx.headers.insert("x-oproxy-map-local-file".to_string(), file_path.clone());
                     return MiddlewareAction::StopAndReturn;
                 }
                 Err(e) => {
@@ -45,7 +45,7 @@ impl Middleware for RoutingMiddleware {
 
         let table = self.routing_table.read().await;
         if let Some(destination) = table.get(&ctx.host) {
-            ctx.headers.insert("x-proxy-destination".to_string(), destination.clone());
+            ctx.headers.insert("x-oproxy-destination".to_string(), destination.clone());
         }
         // No entry → forward to original host; engine.rs falls back to http://<host><path>
         MiddlewareAction::Continue
@@ -128,7 +128,7 @@ mod tests {
         let mw = routing_with(vec![("api.local", "http://10.0.0.1:3000")]);
         let mut ctx = req("api.local");
         assert_eq!(mw.on_request(&mut ctx).await, MiddlewareAction::Continue);
-        assert_eq!(ctx.headers.get("x-proxy-destination").map(|s| s.as_str()), Some("http://10.0.0.1:3000"));
+        assert_eq!(ctx.headers.get("x-oproxy-destination").map(|s| s.as_str()), Some("http://10.0.0.1:3000"));
     }
 
     #[tokio::test]
@@ -136,7 +136,7 @@ mod tests {
         let mw = routing_with(vec![]);
         let mut ctx = req("unknown.host");
         assert_eq!(mw.on_request(&mut ctx).await, MiddlewareAction::Continue);
-        assert!(!ctx.headers.contains_key("x-proxy-destination"), "no destination header for unmapped host");
+        assert!(!ctx.headers.contains_key("x-oproxy-destination"), "no destination header for unmapped host");
     }
 
     #[tokio::test]

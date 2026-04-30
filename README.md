@@ -1,215 +1,115 @@
-# oproxy
+# 🚀 oproxy
 
-A programmable HTTP/HTTPS proxy for inspecting, debugging, and manipulating network traffic. Written in Rust.
+**A HTTP/HTTPS proxy for inspecting, debugging, and manipulating network traffic.** Includes a zero-dependency web dashboard.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)
+![Docker: GHCR](https://img.shields.io/badge/Docker-GHCR-green.svg)
 
 ---
 
-## What it does
+## ✨ Key Features
 
-- **Traffic inspection** — every proxied request and response is captured in a live, searchable session log
-- **HTTPS MITM** — intercepts HTTPS by acting as a local CA; generates per-domain certificates on the fly
-- **Routing** — redirect traffic from one host to another without touching the client
-- **Rewrites** — regex-based header and body manipulation on request or response
-- **Breakpoints** — pause a request or response mid-flight, inspect it, modify it, then continue or drop it
-- **Throttling** — inject artificial latency per host to simulate slow networks
-- **Management UI** — built-in web dashboard, no external dependencies; installable as a PWA
+* **🔍 Traffic Inspection** — Capture and search every request/response in a live session log.
+* **🔀 Smart Routing** — Redirect traffic at the proxy level without client-side changes.
+* **✍️ Request/Response Rewrites** — Manipulate request/response on the fly.
+* **⏸️ Breakpoints** — Pause, inspect, and modify requests mid-flight.
+* **🐢 Network Throttling** — Simulate slow connections with latency injection.
+* **💻 Management UI** — Built-in dashboard.
 
 ---
 
-## Quick start
+## 🚀 Quick Start
 
+### 1. Run with Docker (Recommended)
+The fastest way to get started using the official image from GitHub Container Registry:
+
+```bash
+docker run -d \
+  --name oproxy \
+  -p 8080:8080 \
+  -v $(pwd)/configs:/configs \
+  ghcr.io/sauravrao637/oproxy:latest
+```
+
+### 2. Run from Source
 **Prerequisites:** Rust toolchain (`rustup`, `cargo`)
 
 ```bash
-git clone https://github.com/sauravrao637/oproxy.git
+git clone [https://github.com/sauravrao637/oproxy.git](https://github.com/sauravrao637/oproxy.git)
 cd oproxy
 cargo run --release
 ```
 
-The proxy starts on `http://0.0.0.0:8080`.  
-Open `http://localhost:8080` in a browser to access the management dashboard.
-
-### Configure your client
-
-Point your HTTP proxy to `localhost:8080`.
-
-**curl:**
-```bash
-curl -x http://localhost:8080 http://example.com/api/data
-```
-
-**Browser (e.g. Firefox):** Settings → Network → Manual proxy → HTTP `localhost:8080`
-
-### HTTPS interception (MITM)
-
-1. Enable MITM in `configs/default.yaml`:
-   ```yaml
-   mitm:
-     enabled: true
-   ```
-2. Start oproxy, then download and install the root CA:
-   ```bash
-   curl http://localhost:8080/admin/ca -o oproxy-ca.crt
-   ```
-   Trust this certificate in your OS/browser certificate store.
-3. Configure your client to use `localhost:8080` as the HTTPS proxy.
-
-> The CA key and certificate are generated automatically on first run and stored in `./certs/`. **Never commit `certs/root.key` to version control.**
+**Access the Dashboard:** Open [http://localhost:8080](http://localhost:8080) in your browser.
 
 ---
 
-## Configuration
+## 🛠️ Configuration
 
-Copy and edit `configs/default.yaml`. The config file path can be overridden with `OPROXY_CONFIG`.
+`oproxy` uses a layered configuration system: **Environment Variables > YAML Config > Defaults**.
 
-```yaml
-port: 8080
-bind_host: "0.0.0.0"       # use "127.0.0.1" to restrict to localhost
+### Client Setup
+Point your HTTP/HTTPS proxy settings to `localhost:8080`.
 
-mitm:
-  enabled: false
-  root_ca_path: ./certs
+| Tool | Command / Setting |
+| :--- | :--- |
+| **curl** | `curl -x http://localhost:8080 http://example.com` |
+| **Browser** | Settings → Network → Manual Proxy → `localhost:8080` |
+| **HTTPS (MITM)** | Download CA: `curl http://localhost:8080/admin/ca -o oproxy-ca.crt` |
 
-storage_path: ./storage     # persisted routes, rewrites, breakpoints
-
-timeout_secs: 30
-max_body_bytes: 10485760    # 10 MB — bodies larger than this are truncated
-max_sessions: 10000         # oldest session evicted when full
-
-pool_max_idle_per_host: 10
-pool_idle_timeout_secs: 30
-
-log:
-  level: info               # trace | debug | info | warn | error
-  dir: .
-  file: server.log
-```
-
-**Environment variable overrides** (highest priority):
-
-| Variable | Description |
-|---|---|
-| `OPROXY_PORT` | Listening port |
-| `OPROXY_BIND_HOST` | Bind address |
-| `OPROXY_MITM_ENABLED` | `true` / `false` |
-| `OPROXY_STORAGE_PATH` | Storage directory |
-| `OPROXY_LOG_LEVEL` | Log level |
-| `OPROXY_LOG_DIR` | Log file directory |
-| `OPROXY_CONFIG` | Path to config file |
-| `RUST_LOG` | Fine-grained tracing filter (overrides `log.level`) |
+> **Note:** For HTTPS interception, ensure `mitm.enabled: true` is set in your config, and trust the downloaded `oproxy-ca.crt` in your system/browser.
 
 ---
 
-## Management API
+<details>
+<summary><h2>📡 Management API Reference</h2></summary>
 
-All endpoints are served on `localhost` only. Requests from other hosts bypass the management layer and are treated as proxy traffic.
+The internal API is only accessible from `localhost`.
 
-### Sessions
+| Category | Endpoint | Method | Description |
+| :--- | :--- | :--- | :--- |
+| **Sessions** | `/api/sessions` | `GET` | List captured traffic |
+| **Sessions** | `/api/sessions/:id` | `GET` | Full detail for one session |
+| **Routes** | `/admin/routes` | `POST` | Update routing table |
+| **Rewrites** | `/admin/rewrites` | `POST` | Add regex rewrite rules |
+| **Breakpoints**| `/admin/breakpoints` | `GET` | List active breakpoints |
+| **Throttling** | `/admin/throttling` | `POST`| Update throttling config |
+| **System** | `/admin/ca` | `GET` | Export Root CA (.pem) |
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/sessions` | List all captured sessions (supports `?since=<ISO8601>` for polling) |
-| `GET` | `/api/sessions/:id` | Full detail for one session |
-| `DELETE` | `/admin/sessions` | Clear all sessions |
+</details>
 
-### Routing
+<details>
+<summary><h2>📂 Project Structure (For Contributors)</h2></summary>
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/admin/routes` | List routing rules |
-| `POST` | `/admin/routes` | Replace routing table (JSON object `{ "host": "destination" }`) |
+The project follows a modular Rust architecture designed for extensibility:
 
-### Rewrites
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/admin/rewrites` | List rewrite rules |
-| `POST` | `/admin/rewrites` | Add a rewrite rule |
-| `DELETE` | `/admin/rewrites/:index` | Delete a rule by index |
-
-### Throttling
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/admin/throttling` | Get throttling config |
-| `POST` | `/admin/throttling` | Update throttling config |
-
-### Breakpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/admin/breakpoints` | List breakpoint rules |
-| `POST` | `/admin/breakpoints` | Add a breakpoint rule |
-| `DELETE` | `/admin/breakpoints/:id` | Delete a breakpoint rule |
-| `GET` | `/admin/breakpoints/pending` | List requests currently paused at a breakpoint |
-| `POST` | `/admin/breakpoints/pending/:id/resolve` | Resolve a paused request (`continue`, `modify`, or `drop`) |
-
-### Other
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check — returns uptime and MITM status |
-| `GET` | `/admin/ca` | Download the root CA certificate (PEM) |
-
----
-
-## Project structure
-
-```
+```text
 oproxy/
 ├── src/
-│   ├── main.rs              # Entry point — wires components, starts listener
-│   ├── management.rs        # Axum router — UI, admin API, proxy dispatch layer
-│   ├── lib.rs               # Crate root for integration tests
-│   ├── index.html           # Management UI (single file, inlined at compile time)
-│   ├── manifest.json        # PWA manifest
-│   ├── sw.js                # Service worker (offline shell caching)
-│   ├── icon.svg             # App icon
-│   ├── storage.rs           # JSON persistence helpers
-│   ├── api/                 # ApiHandler — session CRUD, rewrite CRUD, breakpoints
-│   ├── certs/               # CertificateAuthority — root CA + per-domain cert gen
-│   ├── config/              # Config struct, YAML loading, env var overrides
-│   ├── core/
-│   │   ├── engine.rs        # ProxyEngine — request lifecycle, CONNECT/MITM, forwarding
-│   │   └── playback.rs      # Session replay scaffold
-│   ├── middleware/
-│   │   ├── chain.rs         # MiddlewareChain — ordered plugin execution
-│   │   └── plugins/
-│   │       ├── routing.rs   # RoutingMiddleware, ThrottlingMiddleware
-│   │       ├── inspection.rs# InspectionMiddleware — session recording
-│   │       ├── rewrite.rs   # RewriteMiddleware — regex rules
-│   │       ├── modification.rs
-│   │       └── breakpoints.rs
-│   └── session/             # SessionManager — in-memory traffic log
-├── tests/                   # Integration tests
-├── configs/
-│   └── default.yaml         # Default configuration
-├── Dockerfile
-└── Cargo.toml
+│   ├── core/                # ProxyEngine, MITM logic, and connection forwarding
+│   ├── middleware/          # The "Plugin" system (Routing, Rewrites, Breakpoints)
+│   ├── management.rs        # Axum web server & Admin API
+│   ├── index.html           # Inlined PWA Management UI
+│   └── certs/               # CA and dynamic cert generation logic
+├── configs/                 # Default YAML templates
+└── Dockerfile               # Multi-arch optimized build
 ```
 
----
-
-## Docker
-
-```bash
-docker build -t oproxy .
-docker run -p 8080:8080 oproxy
-```
+</details>
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
-1. Fork the repo and create a feature branch from `main`.
-2. Run `cargo test` — all tests must pass.
-3. Run `cargo clippy -- -D warnings` — no new warnings.
-4. Open a pull request with a clear description of what changed and why.
+We welcome contributions! Please follow these steps:
+1.  **Fork** the repository.
+2.  **Create** a feature branch (`git checkout -b feature/amazing-feature`).
+3.  **Test** your changes (`cargo test`).
+4.  **Lint** your code (`cargo clippy -- -D warnings`).
+5.  **Submit** a Pull Request.
 
 ---
 
-## License
-
-MIT — see [LICENSE](LICENSE).
+## 📄 License
+Distributed under the [**MIT License**](LICENSE).

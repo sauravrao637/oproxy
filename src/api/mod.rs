@@ -2,6 +2,8 @@ use crate::core::playback::PlaybackEngine;
 use crate::middleware::plugins::breakpoints::{
     BreakpointContext, BreakpointManager, BreakpointResolution, BreakpointRule, BreakpointType,
 };
+use crate::middleware::plugins::header_map::{HeaderMapMiddleware, HeaderMapRule};
+use crate::middleware::plugins::modification::{ModificationMiddleware, ModificationRule};
 use crate::middleware::plugins::rewrite::{RewriteMiddleware, RewriteRule};
 use crate::session::Exchange;
 use crate::session::SharedSessionManager;
@@ -34,9 +36,11 @@ pub struct PendingBreakpointInfo {
 }
 
 pub struct ApiHandler {
-    session_manager: SharedSessionManager,
+    pub session_manager: SharedSessionManager,
     rewrite_middleware: Arc<RewriteMiddleware>,
     breakpoint_manager: Arc<BreakpointManager>,
+    header_map_middleware: Arc<HeaderMapMiddleware>,
+    modification_middleware: Arc<ModificationMiddleware>,
     playback_engine: PlaybackEngine,
 }
 
@@ -45,12 +49,16 @@ impl ApiHandler {
         session_manager: SharedSessionManager,
         rewrite_middleware: Arc<RewriteMiddleware>,
         breakpoint_manager: Arc<BreakpointManager>,
+        header_map_middleware: Arc<HeaderMapMiddleware>,
+        modification_middleware: Arc<ModificationMiddleware>,
     ) -> Self {
         let playback_engine = PlaybackEngine::new(session_manager.clone());
         Self {
             session_manager,
             rewrite_middleware,
             breakpoint_manager,
+            header_map_middleware,
+            modification_middleware,
             playback_engine,
         }
     }
@@ -87,7 +95,7 @@ impl ApiHandler {
         let total = all.len();
         let mut sessions: Vec<_> = if let Some(since_dt) = since {
             all.into_iter()
-                .filter(|e| e.timestamp > since_dt || e.response.is_none())
+                .filter(|e| e.timestamp > since_dt || e.response.is_none() || e.updated_at.map_or(false, |t| t > since_dt))
                 .collect()
         } else {
             all
@@ -143,6 +151,39 @@ impl ApiHandler {
         }
     }
 
+    pub async fn update_rewrite_rule(&self, index: usize, rule: RewriteRule) {
+        let mut rules = self.rewrite_middleware.rules.write().await;
+        if index < rules.len() {
+            rules[index] = rule;
+        }
+    }
+
+    pub async fn replace_all_rewrite_rules(&self, new_rules: Vec<RewriteRule>) {
+        let mut rules = self.rewrite_middleware.rules.write().await;
+        *rules = new_rules;
+    }
+
+    pub async fn list_header_maps(&self) -> Vec<HeaderMapRule> {
+        self.header_map_middleware.rules.read().await.clone()
+    }
+
+    pub async fn add_header_map(&self, rule: HeaderMapRule) {
+        let mut rules = self.header_map_middleware.rules.write().await;
+        rules.push(rule);
+    }
+
+    pub async fn update_header_map(&self, id: &str, updated: HeaderMapRule) {
+        let mut rules = self.header_map_middleware.rules.write().await;
+        if let Some(r) = rules.iter_mut().find(|r| r.id == id) {
+            *r = updated;
+        }
+    }
+
+    pub async fn delete_header_map(&self, id: &str) {
+        let mut rules = self.header_map_middleware.rules.write().await;
+        rules.retain(|r| r.id != id);
+    }
+
     pub async fn list_breakpoints(&self) -> Vec<(String, BreakpointContext)> {
         let pending = self.breakpoint_manager.pending.read().await;
         pending
@@ -183,6 +224,19 @@ impl ApiHandler {
                 context: bp.context.clone(),
             })
             .collect()
+    }
+
+    pub async fn list_modifications(&self) -> Vec<ModificationRule> {
+        self.modification_middleware.rules.read().await.clone()
+    }
+
+    pub async fn add_modification(&self, rule: ModificationRule) {
+        self.modification_middleware.rules.write().await.push(rule);
+    }
+
+    pub async fn delete_modification(&self, index: usize) {
+        let mut rules = self.modification_middleware.rules.write().await;
+        if index < rules.len() { rules.remove(index); }
     }
 }
 

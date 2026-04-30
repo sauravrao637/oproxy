@@ -32,7 +32,7 @@ impl Middleware for DnsOverrideMiddleware {
             let scheme_port = if port == "443" { "https" } else { "http" };
             let dest = format!("{}://{}", scheme_port, new_host);
             ctx.host = new_host;
-            ctx.headers.insert("x-proxy-destination".to_string(), dest);
+            ctx.headers.insert("x-oproxy-destination".to_string(), dest);
         }
         MiddlewareAction::Continue
     }

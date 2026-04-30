@@ -37,6 +37,11 @@ COPY configs ./configs
 # allows volume mounts to overlay them cleanly.
 RUN mkdir -p certs storage
 
+# Declare volumes so the CA key/cert and rule storage survive container restarts.
+# Mount these with named volumes (-v oproxy-certs:/app/certs) to persist across
+# container replacements (docker rm + docker run).
+VOLUME ["/app/certs", "/app/storage"]
+
 # Default port — override with OPROXY_PORT or by editing configs/default.json
 EXPOSE 8080
 
