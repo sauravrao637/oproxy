@@ -38,6 +38,8 @@ pub struct InspectionMetrics {
 pub struct Exchange {
     pub id: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     pub request: RequestContext,
     pub response: Option<ResponseContext>,
     pub metrics: Option<InspectionMetrics>,
@@ -102,6 +104,7 @@ impl SessionManager {
             exchanges.insert(id.clone(), Exchange {
                 id,
                 timestamp: Utc::now(),
+                updated_at: None,
                 request,
                 response: None,
                 metrics: None,
@@ -116,6 +119,7 @@ impl SessionManager {
             let mut exchanges = self.exchanges.write().unwrap();
             if let Some(exchange) = exchanges.get_mut(&id) {
                 exchange.response = Some(response);
+                exchange.updated_at = Some(Utc::now());
             }
         }
         self.notify();
@@ -127,6 +131,7 @@ impl SessionManager {
             if let Some(exchange) = exchanges.get_mut(&id) {
                 exchange.response = Some(response);
                 exchange.metrics = Some(metrics);
+                exchange.updated_at = Some(Utc::now());
             }
         }
         self.notify();

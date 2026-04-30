@@ -52,7 +52,7 @@ mod tests {
         assert_eq!(sessions[0].metrics.as_ref().unwrap().status_code, 200);
     }
 
-    /// RoutingMiddleware must insert x-proxy-destination into the request context
+    /// RoutingMiddleware must insert x-oproxy-destination into the request context
     /// when a matching route is registered.
     #[tokio::test]
     async fn routing_middleware_sets_destination_header() {
@@ -62,27 +62,27 @@ mod tests {
         let mut ctx = req("/data", "api.local");
         routing.on_request(&mut ctx).await;
         assert_eq!(
-            ctx.headers.get("x-proxy-destination").map(|s| s.as_str()),
+            ctx.headers.get("x-oproxy-destination").map(|s| s.as_str()),
             Some("http://10.0.0.2:8000")
         );
     }
 
-    /// After the engine strips internal headers, x-proxy-destination and
+    /// After the engine strips internal headers, x-oproxy-destination and
     /// x-oproxy-session-id must not reach the upstream target.
     /// We verify this by inspecting the built header map directly.
     #[tokio::test]
     async fn engine_strips_internal_headers_before_forward() {
         // Simulate what the engine does: populate internal headers, then strip them.
         let mut headers: HashMap<String, String> = HashMap::new();
-        headers.insert("x-proxy-destination".to_string(), "http://10.0.0.1".to_string());
+        headers.insert("x-oproxy-destination".to_string(), "http://10.0.0.1".to_string());
         headers.insert("x-oproxy-session-id".to_string(), "some-uuid".to_string());
         headers.insert("accept".to_string(), "text/html".to_string());
 
         // Replicate the stripping logic from engine.rs
-        headers.remove("x-proxy-destination");
+        headers.remove("x-oproxy-destination");
         headers.remove("x-oproxy-session-id");
 
-        assert!(!headers.contains_key("x-proxy-destination"), "destination header must be stripped");
+        assert!(!headers.contains_key("x-oproxy-destination"), "destination header must be stripped");
         assert!(!headers.contains_key("x-oproxy-session-id"), "session ID header must be stripped");
         assert!(headers.contains_key("accept"), "legitimate headers must be preserved");
     }

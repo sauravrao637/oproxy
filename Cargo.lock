@@ -1059,6 +1059,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.21.7",
  "brotli 3.5.0",
  "bytes",
  "chrono",

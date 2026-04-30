@@ -24,6 +24,7 @@ use crate::middleware::plugins::modification::ModificationMiddleware;
 use crate::middleware::plugins::rewrite::RewriteMiddleware;
 use crate::middleware::plugins::breakpoints::{BreakpointMiddleware, BreakpointManager};
 use crate::middleware::plugins::dns_override::DnsOverrideMiddleware;
+use crate::middleware::plugins::header_map::HeaderMapMiddleware;
 
 // Shared state threaded through every axum handler and the proxy engine.
 pub(crate) struct AppState {
@@ -32,11 +33,13 @@ pub(crate) struct AppState {
     pub(crate) routing_table: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) throttling_config: Arc<RwLock<ThrottlingConfig>>,
     pub(crate) dns_overrides: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) map_local: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) session_manager: crate::session::SharedSessionManager,
     pub(crate) breakpoint_manager: Arc<BreakpointManager>,
     pub(crate) api_handler: Arc<ApiHandler>,
     pub(crate) storage_path: std::path::PathBuf,
     pub(crate) started_at: std::time::Instant,
+    pub(crate) config: crate::config::Config,
 }
 
 fn setup_logging(config: &crate::config::Config) -> WorkerGuard {
@@ -81,11 +84,22 @@ async fn main() -> Result<(), StartupError> {
     let mut chain = MiddlewareChain::new();
     // DNS override must run before RoutingMiddleware so the host rewrite is visible to it.
     chain.add_middleware(Arc::new(DnsOverrideMiddleware { overrides: dns_overrides.clone() }));
-    chain.add_middleware(Arc::new(RoutingMiddleware::new(routing_table.clone())));
+    let map_local = Arc::new(tokio::sync::RwLock::new(storage::load_map_local(&storage_path)));
+    let routing_mw = Arc::new({
+        let mut mw = RoutingMiddleware::new(routing_table.clone());
+        mw.map_local = map_local.clone();
+        mw
+    });
+    chain.add_middleware(routing_mw);
     chain.add_middleware(Arc::new(ThrottlingMiddleware { config: throttling_config.clone() }));
 
     let rewrite_middleware = Arc::new(RewriteMiddleware::new(initial_rewrites));
     chain.add_middleware(rewrite_middleware.clone());
+
+    let header_map_middleware = Arc::new(HeaderMapMiddleware::new(
+        storage::load_header_maps(&storage_path),
+    ));
+    chain.add_middleware(header_map_middleware.clone());
 
     let breakpoint_manager = Arc::new(BreakpointManager::new());
     for rule in storage::load_breakpoints(&storage_path) {
@@ -93,7 +107,10 @@ async fn main() -> Result<(), StartupError> {
     }
     chain.add_middleware(Arc::new(BreakpointMiddleware::new(breakpoint_manager.clone())));
     chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager.clone())));
-    chain.add_middleware(Arc::new(ModificationMiddleware::new(Vec::new())));
+    let modification_middleware = Arc::new(ModificationMiddleware::new(
+        storage::load_modifications(&storage_path),
+    ));
+    chain.add_middleware(modification_middleware.clone());
 
     let middleware_chain = Arc::new(RwLock::new(chain));
 
@@ -105,12 +122,14 @@ async fn main() -> Result<(), StartupError> {
             .map_err(|e| StartupError::CaInit(e.to_string()))?,
     );
 
+    let hot_cfg = storage::load_hot_config(&storage_path);
+    let effective_max_body = hot_cfg.max_body_bytes.unwrap_or(config.max_body_bytes);
     let proxy_engine = Arc::new(ProxyEngine::new(
         middleware_chain.clone(),
         Some(ca.clone()),
         config.mitm.enabled,
         config.timeout_secs,
-        config.max_body_bytes,
+        effective_max_body,
         config.pool_max_idle_per_host,
         config.pool_idle_timeout_secs,
     ));
@@ -119,6 +138,8 @@ async fn main() -> Result<(), StartupError> {
         session_manager.clone(),
         rewrite_middleware.clone(),
         breakpoint_manager.clone(),
+        header_map_middleware.clone(),
+        modification_middleware.clone(),
     ));
 
     let state = Arc::new(AppState {
@@ -127,11 +148,13 @@ async fn main() -> Result<(), StartupError> {
         routing_table,
         throttling_config,
         dns_overrides: dns_overrides.clone(),
+        map_local: map_local.clone(),
         session_manager,
         breakpoint_manager,
         api_handler,
         storage_path,
         started_at: std::time::Instant::now(),
+        config: config.clone(),
     });
 
     let app = management::management_router(state.clone())
@@ -497,7 +520,7 @@ async fn mitm_intercept(
                     // Tell the engine to forward upstream over HTTPS.
                     if let Ok(v) = axum::http::HeaderValue::from_str(&format!("https://{}", h)) {
                         req.headers_mut().insert(
-                            axum::http::header::HeaderName::from_static("x-proxy-destination"),
+                            axum::http::header::HeaderName::from_static("x-oproxy-destination"),
                             v,
                         );
                     }

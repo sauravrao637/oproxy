@@ -7,6 +7,7 @@ use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::{RequestContext, ResponseContext, MiddlewareAction};
 use flate2::read::GzDecoder;
 use brotli::BrotliDecompress;
+use base64::Engine as _;
 use reqwest::Client;
 
 // Responses larger than this are streamed rather than fully buffered.
@@ -135,12 +136,17 @@ impl ProxyEngine {
         // Strip internal proxy headers so they are never forwarded to the upstream target.
         // Read the session ID before removing it so we can pass it to ResponseContext for
         // exact session correlation in InspectionMiddleware::on_response.
-        let destination = req_ctx.headers.remove("x-proxy-destination");
+        let destination = req_ctx.headers.remove("x-oproxy-destination");
         let oproxy_session_id = req_ctx.headers.remove("x-oproxy-session-id");
         // Remove Accept-Encoding so upstream always returns an uncompressed body that we
         // can store as readable UTF-8.  If the upstream ignores this and still sends a
         // compressed response we decompress it below before forwarding.
         req_ctx.headers.remove("accept-encoding");
+        // Strip hop-by-hop headers — illegal in HTTP/2 and must not be forwarded.
+        for hdr in &["connection", "keep-alive", "proxy-connection", "transfer-encoding",
+                     "te", "trailer", "trailers", "upgrade"] {
+            req_ctx.headers.remove(*hdr);
+        }
 
         // In forward-proxy mode the browser sends an absolute URI as the request
         // target (e.g. GET http://api.example.com/path HTTP/1.1).  Concatenating
@@ -306,6 +312,14 @@ impl ProxyEngine {
                     (String::from_utf8_lossy(&res_bytes).to_string(), res_bytes.clone())
                 };
 
+                // For binary content types, replace the lossy UTF-8 string with a
+                // base64 representation so the UI can render it (e.g. display images).
+                let res_body = if is_binary_content_type(&content_type) {
+                    base64::engine::general_purpose::STANDARD.encode(&res_body_bytes_canonical)
+                } else {
+                    res_body
+                };
+
                 let mut res_ctx = ResponseContext {
                     status,
                     headers: res_headers,
@@ -385,4 +399,16 @@ impl ProxyEngine {
         }
     }
 
+}
+
+pub fn is_binary_content_type(ct: &str) -> bool {
+    let ct = ct.split(';').next().unwrap_or("").trim();
+    ct.starts_with("image/")
+        || ct.starts_with("audio/")
+        || ct.starts_with("video/")
+        || ct == "application/octet-stream"
+        || ct == "application/pdf"
+        || ct == "application/wasm"
+        || ct == "font/woff"
+        || ct == "font/woff2"
 }

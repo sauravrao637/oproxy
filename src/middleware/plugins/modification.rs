@@ -1,20 +1,26 @@
 use async_trait::async_trait;
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ModificationRule {
     pub request_uri_pattern: String,
+    #[serde(default)]
     pub header_replacements: HashMap<String, String>,
+    #[serde(default)]
     pub body_replacement: Option<String>,
 }
 
 pub struct ModificationMiddleware {
-    rules: Vec<ModificationRule>,
+    pub rules: Arc<RwLock<Vec<ModificationRule>>>,
 }
 
 impl ModificationMiddleware {
     pub fn new(rules: Vec<ModificationRule>) -> Self {
-        Self { rules }
+        Self { rules: Arc::new(RwLock::new(rules)) }
     }
 }
 
@@ -25,13 +31,15 @@ impl Middleware for ModificationMiddleware {
     }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
-        for rule in &self.rules {
+        let rules = self.rules.read().await;
+        for rule in rules.iter() {
             if ctx.uri.contains(&rule.request_uri_pattern) {
                 for (key, value) in &rule.header_replacements {
                     ctx.headers.insert(key.clone(), value.clone());
                 }
                 if let Some(ref body) = rule.body_replacement {
                     ctx.body = body.clone();
+                    ctx.body_bytes = None;
                 }
             }
         }
@@ -54,10 +62,10 @@ mod tests {
         RequestContext { method: "GET".to_string(), uri: uri.to_string(), headers: HashMap::new(), body: "original".to_string(), host: "localhost".to_string(), body_bytes: None }
     }
 
-    fn rule(pattern: &str, headers: Vec<(&str, &str)>, body: Option<&str>) -> ModificationRule {
+    fn rule(pattern: &str, hdrs: Vec<(&str, &str)>, body: Option<&str>) -> ModificationRule {
         ModificationRule {
             request_uri_pattern: pattern.to_string(),
-            header_replacements: headers.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            header_replacements: hdrs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             body_replacement: body.map(|s| s.to_string()),
         }
     }
