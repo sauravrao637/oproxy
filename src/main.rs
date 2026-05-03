@@ -14,6 +14,12 @@ mod config;
 mod api;
 mod storage;
 mod management;
+mod setup;
+mod export;
+mod har;
+mod diff;
+mod webhooks;
+mod transport;
 
 use crate::api::ApiHandler;
 use crate::core::engine::ProxyEngine;
@@ -23,8 +29,14 @@ use crate::middleware::plugins::inspection::InspectionMiddleware;
 use crate::middleware::plugins::modification::ModificationMiddleware;
 use crate::middleware::plugins::rewrite::RewriteMiddleware;
 use crate::middleware::plugins::breakpoints::{BreakpointMiddleware, BreakpointManager};
+use crate::middleware::plugins::capture_filter::{CaptureFilterMiddleware, CaptureFilterConfig};
 use crate::middleware::plugins::dns_override::DnsOverrideMiddleware;
 use crate::middleware::plugins::header_map::HeaderMapMiddleware;
+use crate::middleware::plugins::jwt_inspector::JwtInspectorMiddleware;
+use crate::middleware::plugins::graphql_inspector::GraphQLInspectorMiddleware;
+use crate::middleware::plugins::grpc_inspector::GrpcInspectorMiddleware;
+use crate::middleware::plugins::mock::MockMiddleware;
+use crate::middleware::plugins::lua_engine::LuaEngineMiddleware;
 
 // Shared state threaded through every axum handler and the proxy engine.
 pub(crate) struct AppState {
@@ -34,12 +46,16 @@ pub(crate) struct AppState {
     pub(crate) throttling_config: Arc<RwLock<ThrottlingConfig>>,
     pub(crate) dns_overrides: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) map_local: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) capture_filter: Arc<RwLock<CaptureFilterConfig>>,
     pub(crate) session_manager: crate::session::SharedSessionManager,
     pub(crate) breakpoint_manager: Arc<BreakpointManager>,
     pub(crate) api_handler: Arc<ApiHandler>,
     pub(crate) storage_path: std::path::PathBuf,
     pub(crate) started_at: std::time::Instant,
     pub(crate) config: crate::config::Config,
+    pub(crate) webhooks: crate::webhooks::SharedWebhooks,
+    pub(crate) mock_rules: crate::middleware::plugins::mock::SharedMockRules,
+    pub(crate) lua_scripts: crate::middleware::plugins::lua_engine::SharedLuaScripts,
 }
 
 fn setup_logging(config: &crate::config::Config) -> WorkerGuard {
@@ -74,6 +90,7 @@ async fn main() -> Result<(), StartupError> {
     let session_manager = Arc::new(crate::session::SessionManager::new(config.max_sessions));
 
     let storage_path = config.storage_path.clone();
+
     let _ = std::fs::create_dir_all(&storage_path);
 
     let routing_table = Arc::new(RwLock::new(storage::load_routes(&storage_path)));
@@ -81,7 +98,11 @@ async fn main() -> Result<(), StartupError> {
     let dns_overrides = Arc::new(RwLock::new(storage::load_dns_overrides(&storage_path)));
     let initial_rewrites = storage::load_rewrites(&storage_path);
 
+    let capture_filter = Arc::new(RwLock::new(storage::load_capture_filter(&storage_path)));
+
     let mut chain = MiddlewareChain::new();
+    // CaptureFilter runs first: injects skip-recording header for filtered hosts.
+    chain.add_middleware(Arc::new(CaptureFilterMiddleware::new(capture_filter.clone())));
     // DNS override must run before RoutingMiddleware so the host rewrite is visible to it.
     chain.add_middleware(Arc::new(DnsOverrideMiddleware { overrides: dns_overrides.clone() }));
     let map_local = Arc::new(tokio::sync::RwLock::new(storage::load_map_local(&storage_path)));
@@ -106,11 +127,19 @@ async fn main() -> Result<(), StartupError> {
         breakpoint_manager.add_rule(rule).await;
     }
     chain.add_middleware(Arc::new(BreakpointMiddleware::new(breakpoint_manager.clone())));
+    // Inspector plugins run BEFORE InspectionMiddleware so they can set x-oproxy-jwt /
+    // x-oproxy-graphql / x-oproxy-grpc headers that InspectionMiddleware reads on the
+    // same on_request pass and stores into the session's inspector_data.
+    chain.add_middleware(Arc::new(JwtInspectorMiddleware));
+    chain.add_middleware(Arc::new(GraphQLInspectorMiddleware));
+    chain.add_middleware(Arc::new(GrpcInspectorMiddleware));
     chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager.clone())));
     let modification_middleware = Arc::new(ModificationMiddleware::new(
         storage::load_modifications(&storage_path),
     ));
     chain.add_middleware(modification_middleware.clone());
+    // Mock and Lua come after InspectionMiddleware so the request is recorded before
+    // they short-circuit it (StopAndReturn).  The session captures the original request;
 
     let middleware_chain = Arc::new(RwLock::new(chain));
 
@@ -124,6 +153,7 @@ async fn main() -> Result<(), StartupError> {
 
     let hot_cfg = storage::load_hot_config(&storage_path);
     let effective_max_body = hot_cfg.max_body_bytes.unwrap_or(config.max_body_bytes);
+    let upstream_proxy = storage::load_upstream_proxy(&storage_path);
     let proxy_engine = Arc::new(ProxyEngine::new(
         middleware_chain.clone(),
         Some(ca.clone()),
@@ -132,6 +162,7 @@ async fn main() -> Result<(), StartupError> {
         effective_max_body,
         config.pool_max_idle_per_host,
         config.pool_idle_timeout_secs,
+        upstream_proxy.as_deref().or(config.upstream_proxy.as_deref()),
     ));
 
     let api_handler = Arc::new(ApiHandler::new(
@@ -142,6 +173,23 @@ async fn main() -> Result<(), StartupError> {
         modification_middleware.clone(),
     ));
 
+    let webhooks_shared = {
+        let hooks = storage::load_webhooks(&storage_path);
+        let shared = Arc::new(tokio::sync::RwLock::new(hooks));
+        let dispatcher = crate::webhooks::WebhookDispatcher::new(shared.clone());
+        dispatcher.spawn(session_manager.subscribe(), session_manager.clone());
+        shared
+    };
+    let mock_rules_shared = Arc::new(tokio::sync::RwLock::new(storage::load_mock_rules(&storage_path)));
+    let lua_scripts_shared = Arc::new(tokio::sync::RwLock::new(storage::load_lua_scripts(&storage_path)));
+
+    // Wire Mock and Lua into the middleware chain now that their shared state is ready.
+    {
+        let mut chain = middleware_chain.write().await;
+        chain.add_middleware(Arc::new(MockMiddleware::new(mock_rules_shared.clone())));
+        chain.add_middleware(Arc::new(LuaEngineMiddleware::new(lua_scripts_shared.clone())));
+    }
+
     let state = Arc::new(AppState {
         proxy_engine,
         middleware_chain,
@@ -149,12 +197,16 @@ async fn main() -> Result<(), StartupError> {
         throttling_config,
         dns_overrides: dns_overrides.clone(),
         map_local: map_local.clone(),
+        capture_filter: capture_filter.clone(),
         session_manager,
         breakpoint_manager,
         api_handler,
         storage_path,
         started_at: std::time::Instant::now(),
         config: config.clone(),
+        webhooks: webhooks_shared,
+        mock_rules: mock_rules_shared,
+        lua_scripts: lua_scripts_shared,
     });
 
     let app = management::management_router(state.clone())
@@ -215,6 +267,61 @@ async fn main() -> Result<(), StartupError> {
         } else {
             None
         };
+
+    // Optional SOCKS5 listener.
+    if let Some(socks5_port) = config.socks5_port {
+        let socks5_addr_str = format!("{}:{}", config.bind_host, socks5_port);
+        match tokio::net::TcpListener::bind(&socks5_addr_str).await {
+            Ok(socks5_listener) => {
+                println!("oproxy SOCKS5 listener on socks5://{}", socks5_addr_str);
+                let eng_s5 = state.proxy_engine.clone();
+                let dns_s5 = dns_overrides.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let (mut stream, _peer) = match socks5_listener.accept().await {
+                            Ok(pair) => pair,
+                            Err(e) => { tracing::warn!(error=%e, "SOCKS5 accept error"); continue; }
+                        };
+                        let engine = eng_s5.clone();
+                        let dns = dns_s5.clone();
+                        tokio::spawn(async move {
+                            let target = match crate::transport::socks5::handshake(&mut stream).await {
+                                Ok(t) => t,
+                                Err(e) => { tracing::debug!(error=%e, "SOCKS5 handshake failed"); return; }
+                            };
+                            // Apply DNS override
+                            let resolved_host = {
+                                let ovr = dns.read().await;
+                                ovr.get(&target.host).cloned().unwrap_or_else(|| target.host.clone())
+                            };
+                            let resolved = crate::transport::socks5::Socks5Target {
+                                host: resolved_host,
+                                port: target.port,
+                            };
+                            if engine.mitm_enabled {
+                                if let Some(ca) = engine.ca.clone() {
+                                    // MITM path: intercept TLS same as HTTP CONNECT.
+                                    // TcpStream implements AsyncRead+AsyncWrite directly.
+                                    mitm_intercept(stream, resolved.host.clone(), engine.clone(), ca).await;
+                                } else {
+                                    if let Err(e) = crate::transport::socks5::tunnel(stream, &resolved).await {
+                                        tracing::debug!(error=%e, "SOCKS5 tunnel error");
+                                    }
+                                }
+                            } else {
+                                if let Err(e) = crate::transport::socks5::tunnel(stream, &resolved).await {
+                                    tracing::debug!(error=%e, "SOCKS5 tunnel error");
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, port=socks5_port, "Failed to bind SOCKS5 listener");
+            }
+        }
+    }
 
     println!("Press Ctrl-C to stop.");
 
@@ -401,7 +508,7 @@ async fn handle_connect(
             Ok(upgraded) => {
                 if engine.mitm_enabled {
                     if let Some(ca) = engine.ca.clone() {
-                        mitm_intercept(upgraded, hostname.clone(), engine.clone(), ca).await;
+                        mitm_intercept(hyper_util::rt::TokioIo::new(upgraded), hostname.clone(), engine.clone(), ca).await;
                         return;
                     }
                 }
@@ -429,6 +536,7 @@ async fn handle_connect(
                                 status_code: 200,
                                 ttfb_ms: 0,
                                 body_ms: 0,
+                                ..Default::default()
                             },
                         );
                     }
@@ -453,6 +561,7 @@ async fn handle_connect(
                                 status_code: 502,
                                 ttfb_ms: 0,
                                 body_ms: 0,
+                                ..Default::default()
                             },
                         );
                     }
@@ -468,12 +577,20 @@ async fn handle_connect(
         .unwrap()
 }
 
-async fn mitm_intercept(
-    upgraded: hyper::upgrade::Upgraded,
+/// Perform a MITM TLS interception on any async I/O stream.
+///
+/// Used by both the HTTP CONNECT upgrade path (`hyper::upgrade::Upgraded` wrapped
+/// in `TokioIo`) and the SOCKS5 path (raw `TcpStream`).  The caller is responsible
+/// for wrapping `hyper::upgrade::Upgraded` in `hyper_util::rt::TokioIo` before
+/// calling; `TcpStream` can be passed directly.
+async fn mitm_intercept<IO>(
+    io: IO,
     hostname: String,
     engine: Arc<ProxyEngine>,
     ca: Arc<crate::certs::CertificateAuthority>,
-) {
+) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (cert_der, key_der) = match ca.get_certificate_for_domain(&hostname).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -496,7 +613,6 @@ async fn mitm_intercept(
         }
     };
 
-    let io = hyper_util::rt::TokioIo::new(upgraded);
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
     let tls_stream = match acceptor.accept(io).await {
         Ok(s) => s,

@@ -27,7 +27,7 @@ async fn test_rewrite_rules() {
     chain.add_middleware(Arc::new(rewrite_plugin));
     
     let middleware_chain = Arc::new(RwLock::new(chain));
-    let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10 * 1024 * 1024, 10, 30));
+    let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10 * 1024 * 1024, 10, 30, None));
     
     // 2. Prepare request matching criteria
     let req = Request::builder()

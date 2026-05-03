@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::plugins::capture_filter::SKIP_RECORDING_HEADER;
 use crate::session::SharedSessionManager;
 use uuid::Uuid;
 
@@ -20,11 +21,36 @@ impl Middleware for InspectionMiddleware {
     }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
+        // CaptureFilterMiddleware signals "don't record this host" via a header.
+        // Strip it here so it never leaks to the upstream server.
+        if ctx.headers.remove(SKIP_RECORDING_HEADER).is_some() {
+            return MiddlewareAction::Continue;
+        }
+
+        // Extract inspector data injected by upstream inspector middlewares, then strip.
+        let jwt_info: Option<crate::session::JwtInfo> = ctx.headers
+            .remove("x-oproxy-jwt")
+            .and_then(|v| serde_json::from_str(&v).ok());
+        let graphql_info: Option<crate::session::GraphQLInfo> = ctx.headers
+            .remove("x-oproxy-graphql")
+            .and_then(|v| serde_json::from_str(&v).ok());
+        let grpc_info: Option<crate::session::GrpcInfo> = ctx.headers
+            .remove("x-oproxy-grpc")
+            .and_then(|v| serde_json::from_str(&v).ok());
+
         let id = Uuid::new_v4().to_string();
         ctx.headers.insert("x-oproxy-session-id".to_string(), id.clone());
-        
-        self.session_manager.record_request(id, ctx.clone());
-        
+        self.session_manager.record_request(id.clone(), ctx.clone());
+
+        if jwt_info.is_some() || graphql_info.is_some() || grpc_info.is_some() {
+            let data = crate::session::InspectorData {
+                jwt: jwt_info,
+                graphql: graphql_info,
+                grpc: grpc_info,
+            };
+            self.session_manager.update_inspector_data(&id, data);
+        }
+
         MiddlewareAction::Continue
     }
 
@@ -49,6 +75,7 @@ impl Middleware for InspectionMiddleware {
                 status_code: ctx.status,
                 ttfb_ms: ctx.ttfb_ms,
                 body_ms: ctx.body_ms,
+                ..Default::default()
             };
             self.session_manager.record_response_with_metrics(session.id, ctx.clone(), metrics);
         }
@@ -134,6 +161,28 @@ mod tests {
         mw.on_request(&mut rq).await;
         let mut rs = res("/test", 200, "");
         assert_eq!(mw.on_response(&mut rs).await, MiddlewareAction::Continue);
+    }
+
+    #[tokio::test]
+    async fn skip_recording_header_prevents_session_creation() {
+        let sm = Arc::new(SessionManager::new(10_000));
+        let mw = InspectionMiddleware::new(sm.clone());
+        let mut ctx = req("/filtered");
+        ctx.headers.insert(crate::middleware::plugins::capture_filter::SKIP_RECORDING_HEADER.to_string(), "true".to_string());
+        let action = mw.on_request(&mut ctx).await;
+        assert_eq!(action, MiddlewareAction::Continue);
+        assert!(sm.get_all_sessions().is_empty(), "filtered host must not be recorded");
+    }
+
+    #[tokio::test]
+    async fn skip_recording_header_is_stripped_from_context() {
+        let sm = Arc::new(SessionManager::new(10_000));
+        let mw = InspectionMiddleware::new(sm.clone());
+        let mut ctx = req("/filtered");
+        ctx.headers.insert(crate::middleware::plugins::capture_filter::SKIP_RECORDING_HEADER.to_string(), "true".to_string());
+        mw.on_request(&mut ctx).await;
+        assert!(!ctx.headers.contains_key(crate::middleware::plugins::capture_filter::SKIP_RECORDING_HEADER),
+            "skip header must be removed so it never reaches upstream");
     }
 
     #[tokio::test]

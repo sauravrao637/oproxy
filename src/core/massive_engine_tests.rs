@@ -15,6 +15,7 @@ mod tests {
             10 * 1024 * 1024,
             10,
             30,
+            None,
         );
         assert!(!engine.mitm_enabled);
     }

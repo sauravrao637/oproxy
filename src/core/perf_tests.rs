@@ -9,7 +9,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_performance_overhead() {
         let middleware_chain = Arc::new(RwLock::new(MiddlewareChain::new()));
-        let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10*1024*1024, 10, 30));
+        let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10*1024*1024, 10, 30, None));
 
         let start = Instant::now();
         let iterations = 1000;

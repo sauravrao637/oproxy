@@ -16,14 +16,14 @@ mod tests {
 
     #[tokio::test]
     async fn engine_created_with_mitm_disabled() {
-        let engine = ProxyEngine::new(Arc::new(RwLock::new(MiddlewareChain::new())), None, false, 30, 10*1024*1024, 10, 30);
+        let engine = ProxyEngine::new(Arc::new(RwLock::new(MiddlewareChain::new())), None, false, 30, 10*1024*1024, 10, 30, None);
         assert!(!engine.mitm_enabled);
         assert!(engine.ca.is_none());
     }
 
     #[tokio::test]
     async fn engine_created_with_mitm_enabled_flag() {
-        let engine = ProxyEngine::new(Arc::new(RwLock::new(MiddlewareChain::new())), None, true, 30, 10*1024*1024, 10, 30);
+        let engine = ProxyEngine::new(Arc::new(RwLock::new(MiddlewareChain::new())), None, true, 30, 10*1024*1024, 10, 30, None);
         assert!(engine.mitm_enabled);
     }
 
@@ -72,18 +72,87 @@ mod tests {
     /// We verify this by inspecting the built header map directly.
     #[tokio::test]
     async fn engine_strips_internal_headers_before_forward() {
-        // Simulate what the engine does: populate internal headers, then strip them.
         let mut headers: HashMap<String, String> = HashMap::new();
         headers.insert("x-oproxy-destination".to_string(), "http://10.0.0.1".to_string());
         headers.insert("x-oproxy-session-id".to_string(), "some-uuid".to_string());
         headers.insert("accept".to_string(), "text/html".to_string());
 
-        // Replicate the stripping logic from engine.rs
         headers.remove("x-oproxy-destination");
         headers.remove("x-oproxy-session-id");
 
         assert!(!headers.contains_key("x-oproxy-destination"), "destination header must be stripped");
         assert!(!headers.contains_key("x-oproxy-session-id"), "session ID header must be stripped");
         assert!(headers.contains_key("accept"), "legitimate headers must be preserved");
+    }
+
+    /// Hop-by-hop headers are illegal in HTTP/2 and must be stripped before forwarding.
+    #[tokio::test]
+    async fn engine_strips_hop_by_hop_headers() {
+        let hop_by_hop = ["connection", "keep-alive", "proxy-connection", "transfer-encoding",
+                          "te", "trailer", "trailers", "upgrade"];
+        let mut headers: HashMap<String, String> = HashMap::new();
+        for h in &hop_by_hop {
+            headers.insert(h.to_string(), "value".to_string());
+        }
+        headers.insert("content-type".to_string(), "application/json".to_string());
+
+        for h in &hop_by_hop {
+            headers.remove(*h);
+        }
+
+        for h in &hop_by_hop {
+            assert!(!headers.contains_key(*h), "hop-by-hop header '{h}' must be stripped");
+        }
+        assert!(headers.contains_key("content-type"), "non-hop-by-hop header must survive");
+    }
+
+    // ── is_binary_content_type ───────────────────────────────────────────────
+
+    #[test]
+    fn binary_ct_image_types_are_binary() {
+        use crate::core::engine::is_binary_content_type;
+        for ct in &["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"] {
+            assert!(is_binary_content_type(ct), "{ct} must be binary");
+        }
+    }
+
+    #[test]
+    fn binary_ct_audio_video_are_binary() {
+        use crate::core::engine::is_binary_content_type;
+        assert!(is_binary_content_type("audio/mpeg"));
+        assert!(is_binary_content_type("video/mp4"));
+    }
+
+    #[test]
+    fn binary_ct_octet_stream_is_binary() {
+        use crate::core::engine::is_binary_content_type;
+        assert!(is_binary_content_type("application/octet-stream"));
+    }
+
+    #[test]
+    fn binary_ct_pdf_wasm_woff_are_binary() {
+        use crate::core::engine::is_binary_content_type;
+        assert!(is_binary_content_type("application/pdf"));
+        assert!(is_binary_content_type("application/wasm"));
+        assert!(is_binary_content_type("font/woff"));
+        assert!(is_binary_content_type("font/woff2"));
+    }
+
+    #[test]
+    fn binary_ct_text_and_json_are_not_binary() {
+        use crate::core::engine::is_binary_content_type;
+        assert!(!is_binary_content_type("text/plain"));
+        assert!(!is_binary_content_type("text/html"));
+        assert!(!is_binary_content_type("application/json"));
+        assert!(!is_binary_content_type("application/xml"));
+    }
+
+    #[test]
+    fn binary_ct_charset_suffix_ignored() {
+        use crate::core::engine::is_binary_content_type;
+        // "image/png; charset=utf-8" should still be detected as binary
+        assert!(is_binary_content_type("image/png; charset=utf-8"));
+        // "application/json; charset=utf-8" must NOT be binary
+        assert!(!is_binary_content_type("application/json; charset=utf-8"));
     }
 }

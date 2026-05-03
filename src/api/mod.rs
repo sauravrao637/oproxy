@@ -82,16 +82,21 @@ impl ApiHandler {
         self.playback_engine.replay(sessions).await;
     }
 
-    /// List sessions with optional timestamp filter and pagination.
-    /// `since` — return only sessions newer than this timestamp (incremental poll).
-    /// `limit` / `offset` — page through results (applied after `since` filtering).
+    /// List sessions with optional full-text search, timestamp filter, and pagination.
+    /// `q` — full-text search (supports `tag:x`, `host:x`, `method:GET`, `status:200`).
+    /// `since` — return only sessions newer than this timestamp.
+    /// `limit` / `offset` — pagination (applied after filtering).
     pub async fn list_sessions(
         &self,
         since: Option<chrono::DateTime<chrono::Utc>>,
         limit: Option<usize>,
         offset: Option<usize>,
+        q: Option<&str>,
     ) -> SessionListResponse {
-        let all = self.session_manager.get_all_sessions();
+        let all = match q {
+            Some(query) if !query.trim().is_empty() => self.session_manager.search_sessions(query),
+            _ => self.session_manager.get_all_sessions(),
+        };
         let total = all.len();
         let mut sessions: Vec<_> = if let Some(since_dt) = since {
             all.into_iter()
@@ -238,6 +243,15 @@ impl ApiHandler {
         let mut rules = self.modification_middleware.rules.write().await;
         if index < rules.len() { rules.remove(index); }
     }
+
+    pub async fn annotate_session(
+        &self,
+        id: &str,
+        note: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> bool {
+        self.session_manager.annotate(id, note, tags)
+    }
 }
 
 /// Pretty-print a body string based on its content-type.
@@ -251,4 +265,202 @@ pub fn pretty_body(body: &str, content_type: &str) -> String {
         }
     }
     body.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::plugins::breakpoints::BreakpointManager;
+    use crate::middleware::plugins::header_map::HeaderMapMiddleware;
+    use crate::middleware::plugins::modification::ModificationMiddleware;
+    use crate::middleware::plugins::rewrite::RewriteMiddleware;
+    use crate::middleware::{RequestContext, ResponseContext};
+    use crate::session::SessionManager;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_handler() -> ApiHandler {
+        let sm = Arc::new(SessionManager::new(10_000));
+        ApiHandler::new(
+            sm,
+            Arc::new(RewriteMiddleware::new(vec![])),
+            Arc::new(BreakpointManager::new()),
+            Arc::new(HeaderMapMiddleware::new(vec![])),
+            Arc::new(ModificationMiddleware::new(vec![])),
+        )
+    }
+
+    fn req(uri: &str) -> RequestContext {
+        RequestContext {
+            method: "GET".to_string(),
+            uri: uri.to_string(),
+            headers: HashMap::new(),
+            body: String::new(),
+            host: "localhost".to_string(),
+            body_bytes: None,
+        }
+    }
+
+    // ── list_sessions: since filter ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_sessions_no_filter_returns_all() {
+        let h = make_handler();
+        h.session_manager.record_request("a".to_string(), req("/a"));
+        h.session_manager.record_request("b".to_string(), req("/b"));
+        let r = h.list_sessions(None, None, None, None).await;
+        assert_eq!(r.total, 2);
+        assert_eq!(r.sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_since_future_excludes_completed_sessions() {
+        let h = make_handler();
+        h.session_manager.record_request("a".to_string(), req("/a"));
+        // Attach a response so the session is "completed" — pending sessions always pass since filter.
+        h.session_manager.record_response("a".to_string(), ResponseContext {
+            status: 200,
+            headers: HashMap::new(),
+            body: String::new(),
+            request_uri: "/a".to_string(),
+            session_id: None,
+            ttfb_ms: 0,
+            body_ms: 0,
+            body_bytes: None,
+        });
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let r = h.list_sessions(Some(future), None, None, None).await;
+        assert_eq!(r.total, 1);
+        assert_eq!(r.sessions.len(), 0, "completed session older than since must be excluded");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_since_past_returns_all() {
+        let h = make_handler();
+        h.session_manager.record_request("a".to_string(), req("/a"));
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        let r = h.list_sessions(Some(past), None, None, None).await;
+        assert_eq!(r.sessions.len(), 1);
+    }
+
+    // ── list_sessions: pagination ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_sessions_limit_caps_results() {
+        let h = make_handler();
+        for i in 0..5u32 {
+            h.session_manager.record_request(format!("id-{i}"), req(&format!("/{i}")));
+        }
+        let r = h.list_sessions(None, Some(2), None, None).await;
+        assert_eq!(r.total, 5);
+        assert_eq!(r.sessions.len(), 2);
+        assert_eq!(r.limit, Some(2));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_offset_skips_entries() {
+        let h = make_handler();
+        for i in 0..5u32 {
+            h.session_manager.record_request(format!("id-{i}"), req(&format!("/{i}")));
+        }
+        let r = h.list_sessions(None, None, Some(3), None).await;
+        assert_eq!(r.total, 5);
+        assert_eq!(r.sessions.len(), 2); // 5 - skip 3
+        assert_eq!(r.offset, Some(3));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_limit_and_offset() {
+        let h = make_handler();
+        for i in 0..10u32 {
+            h.session_manager.record_request(format!("id-{i}"), req(&format!("/{i}")));
+        }
+        let r = h.list_sessions(None, Some(3), Some(4), None).await;
+        assert_eq!(r.total, 10);
+        assert_eq!(r.sessions.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_offset_beyond_end_returns_empty() {
+        let h = make_handler();
+        h.session_manager.record_request("id1".to_string(), req("/a"));
+        let r = h.list_sessions(None, None, Some(100), None).await;
+        assert_eq!(r.total, 1);
+        assert_eq!(r.sessions.len(), 0);
+    }
+
+    // ── get_session_details ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_session_details_returns_some_for_known_id() {
+        let h = make_handler();
+        h.session_manager.record_request("x".to_string(), req("/detail"));
+        let detail = h.get_session_details("x").await;
+        assert!(detail.is_some());
+        assert_eq!(detail.unwrap().exchange.request.uri, "/detail");
+    }
+
+    #[tokio::test]
+    async fn get_session_details_returns_none_for_unknown_id() {
+        let h = make_handler();
+        assert!(h.get_session_details("ghost").await.is_none());
+    }
+
+    // ── clear_sessions ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn clear_sessions_empties_all() {
+        let h = make_handler();
+        h.session_manager.record_request("a".to_string(), req("/a"));
+        h.session_manager.record_request("b".to_string(), req("/b"));
+        h.clear_sessions().await;
+        let r = h.list_sessions(None, None, None, None).await;
+        assert_eq!(r.total, 0);
+    }
+
+    // ── pretty_body ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn pretty_body_formats_json() {
+        let raw = r#"{"b":2,"a":1}"#;
+        let out = pretty_body(raw, "application/json");
+        assert!(out.contains('\n'), "pretty JSON must be multi-line");
+        assert!(out.contains("\"a\": 1") || out.contains("\"b\": 2"), "keys must be present");
+    }
+
+    #[test]
+    fn pretty_body_json_content_type_with_charset() {
+        let raw = r#"{"ok":true}"#;
+        let out = pretty_body(raw, "application/json; charset=utf-8");
+        assert!(out.contains('\n'));
+    }
+
+    #[test]
+    fn pretty_body_non_json_content_type_returns_unchanged() {
+        let raw = "plain text body";
+        let out = pretty_body(raw, "text/plain");
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn pretty_body_malformed_json_returns_unchanged() {
+        let raw = r#"{"incomplete:"#;
+        let out = pretty_body(raw, "application/json");
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn pretty_body_empty_body_returns_empty() {
+        let out = pretty_body("", "application/json");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn pretty_body_vendor_json_type_returned_unchanged() {
+        // pretty_body only matches "application/json" and types containing "/json".
+        // "application/vnd.api+json" contains "+json" not "/json", so it falls through.
+        let raw = r#"{"x":1}"#;
+        let out = pretty_body(raw, "application/vnd.api+json");
+        assert_eq!(out, raw, "vendor +json types are not pretty-printed by current impl");
+    }
 }
