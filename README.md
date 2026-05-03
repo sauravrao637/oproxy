@@ -8,7 +8,7 @@
 
 ---
 
-<video src="assets/demo.mp4" autoplay loop muted playsinline style="width:100%;border-radius:8px;"></video>
+<video src="https://github.com/user-attachments/assets/1ca468ea-cc60-4f70-95fb-5373c343d7ba" autoplay loop muted playsinline style="width:100%;border-radius:8px;"></video>
 
 ---
 
