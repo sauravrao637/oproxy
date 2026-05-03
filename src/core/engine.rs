@@ -22,15 +22,46 @@ use tracing::{info, debug, error, instrument};
 use std::time::Instant;
 
 pub struct ProxyEngine {
-    pub http_client: Client,
-    pub streaming_client: Client, // no timeout — used for SSE / long-lived streams
+    /// (http_client, streaming_client) — pair wrapped for upstream proxy hot-reload.
+    clients: tokio::sync::RwLock<(Client, Client)>,
     pub middleware_chain: Arc<RwLock<MiddlewareChain>>,
     pub ca: Option<Arc<crate::certs::CertificateAuthority>>,
     pub mitm_enabled: bool,
     max_body_bytes: Arc<AtomicUsize>,
+    /// Retained so hot-reload can rebuild clients with same base settings.
+    timeout_secs: u64,
+    pool_max_idle_per_host: usize,
+    pool_idle_timeout_secs: u64,
 }
 
 impl ProxyEngine {
+    fn build_clients(
+        timeout_secs: u64,
+        pool_max_idle: usize,
+        pool_idle: std::time::Duration,
+        upstream_proxy: Option<&str>,
+    ) -> (Client, Client) {
+        let mut http = Client::builder()
+            .pool_max_idle_per_host(pool_max_idle)
+            .pool_idle_timeout(pool_idle)
+            .timeout(std::time::Duration::from_secs(timeout_secs));
+        let mut streaming = Client::builder()
+            .pool_max_idle_per_host(pool_max_idle)
+            .pool_idle_timeout(pool_idle);
+        if let Some(url) = upstream_proxy {
+            if let Ok(p) = reqwest::Proxy::all(url) {
+                http = http.proxy(p);
+            }
+            if let Ok(p) = reqwest::Proxy::all(url) {
+                streaming = streaming.proxy(p);
+            }
+        }
+        (
+            http.build().unwrap_or_else(|_| Client::new()),
+            streaming.build().unwrap_or_else(|_| Client::new()),
+        )
+    }
+
     pub fn new(
         middleware_chain: Arc<RwLock<MiddlewareChain>>,
         ca: Option<Arc<crate::certs::CertificateAuthority>>,
@@ -39,25 +70,37 @@ impl ProxyEngine {
         max_body_bytes: usize,
         pool_max_idle_per_host: usize,
         pool_idle_timeout_secs: u64,
+        upstream_proxy: Option<&str>,
     ) -> Self {
         let pool_idle = std::time::Duration::from_secs(pool_idle_timeout_secs);
+        let clients = Self::build_clients(timeout_secs, pool_max_idle_per_host, pool_idle, upstream_proxy);
         Self {
-            http_client: Client::builder()
-                .pool_max_idle_per_host(pool_max_idle_per_host)
-                .pool_idle_timeout(pool_idle)
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
-            streaming_client: Client::builder()
-                .pool_max_idle_per_host(pool_max_idle_per_host)
-                .pool_idle_timeout(pool_idle)
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            clients: tokio::sync::RwLock::new(clients),
             middleware_chain,
             ca,
             mitm_enabled,
             max_body_bytes: Arc::new(AtomicUsize::new(max_body_bytes)),
+            timeout_secs,
+            pool_max_idle_per_host,
+            pool_idle_timeout_secs,
         }
+    }
+
+    /// Returns a clone of the HTTP client (cheap — reqwest::Client is Arc-wrapped internally).
+    pub async fn http_client(&self) -> Client {
+        self.clients.read().await.0.clone()
+    }
+
+    /// Rebuilds both clients with a new upstream proxy URL. Pass None to disable proxy.
+    pub async fn set_upstream_proxy(&self, proxy_url: Option<&str>) {
+        let pool_idle = std::time::Duration::from_secs(self.pool_idle_timeout_secs);
+        let new_clients = Self::build_clients(
+            self.timeout_secs,
+            self.pool_max_idle_per_host,
+            pool_idle,
+            proxy_url,
+        );
+        *self.clients.write().await = new_clients;
     }
 
     /// Returns the current max body buffer size.
@@ -123,6 +166,25 @@ impl ProxyEngine {
             match action {
                 MiddlewareAction::Continue => {}
                 MiddlewareAction::StopAndReturn => {
+                    // Check if a mock response was embedded by MockMiddleware.
+                    if let Some(mock_json) = req_ctx.headers.get("x-oproxy-mock-response") {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(mock_json) {
+                            let status = v["status"].as_u64().unwrap_or(200) as u16;
+                            let body = v["body"].as_str().unwrap_or("").to_string();
+                            let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                            let mut builder = Response::builder().status(sc);
+                            if let Some(headers) = v["headers"].as_object() {
+                                for (k, val) in headers {
+                                    if let Some(vs) = val.as_str() {
+                                        builder = builder.header(k, vs);
+                                    }
+                                }
+                            }
+                            return builder.body(Body::from(body)).unwrap_or_else(|_| {
+                                (StatusCode::INTERNAL_SERVER_ERROR, "mock error").into_response()
+                            });
+                        }
+                    }
                     info!("Request stopped by middleware");
                     return (StatusCode::FORBIDDEN, "Request stopped by middleware").into_response()
                 },
@@ -138,6 +200,13 @@ impl ProxyEngine {
         // exact session correlation in InspectionMiddleware::on_response.
         let destination = req_ctx.headers.remove("x-oproxy-destination");
         let oproxy_session_id = req_ctx.headers.remove("x-oproxy-session-id");
+        // Strip inspector side-channel headers — set by inspector middlewares and read by
+        // InspectionMiddleware; must never be forwarded to the upstream target.
+        for hdr in &["x-oproxy-jwt", "x-oproxy-graphql", "x-oproxy-grpc",
+                     "x-oproxy-mock-response", "x-oproxy-skip-recording",
+                     "x-oproxy-map-local-file"] {
+            req_ctx.headers.remove(*hdr);
+        }
         // Remove Accept-Encoding so upstream always returns an uncompressed body that we
         // can store as readable UTF-8.  If the upstream ignores this and still sends a
         // compressed response we decompress it below before forwarding.
@@ -216,7 +285,11 @@ impl ProxyEngine {
         let is_sse = req_ctx.headers.get("accept")
             .map(|v| v.contains("text/event-stream"))
             .unwrap_or(false);
-        let client = if is_sse { &self.streaming_client } else { &self.http_client };
+        // Clone the client before any await — reqwest::Client is Arc-backed, clone is free.
+        let client = {
+            let pool = self.clients.read().await;
+            if is_sse { pool.1.clone() } else { pool.0.clone() }
+        };
 
         let net_start = Instant::now();
         let response = client

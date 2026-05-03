@@ -17,7 +17,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_unreachable_host_returns_bad_gateway() {
         let middleware_chain = Arc::new(RwLock::new(MiddlewareChain::new()));
-        let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10*1024*1024, 10, 30));
+        let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10*1024*1024, 10, 30, None));
 
         let app = Router::new()
             .fallback(move |req| {
@@ -51,7 +51,7 @@ mod tests {
         let mut chain = MiddlewareChain::new();
         chain.add_middleware(Arc::new(RoutingMiddleware::new(routing_table)));
         let middleware_chain = Arc::new(RwLock::new(chain));
-        let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10*1024*1024, 10, 30));
+        let engine = Arc::new(ProxyEngine::new(middleware_chain, None, false, 30, 10*1024*1024, 10, 30, None));
 
         let app = Router::new()
             .fallback(move |req| {

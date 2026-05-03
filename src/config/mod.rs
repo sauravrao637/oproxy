@@ -67,6 +67,13 @@ pub struct Config {
     /// Parse and log individual WebSocket frames for ws:// sessions. Default true.
     #[serde(default = "default_inspect_ws_frames")]
     pub inspect_ws_frames: bool,
+    /// Upstream proxy URL for chaining (e.g. "http://corp-proxy:3128" or "socks5://proxy:1080").
+    /// When set, all outbound requests are routed through this proxy.
+    #[serde(default)]
+    pub upstream_proxy: Option<String>,
+    /// Port to listen for SOCKS5 connections. Disabled when None (default).
+    #[serde(default)]
+    pub socks5_port: Option<u16>,
     /// Logging configuration.
     #[serde(default)]
     pub log: LogConfig,
@@ -96,6 +103,8 @@ impl Default for Config {
             log: LogConfig::default(),
             https_port: None,
             inspect_ws_frames: default_inspect_ws_frames(),
+            upstream_proxy: None,
+            socks5_port: None,
         }
     }
 }

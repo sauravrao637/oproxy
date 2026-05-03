@@ -19,6 +19,8 @@ pub enum RewriteAction {
     AddHeader { name: String, value: String },
     RemoveHeader { name: String },
     ReplaceHeader { name: String, pattern: String, replacement: String },
+    Redirect { status: u16, location: String },
+    Block { status: u16 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,12 +123,33 @@ impl Middleware for RewriteMiddleware {
         let rules = self.rules.read().await;
         for rule in rules.iter().filter(|r| r.enabled) {
             if self.matches(rule, ctx) {
-                self.apply_action_header(rule, &mut ctx.headers);
-                let before = ctx.body.len();
-                self.apply_action(&rule, &mut ctx.body);
-                // Body was modified — clear raw bytes so engine forwards the string.
-                if ctx.body.len() != before || ctx.body_bytes.is_some() {
-                    ctx.body_bytes = None;
+                match &rule.action {
+                    RewriteAction::Redirect { status, location } => {
+                        let mock = serde_json::json!({
+                            "status": status,
+                            "headers": {"Location": location},
+                            "body": ""
+                        });
+                        ctx.headers.insert("x-oproxy-mock-response".to_string(), mock.to_string());
+                        return MiddlewareAction::StopAndReturn;
+                    }
+                    RewriteAction::Block { status } => {
+                        let mock = serde_json::json!({
+                            "status": status,
+                            "headers": {},
+                            "body": ""
+                        });
+                        ctx.headers.insert("x-oproxy-mock-response".to_string(), mock.to_string());
+                        return MiddlewareAction::StopAndReturn;
+                    }
+                    _ => {
+                        self.apply_action_header(rule, &mut ctx.headers);
+                        let before = ctx.body.len();
+                        self.apply_action(rule, &mut ctx.body);
+                        if ctx.body.len() != before || ctx.body_bytes.is_some() {
+                            ctx.body_bytes = None;
+                        }
+                    }
                 }
             }
         }
@@ -142,6 +165,9 @@ impl Middleware for RewriteMiddleware {
                 self.apply_action(&rule, &mut ctx.body);
                 if ctx.body.len() != before || ctx.body_bytes.is_some() {
                     ctx.body_bytes = None;
+                    // Content-Length from upstream is now stale — remove it so hyper
+                    // doesn't panic on a length mismatch when we serve the modified body.
+                    ctx.headers.remove("content-length");
                 }
             }
         }

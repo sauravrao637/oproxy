@@ -1,5 +1,10 @@
-const CACHE = 'oproxy-shell-v1';
-const SHELL = ['/', '/manifest.json', '/icons/icon.svg'];
+const CACHE = 'oproxy-shell-v3';
+const SHELL = [
+  '/', '/manifest.json', '/icons/icon.svg',
+  '/app.css',
+  '/js/state.js', '/js/traffic.js', '/js/compose.js',
+  '/js/rules.js', '/js/breakpoints.js', '/js/chrome.js',
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(

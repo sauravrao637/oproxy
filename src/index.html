@@ -11,460 +11,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="oproxy">
 <link rel="apple-touch-icon" href="/icons/icon.svg">
-<style>
-*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%}
-body{font-family:-apple-system,"SF Pro Text","Helvetica Neue",Helvetica,sans-serif;font-size:13px;-webkit-font-smoothing:antialiased;color:var(--text);background:var(--bg)}
-
-/* ── Themes ───────────────────────────────────────────────────────────────── */
-:root,[data-theme="light"]{
-  --accent:#0A7AFF;--accent-l:rgba(10,122,255,0.10);--accent-ll:rgba(10,122,255,0.06);
-  --success:#34C759;--warning:#FF9500;--danger:#FF3B2F;--purple:#AF52DE;
-  --blue:#0A7AFF;--green:#34C759;
-  --bg:#F2F2F7;--surface:#FFFFFF;--surf2:rgba(246,246,246,0.98);
-  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.12);
-  --text:#1C1C1E;--text2:#3C3C43;--text3:#636366;--text4:#AEAEB2;
-  --mono:"SF Mono","Menlo","Cascadia Code","Fira Code",ui-monospace,monospace;
-  --toolbar-bg:rgba(255,255,255,0.96);
-  --row-hover:rgba(0,0,0,0.025);--row-sel:rgba(10,122,255,0.07);
-  --code-bg:#F7F7F8;
-}
-[data-theme="dark"]{
-  --bg:#111113;--surface:#1C1C1E;--surf2:#2C2C2E;
-  --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.11);
-  --text:#F5F5F7;--text2:#EBEBF5;--text3:#8E8E93;--text4:#48484A;
-  --toolbar-bg:rgba(28,28,30,0.97);
-  --row-hover:rgba(255,255,255,0.03);--row-sel:rgba(10,122,255,0.16);
-  --code-bg:#28282A;
-  --accent-l:rgba(10,122,255,0.18);--accent-ll:rgba(10,122,255,0.10);
-}
-
-/* ── Layout ───────────────────────────────────────────────────────────────── */
-.app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
-.body{display:flex;flex:1;overflow:hidden;min-height:0}
-.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
-.view{flex:1;display:flex;flex-direction:column;overflow:hidden}
-
-/* ── Toolbar ──────────────────────────────────────────────────────────────── */
-.toolbar{
-  display:flex;align-items:center;gap:6px;padding:0 14px;height:50px;
-  background:var(--toolbar-bg);border-bottom:0.5px solid var(--border2);
-  backdrop-filter:blur(20px);flex-shrink:0;
-}
-.app-name{font-size:13px;font-weight:600;letter-spacing:-0.3px;color:var(--text)}
-.tb-sep{width:0.5px;height:18px;background:var(--border2);margin:0 2px;flex-shrink:0}
-.spacer{flex:1}
-.mitm-badge{
-  display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;
-  font-size:11px;font-weight:500;border:0.5px solid;
-}
-.mitm-on{background:rgba(52,199,89,.10);color:#1A7F3C;border-color:rgba(52,199,89,.25)}
-.mitm-off{background:rgba(0,0,0,.05);color:var(--text3);border-color:var(--border)}
-[data-theme="dark"] .mitm-on{color:#30D158;background:rgba(52,199,89,.15)}
-[data-theme="dark"] .mitm-off{background:rgba(255,255,255,.06)}
-
-/* ── Buttons ──────────────────────────────────────────────────────────────── */
-.btn{
-  display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:7px;
-  border:0.5px solid var(--border2);background:var(--surface);color:var(--text);
-  font-size:12px;cursor:pointer;transition:all 0.14s;white-space:nowrap;font-family:inherit;
-}
-.btn:hover{background:var(--accent-ll);border-color:rgba(10,122,255,0.22)}
-.btn svg{flex-shrink:0;pointer-events:none}
-.btn-primary{background:var(--accent);color:#fff;border-color:transparent}
-.btn-primary:hover{background:#0066D6;border-color:transparent}
-.btn-stop{background:var(--danger);color:#fff;border-color:transparent}
-.btn-stop:hover{background:#C0392B;border-color:transparent}
-.btn-ghost{border-color:transparent;background:transparent}
-.btn-ghost:hover{background:var(--row-hover);border-color:var(--border)}
-.btn-sm{font-size:11px;padding:3px 8px;border-radius:6px}
-.btn-danger{color:var(--danger);border-color:rgba(255,59,47,0.2)}
-.btn-danger:hover{background:rgba(255,59,47,0.07)}
-.btn-icon{
-  padding:5px;border-radius:7px;border:0.5px solid var(--border2);
-  background:var(--surface);color:var(--text);cursor:pointer;
-  display:inline-flex;align-items:center;justify-content:center;transition:all 0.14s;
-}
-.btn-icon:hover{background:var(--accent-ll);border-color:rgba(10,122,255,0.22)}
-.rec-dot{width:7px;height:7px;border-radius:50%;background:#fff;animation:pulse 1.5s ease-in-out infinite;flex-shrink:0}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-
-/* ── Search ───────────────────────────────────────────────────────────────── */
-.search-wrap{
-  display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:7px;
-  border:0.5px solid var(--border2);background:rgba(118,118,128,0.12);width:260px;
-}
-[data-theme="dark"] .search-wrap{background:rgba(118,118,128,0.18)}
-.search-wrap input{border:none;background:transparent;outline:none;font-size:12px;color:var(--text);width:100%;font-family:inherit}
-.search-wrap input::placeholder{color:var(--text4)}
-
-/* ── Sidebar ──────────────────────────────────────────────────────────────── */
-.sidebar{
-  width:210px;background:var(--surf2);border-right:0.5px solid var(--border);
-  flex-shrink:0;overflow-y:auto;padding:10px 0 16px;
-}
-.sec-label{padding:12px 14px 5px;font-size:10px;font-weight:600;color:var(--text4);letter-spacing:0.6px;text-transform:uppercase}
-.nav-item{display:flex;align-items:center;gap:8px;padding:5px 12px 5px 14px;cursor:pointer;font-size:12.5px;color:var(--text);transition:background 0.1s}
-.nav-item:hover{background:var(--row-hover)}
-.nav-item.active{background:var(--accent-l);color:var(--accent);font-weight:500}
-.nav-icon{width:15px;height:15px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.nav-badge{margin-left:auto;font-size:10px;background:rgba(0,0,0,0.07);border-radius:10px;padding:1px 6px;color:var(--text3);font-weight:500;min-width:18px;text-align:center}
-[data-theme="dark"] .nav-badge{background:rgba(255,255,255,0.08)}
-.nav-item.active .nav-badge{background:rgba(10,122,255,0.14);color:var(--accent)}
-.nav-divider{height:0.5px;background:var(--border);margin:7px 0}
-.focus-wrap{padding:0 10px 4px}
-.focus-input{width:100%;padding:4px 8px;border-radius:6px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:11.5px;font-family:inherit;outline:none;transition:border-color .14s}
-.focus-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,122,255,.10)}
-.focus-input::placeholder{color:var(--text4)}
-.focus-chips{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
-.focus-chip{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:20px;font-size:11px;background:var(--accent-l);color:var(--accent);border:0.5px solid rgba(10,122,255,0.2)}
-.focus-chip-x{cursor:pointer;opacity:0.6;font-size:10px;line-height:1}
-.focus-chip-x:hover{opacity:1}
-
-/* ── Filter bar ───────────────────────────────────────────────────────────── */
-.filter-bar{display:flex;align-items:center;gap:3px;padding:6px 12px;background:var(--surface);border-bottom:0.5px solid var(--border);flex-shrink:0}
-.chip{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:5px;font-size:11px;color:var(--text3);cursor:pointer;border:0.5px solid transparent;transition:all 0.13s;font-family:inherit;background:transparent}
-.chip:hover{background:var(--row-hover)}
-.chip.on{background:var(--accent-l);color:var(--accent);border-color:rgba(10,122,255,0.18)}
-.chip-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.chip-sep{width:0.5px;height:14px;background:var(--border);margin:0 4px}
-.filter-count{margin-left:auto;font-size:11px;color:var(--text4)}
-
-/* ── Table ────────────────────────────────────────────────────────────────── */
-.table-wrap{flex:1;overflow-y:auto}
-.rtable{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}
-.rtable thead th{
-  position:sticky;top:0;z-index:1;padding:7px 10px;text-align:left;
-  font-size:10px;font-weight:600;color:var(--text4);letter-spacing:0.5px;text-transform:uppercase;
-  background:var(--surface);border-bottom:0.5px solid var(--border);
-  user-select:none;white-space:nowrap;cursor:pointer;
-}
-.rtable thead th:hover{color:var(--text3)}
-.sort-ic{display:inline-flex;flex-direction:column;gap:1px;margin-left:3px;opacity:0.35;vertical-align:middle}
-.sort-ic span{display:block;width:0;height:0;border-left:3px solid transparent;border-right:3px solid transparent}
-.sort-ic .up{border-bottom:4px solid currentColor}
-.sort-ic .dn{border-top:4px solid currentColor}
-th.asc .sort-ic{opacity:1;color:var(--accent)}.th.asc .sort-ic .dn{opacity:.25}
-th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25}
-.rtable tbody tr{border-bottom:0.5px solid var(--border);cursor:pointer;transition:background 0.1s}
-.rtable tbody tr:hover{background:var(--row-hover)}
-.rtable tbody tr.sel{background:var(--row-sel)}
-.rtable tbody tr:last-child{border-bottom:none}
-.rtable td{padding:7px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rtable .empty td{text-align:center;color:var(--text4);padding:40px 20px;white-space:normal;line-height:1.6}
-
-/* ── Badges ───────────────────────────────────────────────────────────────── */
-.mbadge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:0.2px;font-family:var(--mono)}
-.mGET{background:rgba(52,199,89,.12);color:#1A7F3C}
-.mPOST{background:rgba(10,122,255,.10);color:#004EA3}
-.mPUT{background:rgba(255,149,0,.12);color:#A05900}
-.mDELETE{background:rgba(255,59,47,.10);color:#A8140F}
-.mPATCH{background:rgba(175,82,222,.12);color:#6C1F96}
-.mOTHER{background:rgba(0,0,0,.06);color:var(--text3)}
-[data-theme="dark"] .mGET{color:#30D158}[data-theme="dark"] .mPOST{color:#4EA0FF}
-[data-theme="dark"] .mPUT{color:#FF9F0A}[data-theme="dark"] .mDELETE{color:#FF453A}
-[data-theme="dark"] .mPATCH{color:#BF5AF2}
-.sbadge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;font-family:var(--mono)}
-.s2{background:rgba(52,199,89,.12);color:#1A7F3C}
-.s3{background:rgba(255,149,0,.12);color:#A05900}
-.s4{background:rgba(255,59,47,.10);color:#A8140F}
-.s5{background:rgba(175,82,222,.12);color:#6C1F96}
-.s0{background:rgba(0,0,0,.05);color:var(--text4)}
-[data-theme="dark"] .s2{color:#30D158}[data-theme="dark"] .s3{color:#FF9F0A}
-[data-theme="dark"] .s4{color:#FF453A}[data-theme="dark"] .s5{color:#BF5AF2}
-
-/* ── Duration bar ─────────────────────────────────────────────────────────── */
-.dur-wrap{display:flex;align-items:center;gap:7px}
-.dur-txt{min-width:38px;color:var(--text3);font-size:11px}
-.dur-track{flex:1;height:3px;background:rgba(0,0,0,.07);border-radius:2px;max-width:46px}
-[data-theme="dark"] .dur-track{background:rgba(255,255,255,.1)}
-.dur-fill{height:100%;border-radius:2px;background:var(--accent)}
-.dur-txt.dur-fast{color:var(--success)}
-.dur-txt.dur-slow{color:var(--danger)}
-.pending-spinner{display:inline-block;width:8px;height:8px;border:1.5px solid var(--warning);border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* ── Detail panel ─────────────────────────────────────────────────────────── */
-.detail{
-  width:340px;min-width:240px;max-width:640px;border-left:0.5px solid var(--border);
-  display:flex;flex-direction:column;background:var(--surface);flex-shrink:0;position:relative;
-}
-.detail.hide{display:none}
-.resize-handle{position:absolute;left:-4px;top:0;width:12px;height:100%;cursor:col-resize;z-index:10;transition:background .15s}
-.resize-handle::after{content:'';position:absolute;left:4px;top:0;width:3px;height:100%;background:transparent;border-radius:2px;transition:background .15s}
-.resize-handle:hover::after,.resize-handle.drag::after{background:var(--accent)}
-.detail-topbar{display:flex;align-items:center;gap:5px;padding:6px 10px;border-bottom:0.5px solid var(--border);flex-shrink:0}
-.detail-title{flex:1;font-size:11.5px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dtabs{display:flex;border-bottom:0.5px solid var(--border);flex-shrink:0}
-.dtab{flex:1;padding:8px 3px;font-size:11px;font-weight:500;text-align:center;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;transition:all 0.14s}
-.dtab.on{color:var(--accent);border-bottom-color:var(--accent)}
-.dtab:hover{color:var(--text)}
-.dbody{flex:1;overflow-y:auto}
-.dempty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:10px;color:var(--text4);font-size:12px;text-align:center;padding:24px}
-.dsec{padding:13px 15px;border-bottom:0.5px solid var(--border)}
-.dsec:last-child{border-bottom:none}
-.dsec-title{font-size:10px;font-weight:600;color:var(--text4);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:9px}
-.kv{display:flex;align-items:flex-start;gap:8px;margin-bottom:5px}
-.kv:last-child{margin-bottom:0}
-.kk{font-size:11.5px;color:var(--text3);min-width:76px;flex-shrink:0;padding-top:1px}
-.kv-val{font-size:11.5px;color:var(--text);word-break:break-all}
-.kv-mono{font-family:var(--mono);font-size:11px}
-.kv-accent{color:var(--accent)}
-.hrow{display:flex;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--border);gap:8px}
-.hrow:last-child{border-bottom:none}
-.hk{font-size:11px;color:var(--text3);font-family:var(--mono);flex-shrink:0;max-width:130px;overflow:hidden;text-overflow:ellipsis}
-.hv{font-size:11px;color:var(--text);font-family:var(--mono);text-align:right;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.body-pre{background:var(--code-bg);border-radius:7px;padding:10px;font-family:var(--mono);font-size:11px;color:var(--text);line-height:1.6;overflow:auto;white-space:pre-wrap;word-break:break-all;max-height:300px}
-
-/* ── JSON syntax highlighting ─────────────────────────────────────────────── */
-.json-k{color:#AF52DE}
-.json-s{color:#1A7F3C}
-.json-n{color:#A05900}
-.json-b{color:var(--accent)}
-.json-null{color:var(--text4)}
-[data-theme="dark"] .json-k{color:#BF5AF2}
-[data-theme="dark"] .json-s{color:#30D158}
-[data-theme="dark"] .json-n{color:#FF9F0A}
-
-/* ── Timing waterfall ─────────────────────────────────────────────────────── */
-.wf{display:flex;flex-direction:column;gap:6px}
-.wf-row{display:flex;align-items:center;gap:8px}
-.wf-lbl{font-size:10.5px;color:var(--text3);min-width:80px;text-align:right;flex-shrink:0}
-.wf-track{flex:1;height:10px;background:rgba(0,0,0,.06);border-radius:3px;position:relative;overflow:hidden}
-[data-theme="dark"] .wf-track{background:rgba(255,255,255,.07)}
-.wf-bar{height:100%;border-radius:3px;position:absolute}
-.wf-wait{background:#FF9500}.wf-recv{background:#0A7AFF}.wf-dns{background:#AF52DE;opacity:.7}
-.wf-ms{font-size:10px;color:var(--text4);min-width:32px;text-align:right;font-family:var(--mono)}
-.wf-legend{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:10px}
-.wf-leg{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--text3)}
-.wf-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
-
-/* ── Compose ──────────────────────────────────────────────────────────────── */
-.compose-wrap{padding:12px 14px;display:flex;flex-direction:column;gap:9px}
-.compose-top{display:flex;gap:6px}
-.compose-method{padding:5px 8px;border-radius:7px;border:0.5px solid var(--border2);background:var(--surface);color:var(--accent);font-size:12px;font-family:var(--mono);font-weight:700;outline:none;cursor:pointer;min-width:78px}
-.compose-method:focus{border-color:var(--accent)}
-.compose-url{flex:1;padding:5px 9px;border-radius:7px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:11.5px;font-family:var(--mono);outline:none;transition:border-color .14s}
-.compose-url:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,122,255,.10)}
-.ctab-bar{display:flex;border-bottom:0.5px solid var(--border);margin:0 -14px;padding:0 14px}
-.ctab{padding:5px 10px;font-size:11px;font-weight:500;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;transition:all .14s}
-.ctab.on{color:var(--accent);border-bottom-color:var(--accent)}
-.ctab:hover{color:var(--text)}
-.compose-ta{width:100%;min-height:90px;padding:7px 9px;border-radius:7px;border:0.5px solid var(--border2);background:var(--code-bg);color:var(--text);font-size:11px;font-family:var(--mono);outline:none;resize:vertical;line-height:1.6;transition:border-color .14s}
-.compose-ta:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,122,255,.10)}
-
-/* ── Tool panels ──────────────────────────────────────────────────────────── */
-.tool-panel{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:14px}
-.card{background:var(--surface);border-radius:10px;border:0.5px solid var(--border);overflow:hidden}
-.card-hdr{display:flex;align-items:center;justify-content:space-between;padding:11px 15px;border-bottom:0.5px solid var(--border)}
-.card-title{font-size:13px;font-weight:600;color:var(--text)}
-.card-body{padding:14px 15px}
-.form-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:10px}
-.form-row:last-child{margin-bottom:0}
-.fgroup{display:flex;flex-direction:column;gap:4px;flex:1}
-.flabel{font-size:11px;color:var(--text3);font-weight:500}
-.finput{padding:6px 9px;border-radius:7px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:12px;font-family:inherit;outline:none;transition:border-color .14s;width:100%}
-.finput:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,122,255,.10)}
-.fselect{
-  appearance:none;cursor:pointer;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23636366' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 8px center;padding-right:24px;
-}
-.tlist{width:100%;border-collapse:collapse}
-.tlist th{padding:6px 12px;text-align:left;font-size:10px;font-weight:600;color:var(--text4);text-transform:uppercase;letter-spacing:0.4px;border-bottom:0.5px solid var(--border)}
-.tlist td{padding:8px 12px;font-size:12px;color:var(--text);border-bottom:0.5px solid var(--border)}
-.tlist tr:last-child td{border-bottom:none}
-.tlist tr:hover td{background:var(--row-hover)}
-.mono{font-family:var(--mono);font-size:11px}
-
-/* ── View mode toggle ────────────────────────────────────────────────────── */
-.vmode-wrap{display:flex;border:0.5px solid var(--border2);border-radius:6px;overflow:hidden;flex-shrink:0}
-.vmode-btn{padding:3px 9px;font-size:11px;font-weight:500;cursor:pointer;color:var(--text3);background:transparent;border:none;display:flex;align-items:center;gap:4px;transition:all .13s;font-family:inherit}
-.vmode-btn:first-child{border-right:0.5px solid var(--border2)}
-.vmode-btn.on{background:var(--accent-l);color:var(--accent)}
-.vmode-btn:hover:not(.on){background:var(--row-hover);color:var(--text)}
-
-/* ── Tree view ───────────────────────────────────────────────────────────── */
-.tree-wrap{flex:1;overflow-y:auto}
-.tree-host-section{border-bottom:0.5px solid var(--border2)}
-.tree-host-section:last-child{border-bottom:none}
-.tree-host-hdr{
-  display:flex;align-items:center;gap:7px;padding:6px 10px;
-  cursor:pointer;user-select:none;
-  background:var(--surf2);border-bottom:0.5px solid var(--border);
-  position:sticky;top:0;z-index:2;
-}
-.tree-host-hdr:hover{background:var(--row-hover)}
-.tree-caret{width:10px;height:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--text4);transition:transform .15s}
-.tree-caret.open{transform:rotate(90deg)}
-.tree-hostname{font-size:12px;font-weight:600;color:var(--text);font-family:var(--mono)}
-.tree-host-count{font-size:10.5px;color:var(--text4);margin-left:3px;font-weight:400}
-.tree-err-dot{width:5px;height:5px;border-radius:50%;background:var(--danger);flex-shrink:0;margin-left:3px}
-.tree-folder-hdr{
-  display:flex;align-items:center;gap:6px;padding:4px 10px 4px 0;
-  cursor:pointer;user-select:none;transition:background .1s;
-  border-bottom:0.5px solid var(--border);
-}
-.tree-folder-hdr:hover{background:var(--row-hover)}
-.tree-seg{font-family:var(--mono);font-size:11.5px;color:var(--text2)}
-.tree-seg-count{font-size:10px;color:var(--text4);margin-left:3px}
-.tree-req-row{
-  display:flex;align-items:center;padding:5px 10px 5px 0;
-  cursor:pointer;transition:background .1s;
-  border-bottom:0.5px solid var(--border);
-}
-.tree-req-row:hover{background:var(--row-hover)}
-.tree-req-row.sel{background:var(--row-sel)}
-.tree-indent{flex-shrink:0}
-.tree-req-method{flex-shrink:0;width:62px}
-.tree-req-path{flex:1;font-family:var(--mono);font-size:11.5px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.tree-req-status{flex-shrink:0;width:52px}
-.tree-req-size{flex-shrink:0;width:60px;text-align:right;font-size:11px;color:var(--text3);padding-right:6px}
-.tree-req-dur{flex-shrink:0;width:52px;text-align:right;font-size:11px;color:var(--text3)}
-.tree-req-qs{font-size:10.5px;color:var(--text4);font-family:var(--mono);margin-left:2px}
-
-/* ── Status bar ───────────────────────────────────────────────────────────── */
-.statusbar{display:flex;align-items:center;gap:10px;padding:0 14px;height:24px;background:var(--surf2);border-top:0.5px solid var(--border);font-size:11px;color:var(--text4);flex-shrink:0}
-.sb-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.sb-sep{width:0.5px;height:12px;background:var(--border)}
-.kbd{display:inline-flex;padding:0 4px;border-radius:3px;font-size:10px;font-family:var(--mono);border:0.5px solid var(--border2);background:var(--bg);color:var(--text3);line-height:16px}
-
-/* ── Toast ────────────────────────────────────────────────────────────────── */
-#toast-wrap{position:fixed;bottom:36px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:6px;z-index:9999;pointer-events:none}
-.toast{padding:7px 15px;border-radius:8px;font-size:12px;font-weight:500;background:rgba(28,28,30,.9);color:#fff;opacity:0;transition:opacity .25s;box-shadow:0 3px 10px rgba(0,0,0,.2);backdrop-filter:blur(10px)}
-.toast.err{background:rgba(255,59,47,.9)}
-.toast.show{opacity:1}
-.trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.note{font-size:11.5px;color:var(--text3);line-height:1.65;padding:10px 13px;background:rgba(0,0,0,.03);border-radius:8px}
-.note.warn{background:rgba(255,149,0,.07);color:#8B5E00}
-[data-theme="dark"] .note{background:rgba(255,255,255,.04)}
-[data-theme="dark"] .note.warn{background:rgba(255,149,0,.10);color:#FF9F0A}
-
-/* ── Modals ───────────────────────────────────────────────────────────────── */
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);opacity:0;pointer-events:none;transition:opacity .2s}
-.overlay.show{opacity:1;pointer-events:all}
-.modal{background:var(--surface);border-radius:14px;border:0.5px solid var(--border2);padding:22px;min-width:400px;max-width:540px;box-shadow:0 20px 60px rgba(0,0,0,.25);transform:scale(.97);transition:transform .2s}
-.overlay.show .modal{transform:scale(1)}
-.modal-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-.modal-title{font-size:14px;font-weight:600;color:var(--text)}
-.modal-x{cursor:pointer;color:var(--text4);font-size:18px;line-height:1}
-.modal-x:hover{color:var(--text)}
-.sc-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:0.5px solid var(--border);font-size:12px}
-.sc-row:last-child{border-bottom:none}
-.sc-keys{display:flex;gap:3px;align-items:center}
-.sc-desc{color:var(--text3)}
-.export-opts{display:flex;gap:10px;margin:10px 0 16px}
-.eopt{flex:1;padding:13px;border-radius:10px;border:1.5px solid var(--border2);cursor:pointer;text-align:center;transition:all .14s}
-.eopt:hover{border-color:var(--accent);background:var(--accent-ll)}
-.eopt.sel{border-color:var(--accent);background:var(--accent-l)}
-.eopt-icon{display:flex;justify-content:center;margin-bottom:6px;opacity:0.7}
-.eopt:hover .eopt-icon,.eopt.sel .eopt-icon{opacity:1}
-.eopt-label{font-size:12px;font-weight:600;color:var(--text);display:block}
-.eopt-desc{font-size:10.5px;color:var(--text3);display:block;margin-top:2px}
-
-/* ── v2 additions ─────────────────────────────────────────────────────────── */
-
-/* Toggle switch */
-.toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
-.toggle{width:28px;height:16px;border-radius:8px;background:var(--border2);position:relative;transition:background .18s;flex-shrink:0}
-.toggle.on{background:var(--accent)}
-.toggle::after{content:'';position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:transform .18s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
-.toggle.on::after{transform:translateX(12px)}
-
-/* Regex tester */
-.regex-tester{display:flex;flex-direction:column;gap:4px;flex:1}
-.regex-tester-input{padding:6px 9px;border-radius:7px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:11px;font-family:var(--mono);outline:none;transition:border-color .14s;width:100%}
-.regex-tester-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,122,255,.10)}
-.regex-status{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;padding:2px 7px;border-radius:4px;font-weight:500;transition:all .15s;min-height:19px}
-.regex-status.match{background:rgba(52,199,89,.12);color:#1A7F3C}
-.regex-status.no-match{background:rgba(0,0,0,.05);color:var(--text4)}
-.regex-status.error{background:rgba(255,59,47,.10);color:var(--danger)}
-[data-theme="dark"] .regex-status.match{color:#30D158}
-[data-theme="dark"] .regex-status.no-match{background:rgba(255,255,255,.05)}
-
-/* Order arrows */
-.order-btns{display:inline-flex;flex-direction:column;gap:1px}
-.order-btn{display:flex;align-items:center;justify-content:center;width:18px;height:14px;border-radius:3px;cursor:pointer;color:var(--text4);transition:all .12s}
-.order-btn:hover{background:var(--accent-l);color:var(--accent)}
-.order-btn.disabled{opacity:0.25;pointer-events:none}
-
-/* Breakpoint edit panel */
-.bpe-panel{border-top:0.5px solid var(--border);padding:12px 15px;background:var(--surf2)}
-.bpe-section-title{font-size:10px;font-weight:600;color:var(--text4);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px}
-.cmp-kv-table{width:100%;border-collapse:collapse;font-size:12px}
-.cmp-kv-table thead th{padding:5px 8px;text-align:left;font-size:10px;font-weight:600;color:var(--text4);text-transform:uppercase;letter-spacing:0.4px;border-bottom:0.5px solid var(--border)}
-.cmp-kv-table td{padding:4px 6px;border-bottom:0.5px solid var(--border)}
-.cmp-kv-table tr:last-child td{border-bottom:none}
-.cmp-kv-input{width:100%;padding:4px 7px;border-radius:5px;border:0.5px solid transparent;background:transparent;color:var(--text);font-size:11.5px;font-family:var(--mono);outline:none;transition:all .14s}
-.cmp-kv-input:focus{border-color:var(--accent);background:var(--surface);box-shadow:0 0 0 3px rgba(10,122,255,.08)}
-.cmp-kv-input::placeholder{color:var(--text4)}
-.cmp-kv-del{padding:3px 6px;border-radius:4px;border:none;background:transparent;color:var(--text4);cursor:pointer;font-size:12px;font-family:inherit}
-.cmp-kv-del:hover{color:var(--danger);background:rgba(255,59,47,.08)}
-
-/* Compose workspace */
-#v-compose.view{flex-direction:row}
-.cmp-sidebar{width:200px;flex-shrink:0;border-right:0.5px solid var(--border);background:var(--surf2);display:flex;flex-direction:column;overflow:hidden}
-.cmp-sidebar-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 12px 6px;border-bottom:0.5px solid var(--border);flex-shrink:0}
-.cmp-sidebar-title{font-size:10px;font-weight:600;color:var(--text4);letter-spacing:0.6px;text-transform:uppercase}
-.cmp-coll-item{display:flex;align-items:center;gap:6px;padding:5px 10px;cursor:pointer;font-size:12px;color:var(--text);transition:background .1s}
-.cmp-coll-item:hover{background:var(--row-hover)}
-.cmp-coll-item.active{background:var(--accent-l);color:var(--accent)}
-.cmp-saved-req{display:flex;align-items:center;gap:6px;padding:3px 10px 3px 22px;cursor:pointer;font-size:11.5px;color:var(--text3);transition:background .1s}
-.cmp-saved-req:hover{background:var(--row-hover)}
-.cmp-saved-req.active{color:var(--accent)}
-.cmp-saved-method{font-family:var(--mono);font-size:10px;font-weight:700;min-width:30px;flex-shrink:0}
-.cmp-saved-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cmp-vars-section{border-top:0.5px solid var(--border);flex-shrink:0;margin-top:auto}
-.cmp-vars-list{padding:6px 8px;display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto}
-.cmp-var-row{display:flex;align-items:center;gap:4px}
-.cmp-var-key{flex:1;padding:3px 6px;border-radius:5px;border:0.5px solid var(--border2);background:var(--surface);color:var(--accent);font-size:11px;font-family:var(--mono);outline:none}
-.cmp-var-key:focus{border-color:var(--accent)}
-.cmp-var-val{flex:2;padding:3px 6px;border-radius:5px;border:0.5px solid var(--border2);background:var(--surface);color:var(--text);font-size:11px;font-family:var(--mono);outline:none}
-.cmp-var-val:focus{border-color:var(--accent)}
-.cmp-editor-area{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
-.cmp-tab-strip{display:flex;align-items:stretch;background:var(--surf2);border-bottom:0.5px solid var(--border);flex-shrink:0;overflow-x:auto}
-.cmp-tab{display:flex;align-items:center;gap:5px;padding:7px 12px;font-size:11.5px;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;border-right:0.5px solid var(--border);transition:all .14s;white-space:nowrap;min-width:90px;max-width:180px}
-.cmp-tab:hover{background:var(--row-hover);color:var(--text)}
-.cmp-tab.active{background:var(--surface);color:var(--text);border-bottom-color:var(--accent)}
-.cmp-tab-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cmp-tab-dirty{color:var(--warning);font-size:9px;flex-shrink:0}
-.cmp-tab-x{opacity:0;padding:1px 3px;border-radius:3px;cursor:pointer;font-size:11px;color:var(--text4);transition:opacity .12s;flex-shrink:0}
-.cmp-tab:hover .cmp-tab-x,.cmp-tab.active .cmp-tab-x{opacity:1}
-.cmp-tab-x:hover{color:var(--danger);background:rgba(255,59,47,.1)}
-.cmp-tab-new{padding:7px 10px;border:none;background:transparent;cursor:pointer;color:var(--text4);display:flex;align-items:center;transition:color .12s;font-family:inherit}
-.cmp-tab-new:hover{color:var(--accent)}
-.cmp-editor{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:14px;gap:8px}
-.cmp-req-line{display:flex;gap:6px;align-items:center}
-.cmp-resolved-url{font-family:var(--mono);font-size:10.5px;color:var(--text4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cmp-resolved-url .var-resolved{color:var(--success)}
-.cmp-kv-editor{overflow-y:auto;padding:4px 0}
-.cmp-body-pane{display:flex;flex-direction:column;overflow:hidden}
-.cmp-body-mode-bar{display:flex;align-items:center;gap:8px;padding:4px 0;flex-shrink:0}
-.cmp-history-details{border-top:0.5px solid var(--border);flex-shrink:0;font-size:12px}
-.cmp-history-summary{padding:7px 14px;cursor:pointer;font-size:11px;font-weight:500;color:var(--text3);display:flex;align-items:center;user-select:none;list-style:none}
-.cmp-history-summary::-webkit-details-marker{display:none}
-.cmp-save-form{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:0.5px solid var(--border);background:var(--surf2);flex-shrink:0}
-.cmp-save-form .finput{padding:5px 8px;font-size:12px}
-.cmp-coll-new-row{padding:5px 10px;border-bottom:0.5px solid var(--border)}
-.cmp-coll-new-row input{width:100%;padding:4px 7px;border-radius:5px;border:0.5px solid var(--accent);background:var(--surface);color:var(--text);font-size:12px;outline:none;font-family:inherit}
-.cmp-saved-req .cmp-req-edit-btn{opacity:0;padding:1px 4px;border-radius:3px;font-size:10px;cursor:pointer;color:var(--text4);background:transparent;border:none;transition:opacity .12s;flex-shrink:0}
-.cmp-saved-req:hover .cmp-req-edit-btn{opacity:1}
-.cmp-req-rename-row{padding:3px 10px 3px 22px;display:flex;gap:4px;align-items:center}
-.cmp-req-rename-row input{flex:1;padding:3px 6px;border-radius:4px;border:0.5px solid var(--accent);background:var(--surface);color:var(--text);font-size:11.5px;font-family:inherit;outline:none}
-.cmp-del-confirm{display:flex;align-items:center;gap:5px;padding:4px 10px;background:rgba(255,59,47,.07);border-bottom:0.5px solid var(--border);font-size:11px;color:var(--text3)}
-.cmp-del-confirm span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cmp-history-summary:hover{color:var(--text)}
-.cmp-history-list{max-height:180px;overflow-y:auto}
-.cmp-history-row{display:flex;align-items:center;gap:8px;padding:5px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;font-size:11px;transition:background .1s}
-.cmp-history-row:last-child{border-bottom:none}
-.cmp-history-row:hover{background:var(--row-hover)}
-.cmp-response{border-top:0.5px solid var(--border);display:flex;flex-direction:column;max-height:45%;flex-shrink:0;overflow:hidden}
-.cmp-res-line{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:var(--surf2)}
-.cmp-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:10px;color:var(--text4);font-size:12px}
-
-/* Request Mapping - Header Map section */
-.hdrmap-scope-chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;font-size:10.5px;background:var(--accent-l);color:var(--accent);font-weight:500}
-</style>
+<link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div class="app">
@@ -481,11 +28,6 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     Clear
   </button>
   <div class="tb-sep"></div>
-  <span class="mitm-badge mitm-off" id="tb-mitm">
-    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="5.5" width="7" height="5" rx="1"/><path d="M4.5 5.5V4a1.5 1.5 0 013 0v1.5"/></svg>
-    <span id="tb-mitm-lbl">MITM off</span>
-  </span>
-  <div class="tb-sep"></div>
   <button class="btn btn-ghost" onclick="openImport()">
     <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 8V2M3 5l3-3 3 3M2 10h8"/></svg>
     Import
@@ -496,9 +38,15 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
   </button>
   <input type="file" id="import-file" accept=".har,.json" style="display:none" onchange="handleImportFile(this)">
   <div class="spacer"></div>
+  <span class="mitm-badge mitm-off" id="tb-mitm">
+    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="5.5" width="7" height="5" rx="1"/><path d="M4.5 5.5V4a1.5 1.5 0 013 0v1.5"/></svg>
+    <span id="tb-mitm-lbl">MITM off</span>
+  </span>
+  <div class="tb-sep"></div>
   <div class="search-wrap">
     <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="var(--text4)" stroke-width="1.6"><circle cx="5" cy="5" r="3.5"/><path d="M8 8l2.5 2.5"/></svg>
     <input type="text" id="srch" placeholder="Filter requests…" oninput="onSearch(this.value)">
+    <button id="regex-btn" onclick="toggleRegexSearch()" title="Toggle regex search (.*)" style="flex-shrink:0;border:none;background:transparent;cursor:pointer;font-size:11px;font-weight:700;padding:0 5px;font-family:var(--mono);line-height:1;border-left:0.5px solid var(--border);margin-left:2px">.*</button>
   </div>
   <button class="btn-icon" id="theme-btn" onclick="toggleTheme()" title="Toggle dark mode (⌘D)">
     <svg id="ic-moon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 9.5A5.5 5.5 0 017 3c0-.5.1-1 .2-1.5A6.5 6.5 0 108.5 15c2.5 0 4.7-1.4 5.8-3.5-.6.1-1.2.2-1.8.2-.97 0-1.88-.2-2.7-.55"/></svg>
@@ -530,6 +78,10 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
   <div class="nav-item" data-v="traffic" data-f="pending" onclick="navItem(this)">
     <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--warning)" stroke-width="1.4"><circle cx="7" cy="7" r="5.5"/><path d="M7 4v3.5l2.5 1.5"/></svg></div>
     Pending <span class="nav-badge" id="nb-pend">0</span>
+  </div>
+  <div class="nav-item" data-v="traffic" data-f="ws" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="#818CF8" stroke-width="1.4"><path d="M2 9c1-3 3-5 5-5s4 2 5 5"/><path d="M2 5c1 3 3 5 5 5s4-2 5-5"/></svg></div>
+    WebSocket <span class="nav-badge" id="nb-ws">0</span>
   </div>
 
   <div class="nav-divider"></div>
@@ -568,6 +120,22 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 11l2.5-5 2 3 2.5-6 3 4.5"/></svg></div>
     Throttle
   </div>
+  <div class="nav-item" data-v="capture" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="5.5"/><path d="M4.5 7h5M7 4.5v5"/></svg></div>
+    Capture Filter
+  </div>
+  <div class="nav-item" data-v="mock" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="4" width="11" height="7.5" rx="1.5"/><path d="M4 4V2.5h6V4M4 7.5h2.5M8.5 7.5H10M4 9.5h6"/></svg></div>
+    Mock Server
+  </div>
+  <div class="nav-item" data-v="scripts" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 4.5l-2.5 3L4 11M10 4.5l2.5 3-2.5 3M6.5 3l1 8"/></svg></div>
+    Lua Scripts
+  </div>
+  <div class="nav-item" data-v="webhooks" onclick="navItem(this)">
+    <div class="nav-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="4" cy="10.5" r="1.5"/><circle cx="10" cy="3.5" r="1.5"/><circle cx="10" cy="10.5" r="1.5"/><path d="M5.5 10.5H7a3 3 0 000-6H5.5M8.5 3.5H7a3 3 0 000 0"/></svg></div>
+    Webhooks
+  </div>
 
   <div class="nav-divider"></div>
   <div class="sec-label">Compose</div>
@@ -595,6 +163,13 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
       <button class="chip on" data-sc="5xx" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--purple)"></span>5xx</button>
       <div class="chip-sep" id="chip-sep-pending"></div>
       <button class="chip on" id="chip-pending" data-sc="pending" onclick="toggleChip(this)"><span class="chip-dot" style="background:var(--text4)"></span>Pending</button>
+      <div class="chip-sep"></div>
+      <button class="chip on" data-mc="GET"    onclick="toggleMethodChip(this)">GET</button>
+      <button class="chip on" data-mc="POST"   onclick="toggleMethodChip(this)">POST</button>
+      <button class="chip on" data-mc="PUT"    onclick="toggleMethodChip(this)">PUT</button>
+      <button class="chip on" data-mc="DELETE" onclick="toggleMethodChip(this)">DELETE</button>
+      <button class="chip on" data-mc="PATCH"  onclick="toggleMethodChip(this)">PATCH</button>
+      <button class="chip on" data-mc="OTHER"  onclick="toggleMethodChip(this)">Other</button>
       <button id="chip-reset" onclick="resetChips()" style="display:none;padding:2px 7px;border-radius:5px;border:none;background:transparent;color:var(--accent);font-size:11px;cursor:pointer;font-family:inherit">Reset filters</button>
       <button id="sort-reset" onclick="resetSort()" style="display:none;padding:2px 7px;border-radius:5px;border:none;background:transparent;color:var(--accent);font-size:11px;cursor:pointer;font-family:inherit">Reset sort</button>
       <span class="filter-count" id="filter-count"></span>
@@ -608,9 +183,15 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
         </button>
       </div>
     </div>
+    <div id="bulk-bar" style="display:none;padding:5px 10px;background:var(--accent);color:#fff;font-size:11.5px;align-items:center;gap:10px">
+      <span id="bulk-count"></span>
+      <button class="btn btn-sm" style="background:rgba(255,255,255,0.2);color:#fff;border:none" onclick="bulkDelete()">Delete</button>
+      <button class="btn btn-sm" style="background:transparent;color:#fff;border:none" onclick="clearBulkSel()">Clear</button>
+    </div>
     <div class="table-wrap" id="seq-wrap">
       <table class="rtable">
         <thead><tr>
+          <th style="width:22px;padding:0 4px"><input type="checkbox" title="Select all" onchange="(function(chk){document.querySelectorAll('.row-chk').forEach(c=>{c.checked=chk.checked;toggleBulkRow(c.dataset.id,chk.checked);})})(this)" style="cursor:pointer"></th>
           <th style="width:28px">#</th>
           <th style="width:70px" data-col="method" onclick="sortBy(this)">Method<span class="sort-ic"><span class="up"></span><span class="dn"></span></span></th>
           <th style="width:180px" data-col="host" onclick="sortBy(this)">Host<span class="sort-ic"><span class="up"></span><span class="dn"></span></span></th>
@@ -727,6 +308,8 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
               <option value="AddHeader">Add header</option>
               <option value="RemoveHeader">Remove header</option>
               <option value="ReplaceHeader">Replace header value</option>
+              <option value="Redirect">Redirect (3xx)</option>
+              <option value="Block">Block (4xx/5xx)</option>
             </select>
           </div>
           <div class="fgroup" id="rw-act-pat-wrap">
@@ -740,6 +323,14 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
           <div class="fgroup" id="rw-act-hdr-wrap" style="display:none;max-width:130px">
             <label class="flabel">Header name</label>
             <input class="finput" id="rw-act-hdr" placeholder="X-Custom">
+          </div>
+          <div class="fgroup" id="rw-act-loc-wrap" style="display:none">
+            <label class="flabel">Location URL</label>
+            <input class="finput" id="rw-act-loc" placeholder="https://example.com/new-path">
+          </div>
+          <div class="fgroup" id="rw-act-status-wrap" style="display:none;max-width:100px">
+            <label class="flabel">Status code</label>
+            <input class="finput" id="rw-act-status" type="number" placeholder="301" min="100" max="599">
           </div>
         </div>
         <div style="display:flex;gap:8px">
@@ -814,6 +405,40 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
       <table class="tlist">
         <thead><tr><th>Hostname</th><th>Override IP</th><th style="width:70px"></th></tr></thead>
         <tbody id="dns-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Capture Filter -->
+  <div id="v-capture" class="view tool-panel" style="display:none">
+    <div class="card">
+      <div class="card-hdr"><span class="card-title">Capture Filter</span></div>
+      <div class="card-body">
+        <div class="form-row" style="align-items:flex-end">
+          <div class="fgroup">
+            <label class="flabel">Mode</label>
+            <select class="finput" id="cf-mode" onchange="onCfModeChange()">
+              <option value="disabled">Disabled — record everything</option>
+              <option value="allowlist">Allowlist — record only listed hosts</option>
+              <option value="denylist">Denylist — exclude listed hosts</option>
+            </select>
+          </div>
+          <button class="btn btn-primary btn-sm" style="margin-top:16px" onclick="saveCaptureFilter()">Apply</button>
+        </div>
+        <div id="cf-hosts-wrap">
+          <div class="form-row" style="margin-top:8px">
+            <div class="fgroup" style="flex:1">
+              <label class="flabel">Hostname (substring match)</label>
+              <input class="finput" id="cf-host" placeholder="api.example.com">
+            </div>
+            <button class="btn btn-primary btn-sm" style="margin-top:16px" onclick="addCfHost()">Add</button>
+          </div>
+        </div>
+        <p class="note" id="cf-note">Match is case-insensitive substring — <code>example.com</code> matches <code>api.example.com</code> and <code>www.example.com</code>.</p>
+      </div>
+      <table class="tlist" id="cf-hosts-table" style="display:none">
+        <thead><tr><th>Hostname pattern</th><th style="width:70px"></th></tr></thead>
+        <tbody id="cf-tbody"></tbody>
       </table>
     </div>
   </div>
@@ -983,7 +608,10 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
             <label class="flabel">Latency injection (ms)</label>
             <input class="finput" type="number" id="th-lat" min="0" placeholder="0">
           </div>
-          <input type="hidden" id="th-bw" value="0">
+          <div class="fgroup">
+            <label class="flabel">Bandwidth limit (kbps)</label>
+            <input class="finput" type="number" id="th-bw" min="0" placeholder="0 = unlimited" value="0">
+          </div>
         </div>
       </div>
     </div>
@@ -1125,6 +753,138 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
     </div>
   </div>
 
+  <!-- Mock Server -->
+  <div id="v-mock" class="view tool-panel" style="display:none">
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-title">Mock Rules</span>
+        <button class="btn btn-sm btn-primary" id="mock-add-btn" onclick="openMockForm()">+ Add Rule</button>
+      </div>
+      <div id="mock-form" style="display:none;padding:14px 15px;border-bottom:0.5px solid var(--border)">
+        <div class="form-row">
+          <div class="fgroup" style="max-width:140px">
+            <label class="flabel">Name</label>
+            <input class="finput" id="mock-name" placeholder="My Mock">
+          </div>
+          <div class="fgroup" style="max-width:100px">
+            <label class="flabel">Method (opt.)</label>
+            <input class="finput" id="mock-method" placeholder="GET">
+          </div>
+          <div class="fgroup" style="max-width:160px">
+            <label class="flabel">Host scope (opt.)</label>
+            <input class="finput" id="mock-host" placeholder="api.example.com">
+          </div>
+          <div class="fgroup">
+            <label class="flabel">Path Pattern (regex)</label>
+            <input class="finput" id="mock-path" placeholder="/api/v1/.*" oninput="onRegexTest('mock-path','mock-path-sample','mock-path-status')">
+          </div>
+        </div>
+        <div class="form-row" style="align-items:center;gap:8px;margin-top:-6px;margin-bottom:8px">
+          <input class="finput" id="mock-path-sample" placeholder="sample path to test…" style="max-width:220px;font-size:11px" oninput="onRegexTest('mock-path','mock-path-sample','mock-path-status')">
+          <span id="mock-path-status" style="font-size:11px;color:var(--text4)"></span>
+        </div>
+        <div id="mock-responses-wrap" style="display:flex;flex-direction:column;gap:10px;margin-bottom:10px"></div>
+        <button class="btn btn-ghost btn-sm" onclick="addMockResponse()" style="margin-bottom:10px">+ Add Response</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="saveMockRule()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="closeMockForm()">Cancel</button>
+        </div>
+      </div>
+      <table class="tlist">
+        <thead><tr><th>Name</th><th>Method</th><th>Host</th><th>Pattern</th><th>Responses</th><th>Calls</th><th style="width:46px">On</th><th style="width:100px"></th></tr></thead>
+        <tbody id="mock-tbody"></tbody>
+      </table>
+      <div class="card-body" style="padding-top:6px">
+        <p class="note">Mock rules intercept matching requests and return a canned response. Rules are matched in order; first match wins. Supports <code>${0}</code>, <code>${1}</code> regex capture substitution in the response body.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lua Scripts -->
+  <div id="v-scripts" class="view tool-panel" style="display:none">
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-title">Lua Scripts</span>
+        <button class="btn btn-sm btn-primary" id="script-add-btn" onclick="openScriptForm()">+ Add Script</button>
+      </div>
+      <div id="script-form" style="display:none;padding:14px 15px;border-bottom:0.5px solid var(--border)">
+        <div class="form-row">
+          <div class="fgroup" style="max-width:200px">
+            <label class="flabel">Script Name</label>
+            <input class="finput" id="script-name" placeholder="My Script">
+          </div>
+        </div>
+        <div class="fgroup" style="margin-bottom:4px">
+          <label class="flabel">Lua Code</label>
+          <div class="lua-wrap">
+            <div class="lua-gutter" id="script-gutter">1</div>
+            <div class="lua-body">
+              <pre class="lua-bg" id="script-pre" aria-hidden="true"></pre>
+              <textarea class="lua-ta" id="script-code" spellcheck="false"
+                oninput="onLuaInput(this)" onscroll="onLuaScroll(this)"></textarea>
+            </div>
+          </div>
+          <div class="lua-err" id="script-err" style="display:none"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn btn-primary btn-sm" onclick="saveScript()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="closeScriptForm()">Cancel</button>
+        </div>
+      </div>
+      <table class="tlist">
+        <thead><tr><th>Name</th><th style="width:56px">On</th><th style="width:100px"></th></tr></thead>
+        <tbody id="scripts-tbody"></tbody>
+      </table>
+      <div class="card-body" style="padding-top:6px">
+        <p class="note">Scripts run on every request and response in order. Available globals: <code>request</code>, <code>response</code>, <code>log(msg)</code>, <code>abort(status, body)</code>. Dangerous modules (<code>io</code>, <code>os</code>, <code>require</code>) are sandboxed out.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Webhooks -->
+  <div id="v-webhooks" class="view tool-panel" style="display:none">
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-title">Webhooks</span>
+        <button class="btn btn-sm btn-primary" id="webhook-add-btn" onclick="openWebhookForm()">+ Add Webhook</button>
+      </div>
+      <div id="webhook-form" style="display:none;padding:14px 15px;border-bottom:0.5px solid var(--border)">
+        <form onsubmit="return false" autocomplete="off">
+        <div class="form-row">
+          <div class="fgroup">
+            <label class="flabel">Endpoint URL</label>
+            <input class="finput" id="webhook-url" placeholder="https://hooks.example.com/oproxy">
+          </div>
+          <div class="fgroup" style="max-width:180px">
+            <label class="flabel">HMAC Secret (opt.)</label>
+            <input class="finput" id="webhook-secret" placeholder="mysecret" type="password" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="fgroup" style="margin-bottom:10px">
+          <label class="flabel">Events</label>
+          <div class="wh-events">
+            <label class="wh-ev-label"><input type="checkbox" id="wh-ev-request" checked> Request Captured</label>
+            <label class="wh-ev-label"><input type="checkbox" id="wh-ev-response" checked> Response Captured</label>
+            <label class="wh-ev-label"><input type="checkbox" id="wh-ev-breakpoint"> Breakpoint Hit</label>
+            <label class="wh-ev-label"><input type="checkbox" id="wh-ev-error"> Error</label>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="saveWebhook()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="closeWebhookForm()">Cancel</button>
+        </div>
+        </form>
+      </div>
+      <table class="tlist">
+        <thead><tr><th>URL</th><th>Events</th><th style="width:46px">On</th><th style="width:100px"></th></tr></thead>
+        <tbody id="webhooks-tbody"></tbody>
+      </table>
+      <div class="card-body" style="padding-top:6px">
+        <p class="note">Webhooks POST a JSON payload to the endpoint URL when the selected events fire. If a secret is set, an <code>X-Oproxy-Signature</code> HMAC-SHA256 header is included. Delivery is retried up to 3 times on failure.</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings -->
   <div id="v-settings" class="view tool-panel" style="display:none">
     <div class="card">
@@ -1153,6 +913,72 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
           <button class="btn btn-primary btn-sm" onclick="applyMaxBody()">Apply</button>
         </div>
         <p class="note" style="margin-top:8px">Other settings require a proxy restart to take effect.</p>
+        <div style="margin-top:10px">
+          <button class="btn btn-ghost btn-sm" onclick="reloadConfig()">Reload config from YAML</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr"><span class="card-title">Session Log</span></div>
+      <div class="card-body">
+        <div class="form-row" style="align-items:flex-end;gap:10px">
+          <div class="fgroup" style="flex:1">
+            <label class="flabel">File path</label>
+            <input class="finput" id="sess-file-path" placeholder="./sessions.json">
+          </div>
+          <button class="btn btn-primary btn-sm" style="margin-top:16px" onclick="saveSessionLog()">Save</button>
+          <button class="btn btn-ghost btn-sm" style="margin-top:16px" onclick="loadSessionLog()">Load</button>
+        </div>
+        <p class="note" style="margin-top:6px">Save current session log to disk or restore a previously saved log. Loaded sessions are merged with the current log.</p>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr">
+        <span class="card-title">Upstream Proxy</span>
+        <button class="btn btn-sm btn-primary" onclick="saveUpstreamProxy()">Apply</button>
+      </div>
+      <div class="card-body">
+        <div class="form-row" style="align-items:flex-end;gap:10px">
+          <div class="fgroup">
+            <label class="flabel">Proxy URL</label>
+            <input class="finput" id="upstream-proxy-url" placeholder="http://proxy:3128 or socks5://proxy:1080">
+          </div>
+        </div>
+        <p class="note" style="margin-top:6px">Leave empty to disable. All upstream requests will be routed through this proxy.</p>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr"><span class="card-title">SOCKS5 Listener</span></div>
+      <div class="card-body">
+        <div class="kv"><span class="kk">Status</span><span class="kv-val" id="socks5-status-val">—</span></div>
+        <div class="kv"><span class="kk">Port</span><span class="kv-val kv-mono" id="socks5-port-val">—</span></div>
+        <p class="note" style="margin-top:8px">Configure <code>socks5_port</code> in <code>configs/default.yaml</code> to enable. Supports CONNECT with optional MITM interception.</p>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr">
+        <span class="card-title">Metrics</span>
+        <button class="btn btn-sm btn-ghost" onclick="loadMetrics()">Refresh</button>
+      </div>
+      <div class="card-body" id="metrics-body">
+        <span style="color:var(--text4);font-size:12px">Loading…</span>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-hdr"><span class="card-title">Session Playback</span></div>
+      <div class="card-body">
+        <div class="form-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+          <div class="fgroup" style="flex:1;min-width:140px">
+            <label class="flabel">Session File</label>
+            <input class="finput" id="playback-file" placeholder="./sessions.json">
+          </div>
+          <div class="fgroup" style="flex:1;min-width:140px">
+            <label class="flabel">Target URL</label>
+            <input class="finput" id="playback-target" placeholder="http://localhost:3000">
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="startPlayback()">Start Playback</button>
+        </div>
+        <p class="note" style="margin-top:6px">Replay a saved session file against a target URL.</p>
       </div>
     </div>
   </div>
@@ -1172,14 +998,24 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
       <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 6A4.5 4.5 0 109 2.5M9 2.5V1M9 2.5H7.5"/></svg>
       Repeat
     </button>
+    <button class="btn btn-sm btn-ghost" onclick="openDiffModal()" title="Compare with another session">
+      <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h3.5M2 6h3.5M2 9h2M6.5 3H10M6.5 6H10M6.5 9H9M5.5 1v10M6.5 1v10"/></svg>
+      Diff
+    </button>
   </div>
   <div class="dtabs">
     <div class="dtab on" data-tab="overview" onclick="switchDTab(this)">Overview</div>
     <div class="dtab" data-tab="request" onclick="switchDTab(this)">Req</div>
     <div class="dtab" data-tab="response" onclick="switchDTab(this)">Res</div>
     <div class="dtab" data-tab="timing" onclick="switchDTab(this)">Timing</div>
+    <div class="dtab" id="dtab-inspector" data-tab="inspector" onclick="switchDTab(this)" style="display:none">Inspector</div>
     <div class="dtab" id="dtab-frames" data-tab="frames" onclick="switchDTab(this)" style="display:none">Frames</div>
-    <div class="dtab" data-tab="compose" onclick="goCompose()" title="Open in Compose workspace">Compose</div>
+    <div class="dtab" id="dtab-compose" data-tab="compose" onclick="goCompose()" title="Open in Compose workspace">Compose</div>
+  </div>
+  <div id="body-find-bar" style="display:none;padding:4px 10px;border-bottom:0.5px solid var(--border);background:var(--bg2);gap:6px;align-items:center">
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="var(--text4)" stroke-width="1.6"><circle cx="5" cy="5" r="3.5"/><path d="M8 8l2.5 2.5"/></svg>
+    <input type="text" id="body-find-input" placeholder="Find in body…" oninput="onBodyFind(this.value)" style="flex:1;border:none;background:transparent;outline:none;font-size:12px;color:var(--text)">
+    <button class="btn-icon" onclick="closeBodyFind()" style="font-size:14px;line-height:1">×</button>
   </div>
   <div class="dbody" id="dbody">
     <div class="dempty">
@@ -1195,7 +1031,6 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
 <div class="statusbar">
   <div style="display:flex;align-items:center;gap:5px"><div class="sb-dot" id="sb-dot" style="background:var(--text4)"></div>Proxy :8080</div>
   <div class="sb-sep"></div>
-  <div style="display:flex;align-items:center;gap:5px"><div class="sb-dot" style="background:var(--text4)" id="sb-mitm-dot"></div><span id="sb-mitm">MITM off</span></div>
   <span id="sb-count">0 requests</span>
   <div style="flex:1"></div>
   <span style="color:var(--text4);font-size:10.5px"><span class="kbd">?</span> shortcuts &nbsp;<span class="kbd">⌘K</span> clear &nbsp;<span class="kbd">Esc</span> deselect</span>
@@ -1249,6 +1084,26 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
   </div>
 </div>
 
+<!-- Diff modal -->
+<div class="overlay" id="modal-diff">
+  <div class="modal" style="min-width:520px;max-width:680px;max-height:80vh;overflow-y:auto">
+    <div class="modal-hdr"><span class="modal-title">Session Diff</span><span class="modal-x" onclick="closeModal('modal-diff')">×</span></div>
+    <div style="margin-bottom:12px">
+      <div style="font-size:11px;color:var(--text4);margin-bottom:4px">Base session</div>
+      <div class="finput" style="background:var(--code-bg);color:var(--text3);font-family:var(--mono);font-size:11px" id="diff-base-label">—</div>
+    </div>
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;color:var(--text4);margin-bottom:4px">Compare with</div>
+      <select class="finput fselect" id="diff-target-select" style="font-size:11px;font-family:var(--mono)"></select>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button class="btn btn-primary" onclick="runDiff()">Compare</button>
+      <button class="btn btn-ghost" onclick="closeModal('modal-diff')">Close</button>
+    </div>
+    <div id="diff-result"></div>
+  </div>
+</div>
+
 <!-- Export modal -->
 <div class="overlay" id="modal-export">
   <div class="modal">
@@ -1273,2243 +1128,18 @@ th.desc .sort-ic{opacity:1;color:var(--accent)}.th.desc .sort-ic .up{opacity:.25
   </div>
 </div>
 
-<script>
-// ── State ─────────────────────────────────────────────────────────────────────
-const G = {
-  sessions: [],
-  sel: null,
-  view: 'traffic',
-  sideFil: 'all',
-  rec: true,
-  timer: null,
-  srch: '',
-  scFil: new Set(['2xx','3xx','4xx','5xx','pending']),
-  dtab: 'overview',
-  routes: {},
-  dns: {},
-  rewrites: [],
-  throttle: null,
-  maxMs: 1,
-  bpRules: [],
-  bpPending: [],
-  sortCol: null,
-  sortDir: 1,
-  focusHosts: [],
-  exportFmt: 'har',
-  importMode: 'merge',
-  sessionSig: '',
-  copyBody: '',
-  lastTs: null,    // newest session timestamp seen; used for incremental poll
-  sse: null,       // EventSource for server-sent session updates
-  bpTimer: null,   // setInterval for breakpoint polling
-  treeMode: false,
-  treeExpanded: new Set(),  // path sub-folder keys (default closed)
-  treeClosed: new Set(),    // host keys explicitly collapsed (default open)
-  rwEditIdx: null,          // null=add mode, number=edit mode index
-  headerMaps: [],           // Array<HeaderMapRule>
-  modifications: [],        // Array<ModificationRule>
-  mapLocal: {},             // Record<host, filePath>
-  compose: {
-    tabs: [],
-    activeTabId: null,
-    collections: [],
-    vars: {},
-    _newCollRow: false,
-    _renamingReq: null,
-    _pendingDelete: null,  // {type:'collection'|'request', collId, reqId?}
-  },
-};
-
-// ── Utils ─────────────────────────────────────────────────────────────────────
-const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-const fmtSz = b => !b&&b!==0?'—':b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
-const fmtMs = ms => !ms&&ms!==0?'—':ms<1000?ms+' ms':(ms/1000).toFixed(2)+' s';
-const relT = iso => { const d=Date.now()-new Date(iso); return d<2000?'just now':d<60000?Math.floor(d/1000)+'s ago':d<3600000?Math.floor(d/60000)+'m ago':new Date(iso).toLocaleTimeString(); };
-const getPath = uri => { try { const u=new URL(uri.startsWith('http')?uri:'http://x'+uri); return u.pathname+u.search; } catch { return uri||'/'; } };
-const isProxy = host => (host||'').startsWith('localhost')||(host||'').startsWith('127.0.0.1');
-
-function mbadge(m) {
-  const cls = {GET:'mGET',POST:'mPOST',PUT:'mPUT',DELETE:'mDELETE',PATCH:'mPATCH'}[m]||'mOTHER';
-  return `<span class="mbadge ${cls}">${esc(m)}</span>`;
-}
-function sbadge(code) {
-  if (!code) return `<span class="sbadge s0">—</span>`;
-  const c = parseInt(code), cls = c<300?'s2':c<400?'s3':c<500?'s4':'s5';
-  return `<span class="sbadge ${cls}">${esc(code)}</span>`;
-}
-function tlsIcon(on) {
-  const c = on?'var(--success)':'var(--text4)';
-  return on
-    ? `<svg width="13" height="13" viewBox="0 0 12 12" fill="none"><rect x="2" y="5" width="8" height="6" rx="1" fill="${c}" fill-opacity=".12" stroke="${c}" stroke-width="1"/><path d="M4 5V3.5a2 2 0 014 0V5" stroke="${c}" stroke-width="1"/></svg>`
-    : `<svg width="13" height="13" viewBox="0 0 12 12" fill="none"><rect x="2" y="5" width="8" height="6" rx="1" fill="${c}" fill-opacity=".07" stroke="${c}" stroke-width="1"/><path d="M4 5V4" stroke="${c}" stroke-width="1" stroke-dasharray="1.5 1.5"/></svg>`;
-}
-function toast(msg, err=false) {
-  const w=document.getElementById('toast-wrap'), t=document.createElement('div');
-  t.className='toast'+(err?' err':''); t.textContent=msg; w.appendChild(t);
-  requestAnimationFrame(()=>t.classList.add('show'));
-  setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),300);},2500);
-}
-
-// ── HTTP reason phrases ───────────────────────────────────────────────────────
-const HTTP_REASONS = {200:'OK',201:'Created',204:'No Content',206:'Partial',301:'Moved',302:'Found',304:'Not Modified',400:'Bad Request',401:'Unauthorized',403:'Forbidden',404:'Not Found',405:'Not Allowed',408:'Timeout',409:'Conflict',410:'Gone',422:'Unprocessable',429:'Too Many',500:'Internal Error',502:'Bad Gateway',503:'Unavailable',504:'Gateway Timeout'};
-
-// ── JSON pretty-print ─────────────────────────────────────────────────────────
-function isJsonCt(headers) {
-  const ct = Object.entries(headers||{}).find(([k])=>k.toLowerCase()==='content-type');
-  return ct && String(ct[1]).includes('json');
-}
-function prettyJson(raw) {
-  try {
-    // Escape HTML first so JSON string values cannot inject tags, then apply
-    // span-based syntax highlighting on the safe, entity-encoded output.
-    // [^<\n] matches through &amp; &quot; etc. (entities have no literal <)
-    // so the lazy *? always finds the correct closing &quot; delimiter.
-    const safe = esc(JSON.stringify(JSON.parse(raw), null, 2));
-    return safe
-      .replace(/(&quot;[^<\n]*?&quot;)(\s*:)/g, '<span class="json-k">$1</span>$2')
-      .replace(/:\s*(&quot;[^<\n]*?&quot;)/g, ': <span class="json-s">$1</span>')
-      .replace(/:\s*(-?\d+\.?\d*(?:[eE][+-]?\d+)?)\b/g, ': <span class="json-n">$1</span>')
-      .replace(/:\s*(true|false)\b/g, ': <span class="json-b">$1</span>')
-      .replace(/:\s*(null)\b/g, ': <span class="json-null">$1</span>');
-  } catch { return esc(raw); }
-}
-function isImageCt(headers) {
-  const ct = Object.entries(headers||{}).find(([k])=>k.toLowerCase()==='content-type');
-  return ct && (ct[1]||'').split(';')[0].trim().startsWith('image/');
-}
-function getCtMime(headers) {
-  const ct = Object.entries(headers||{}).find(([k])=>k.toLowerCase()==='content-type');
-  return ct ? (ct[1]||'').split(';')[0].trim() : '';
-}
-function renderBody(body, headers) {
-  if (!body) return '<span style="color:var(--text4);font-size:12px">Empty body</span>';
-  if (isImageCt(headers)) {
-    const mime = getCtMime(headers);
-    return `<div style="padding:12px;text-align:center">
-      <img src="data:${esc(mime)};base64,${body}" style="max-width:100%;max-height:480px;border-radius:4px;border:0.5px solid var(--border)" onerror="this.style.display='none';this.nextSibling.style.display=''">
-      <span style="display:none;color:var(--text4);font-size:12px">Image could not be decoded</span>
-    </div>`;
-  }
-  const html = isJsonCt(headers) ? prettyJson(body) : esc(body);
-  // Store body ref instead of interpolating into onclick — body may contain ' or <
-  // which would split or corrupt the HTML attribute string.
-  G.copyBody = body;
-  return `<pre class="body-pre">${html}</pre>
-    <div style="margin-top:8px;display:flex;gap:6px">
-      <button class="btn btn-sm btn-ghost" onclick="navigator.clipboard.writeText(G.copyBody).then(()=>toast('Copied'))">Copy</button>
-    </div>`;
-}
-
-// ── Filter & render ───────────────────────────────────────────────────────────
-function applyFilter(all) {
-  let r = all.filter(s => !isProxy(s.request?.host));
-
-  if (G.sideFil==='done')    r = r.filter(s=>s.response&&(s.metrics?.status_code||0)<400);
-  else if (G.sideFil==='errors')  r = r.filter(s=>s.response&&(s.metrics?.status_code||0)>=400);
-  else if (G.sideFil==='pending') r = r.filter(s=>!s.response);
-
-  if (G.focusHosts.length) {
-    r = r.filter(s => G.focusHosts.some(h=>(s.request?.host||'').includes(h)));
-  }
-
-  if (G.srch) {
-    const q = G.srch.toLowerCase();
-    r = r.filter(s =>
-      (s.request?.host||'').toLowerCase().includes(q) ||
-      (s.request?.uri||'').toLowerCase().includes(q) ||
-      (s.request?.method||'').toLowerCase().includes(q) ||
-      (s.response?.body||'').toLowerCase().includes(q) ||
-      (s.request?.body||'').toLowerCase().includes(q)
-    );
-  }
-
-  r = r.filter(s => {
-    if (!s.response) return G.scFil.has('pending');
-    const c = s.metrics?.status_code || s.response?.status || 0;
-    if (c<300) return G.scFil.has('2xx');
-    if (c<400) return G.scFil.has('3xx');
-    if (c<500) return G.scFil.has('4xx');
-    return G.scFil.has('5xx');
-  });
-
-  if (G.sortCol) {
-    const d = G.sortDir;
-    r.sort((a,b) => {
-      let av, bv;
-      if (G.sortCol==='method') { av=a.request?.method||''; bv=b.request?.method||''; return d*av.localeCompare(bv); }
-      if (G.sortCol==='host')   { av=a.request?.host||'';   bv=b.request?.host||'';   return d*av.localeCompare(bv); }
-      if (G.sortCol==='path')   { av=getPath(a.request?.uri); bv=getPath(b.request?.uri); return d*av.localeCompare(bv); }
-      if (G.sortCol==='status') { av=a.metrics?.status_code||0; bv=b.metrics?.status_code||0; return d*(av-bv); }
-      if (G.sortCol==='size')   { av=a.metrics?.response_size_bytes||0; bv=b.metrics?.response_size_bytes||0; return d*(av-bv); }
-      if (G.sortCol==='dur')    { av=a.metrics?.latency_ms||0; bv=b.metrics?.latency_ms||0; return d*(av-bv); }
-      return 0;
-    });
-  } else {
-    r.sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));
-  }
-
-  return r;
-}
-
-function renderTable() {
-  const rows = applyFilter(G.sessions);
-  G.maxMs = Math.max(1,...rows.map(s=>s.metrics?.latency_ms||0));
-  const tbody = document.getElementById('tbody');
-  const fc = document.getElementById('filter-count');
-  if (fc) fc.textContent = rows.length + ' request' + (rows.length!==1?'s':'');
-
-  if (!rows.length) {
-    tbody.innerHTML = `<tr class="empty"><td colspan="8">No traffic captured.<br>Set your system HTTP proxy to <strong>127.0.0.1:8080</strong> and browse.</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = rows.map((s,i)=>{
-    const status = s.metrics?.status_code || s.response?.status || null;
-    const lat = s.metrics?.latency_ms;
-    const sz = s.metrics?.response_size_bytes;
-    const pathFull = getPath(s.request?.uri);
-    const qIdx = pathFull.indexOf('?');
-    const pathDisplay = qIdx >= 0
-      ? esc(pathFull.slice(0, qIdx)) + `<span style="color:var(--text4)">${esc(pathFull.slice(qIdx))}</span>`
-      : esc(pathFull);
-    const tls = !!(G.routes[s.request?.host]?.startsWith('https://'));
-    const pct = lat ? Math.round(lat/G.maxMs*100) : 0;
-    const sel = G.sel?.id===s.id;
-    const pending = !s.response;
-    const durCls = !lat ? '' : lat < 200 ? 'dur-fast' : lat >= 1000 ? 'dur-slow' : '';
-    return `<tr ${sel?'class="sel"':''} onclick="clickRow('${s.id}')">
-      <td style="color:var(--text4);font-size:11px">${i+1}</td>
-      <td>${mbadge(s.request?.method||'?')}</td>
-      <td class="trunc" style="color:var(--text3)">${esc(s.request?.host||'')}</td>
-      <td class="trunc">${pathDisplay}</td>
-      <td>${pending ? (G.sideFil==='all' ? '<span class="pending-spinner"></span>' : '<span class="sbadge s0">—</span>') : sbadge(status)}</td>
-      <td style="color:var(--text3)">${esc(fmtSz(sz))}</td>
-      <td><div class="dur-wrap"><span class="dur-txt ${durCls}">${pending ? '<span style="color:var(--text4)">—</span>' : esc(fmtMs(lat))}</span>${lat?`<div class="dur-track"><div class="dur-fill" style="width:${pct}%"></div></div>`:''}</div></td>
-      <td>${tlsIcon(tls)}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ── View mode ─────────────────────────────────────────────────────────────────
-function setViewMode(mode) {
-  G.treeMode = mode === 'structure';
-  document.getElementById('vmode-seq').classList.toggle('on', !G.treeMode);
-  document.getElementById('vmode-tree').classList.toggle('on', G.treeMode);
-  document.getElementById('seq-wrap').style.display = G.treeMode ? 'none' : '';
-  document.getElementById('tree-wrap').style.display = G.treeMode ? '' : 'none';
-  if (G.treeMode) renderTree(); else renderTable();
-}
-
-// ── Path trie ─────────────────────────────────────────────────────────────────
-// Each node: { children: Map<seg, Node>, requests: Session[] }
-function buildTrie(sessions) {
-  const hosts = new Map();
-  for (const s of sessions) {
-    const host = s.request?.host || '(unknown)';
-    if (!hosts.has(host)) hosts.set(host, { children: new Map(), requests: [] });
-    const pathOnly = (getPath(s.request?.uri) || '/').split('?')[0];
-    const segs = pathOnly.split('/').filter(Boolean);
-    let node = hosts.get(host);
-    for (const seg of segs) {
-      if (!node.children.has(seg)) node.children.set(seg, { children: new Map(), requests: [] });
-      node = node.children.get(seg);
-    }
-    node.requests.push(s);
-  }
-  return hosts;
-}
-
-function trieCount(node) {
-  return node.requests.length + [...node.children.values()].reduce((s,c)=>s+trieCount(c),0);
-}
-function trieHasErr(node) {
-  return node.requests.some(s=>(s.metrics?.status_code||0)>=400) ||
-    [...node.children.values()].some(trieHasErr);
-}
-function trieHasPend(node) {
-  return node.requests.some(s=>!s.response) ||
-    [...node.children.values()].some(trieHasPend);
-}
-
-// Walk down while exactly 1 child and no direct requests — merge into single label.
-function compressNode(seg, node) {
-  let label = seg, cur = node;
-  while (cur.children.size === 1 && cur.requests.length === 0) {
-    const [[nextSeg, nextNode]] = [...cur.children.entries()];
-    label += '/' + nextSeg;
-    cur = nextNode;
-  }
-  return { label, node: cur };
-}
-
-const CARET = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2 1.5l3.5 2.5L2 6.5"/></svg>`;
-
-// nodeKeys: index → nodeKey string (avoids escaping issues in onclick attrs)
-let _nodeKeys = [];
-function _nk(key) { const i = _nodeKeys.length; _nodeKeys.push(key); return i; }
-
-function reqRow(s, indent, compact=false) {
-  const status = s.metrics?.status_code || s.response?.status || null;
-  const lat = s.metrics?.latency_ms;
-  const sz = s.metrics?.response_size_bytes;
-  const sel = G.sel?.id === s.id;
-  let pathLabel = '';
-  if (compact) {
-    const uri = s.request?.uri || '';
-    const q = uri.indexOf('?');
-    if (q >= 0) {
-      const qs = uri.slice(q + 1);
-      const first = qs.split('&')[0];
-      pathLabel = `<span class="tree-req-qs">(${esc(first)}${qs.includes('&') ? '…' : ''})</span>`;
-    }
-  } else {
-    const path = getPath(s.request?.uri);
-    const qIdx = path.indexOf('?');
-    pathLabel = `<span class="tree-req-path" title="${esc(path)}">${qIdx >= 0 ? esc(path.slice(0,qIdx)) + `<span style="color:var(--text4)">${esc(path.slice(qIdx))}</span>` : esc(path)}</span>`;
-  }
-  return `<div class="tree-req-row${sel?' sel':''}" onclick="clickRow('${s.id}')">
-    <span class="tree-indent" style="width:${indent}px"></span>
-    <span class="tree-req-method">${mbadge(s.request?.method||'?')}</span>
-    ${pathLabel}
-    <span class="tree-req-status">${sbadge(status)}</span>
-    <span class="tree-req-size">${esc(fmtSz(sz))}</span>
-    <span class="tree-req-dur">${esc(fmtMs(lat))}</span>
-  </div>`;
-}
-
-function renderNodeChildren(node, depth, hostKey, pathSoFar) {
-  let html = '';
-  const indent = depth * 14 + 10;
-
-  // Direct requests at this path level (e.g. GET /v1 when /v1/sub also exists)
-  for (const s of node.requests) html += reqRow(s, indent, true);
-
-  // Children, sorted alphabetically, with path compression applied
-  for (const seg of [...node.children.keys()].sort()) {
-    const { label, node: child } = compressNode(seg, node.children.get(seg));
-    const fullPath = pathSoFar + '/' + label;
-    const cnt = trieCount(child);
-    const hasErr = trieHasErr(child);
-
-    if (child.children.size === 0) {
-      // Leaf folder: always expanded, no toggle caret
-      html += `<div>
-        <div class="tree-folder-hdr" style="cursor:default">
-          <span class="tree-indent" style="width:${indent}px"></span>
-          <span class="tree-seg">${esc(label)}</span>
-          <span class="tree-seg-count">${cnt}</span>
-          ${hasErr?'<span class="tree-err-dot"></span>':''}
-        </div>
-        ${child.requests.map(s => reqRow(s, indent + 14, true)).join('')}
-      </div>`;
-    } else {
-      // Has sub-children: collapsible folder
-      const nodeKey = hostKey + '\x00' + fullPath;
-      const ki = _nk(nodeKey);
-      const open = G.treeExpanded.has(nodeKey);
-      html += `<div>
-        <div class="tree-folder-hdr" onclick="toggleTreeNode(${ki})">
-          <span class="tree-indent" style="width:${indent}px"></span>
-          <span class="tree-caret${open?' open':''}">${CARET}</span>
-          <span class="tree-seg">${esc(label)}</span>
-          <span class="tree-seg-count">${cnt}</span>
-          ${hasErr?'<span class="tree-err-dot"></span>':''}
-        </div>
-        ${open ? renderNodeChildren(child, depth+1, hostKey, fullPath) : ''}
-      </div>`;
-    }
-  }
-  return html;
-}
-
-function renderTree() {
-  const rows = applyFilter(G.sessions);
-  const tb = document.getElementById('tree-body');
-  const fc = document.getElementById('filter-count');
-  if (fc) fc.textContent = rows.length + ' request' + (rows.length!==1?'s':'');
-
-  if (!rows.length) {
-    tb.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text4);line-height:1.6">No traffic captured.<br>Set your system HTTP proxy to <strong>127.0.0.1:8080</strong> and browse.</div>`;
-    return;
-  }
-
-  _nodeKeys = []; // reset index before each render
-  const hostTrie = buildTrie(rows);
-
-  // Sort hosts: error hosts first, then alphabetical
-  const hosts = [...hostTrie.keys()].sort((a, b) => {
-    const ae = trieHasErr(hostTrie.get(a)), be = trieHasErr(hostTrie.get(b));
-    if (ae !== be) return ae ? -1 : 1;
-    return a.localeCompare(b);
-  });
-
-  tb.innerHTML = hosts.map(host => {
-    const root = hostTrie.get(host);
-    const cnt = trieCount(root);
-    const hasErr = trieHasErr(root);
-    const hasPend = trieHasPend(root);
-    const hostKey = host;
-    const ki = _nk(hostKey);
-    const open = !G.treeClosed.has(hostKey);
-    return `<div class="tree-host-section">
-      <div class="tree-host-hdr" onclick="toggleTreeNode(${ki})">
-        <span class="tree-caret${open?' open':''}">${CARET}</span>
-        <span class="tree-hostname">${esc(host)}</span>
-        <span class="tree-host-count">${cnt}</span>
-        ${hasErr?'<span class="tree-err-dot"></span>':''}
-        ${hasPend?'<span style="width:5px;height:5px;border-radius:50%;background:var(--warning);flex-shrink:0;margin-left:3px;display:inline-block"></span>':''}
-      </div>
-      ${open ? renderNodeChildren(root, 1, hostKey, '') : ''}
-    </div>`;
-  }).join('');
-}
-
-function toggleTreeNode(ki) {
-  const key = _nodeKeys[ki];
-  if (!key) return;
-  if (key.includes('\x00')) {
-    // path sub-folder: default closed, toggle treeExpanded
-    if (G.treeExpanded.has(key)) G.treeExpanded.delete(key);
-    else G.treeExpanded.add(key);
-  } else {
-    // host node: default open, toggle treeClosed
-    if (G.treeClosed.has(key)) G.treeClosed.delete(key);
-    else G.treeClosed.add(key);
-  }
-  renderTree();
-}
-
-function updateBadges() {
-  const all = G.sessions.filter(s=>!isProxy(s.request?.host));
-  const done = all.filter(s=>s.response&&(s.metrics?.status_code||0)<400);
-  const err  = all.filter(s=>s.response&&(s.metrics?.status_code||0)>=400);
-  const pend = all.filter(s=>!s.response);
-  document.getElementById('nb-all').textContent  = all.length;
-  document.getElementById('nb-done').textContent = done.length;
-  document.getElementById('nb-err').textContent  = err.length;
-  document.getElementById('nb-pend').textContent = pend.length;
-  document.getElementById('sb-count').textContent = all.length+' request'+(all.length!==1?'s':'');
-}
-
-// ── Fetch sessions ─────────────────────────────────────────────────────────────
-async function fetchSessions() {
-  try {
-    const url = G.lastTs
-      ? `/api/sessions?since=${encodeURIComponent(G.lastTs)}`
-      : '/api/sessions';
-    const r = await fetch(url);
-    const d = await r.json();
-    const incoming = d.sessions || [];
-
-    if (G.lastTs && incoming.length > 0) {
-      // Merge incoming (new + pending-updated) into existing list by ID
-      const byId = new Map(G.sessions.map(s => [s.id, s]));
-      for (const s of incoming) byId.set(s.id, s);
-      G.sessions = [...byId.values()].sort((a, b) =>
-        new Date(b.timestamp) - new Date(a.timestamp));
-    } else if (!G.lastTs) {
-      G.sessions = incoming;
-    }
-
-    // Advance cursor to newest session timestamp
-    if (G.sessions.length > 0) G.lastTs = G.sessions[0].timestamp;
-
-    // Refresh selected session if it was updated (keeps Frames tab live)
-    if (G.sel && incoming.length > 0) {
-      const updated = incoming.find(s => s.id === G.sel.id);
-      if (updated) { G.sel = updated; renderDetail(); }
-    }
-
-    updateBadges();
-    if (!G.lastTs || incoming.length > 0) {
-      if (G.treeMode) renderTree(); else renderTable();
-    }
-    document.getElementById('sb-dot').style.background = 'var(--success)';
-  } catch {
-    document.getElementById('sb-dot').style.background = 'var(--danger)';
-  }
-}
-
-// ── Click row ─────────────────────────────────────────────────────────────────
-async function clickRow(id) {
-  try {
-    const r = await fetch(`/api/sessions/${id}`);
-    const d = await r.json();
-    G.sel = d.exchange;
-    // Keep G.sessions in sync so the row status reflects the fetched state
-    const si = G.sessions.findIndex(s => s.id === G.sel.id);
-    if (si >= 0) G.sessions[si] = G.sel;
-    if (G.treeMode) renderTree(); else renderTable();
-    renderDetail();
-    const label = (G.sel.request?.method||'') + ' ' + getPath(G.sel.request?.uri);
-    document.getElementById('sb-sel').textContent = label;
-    document.getElementById('detail-title').textContent = label;
-    document.getElementById('detail-topbar').style.display = '';
-  } catch { toast('Failed to load session', true); }
-}
-
-// ── Detail panel ───────────────────────────────────────────────────────────────
-function switchDTab(el) {
-  document.querySelectorAll('.dtab').forEach(t=>t.classList.remove('on'));
-  el.classList.add('on');
-  G.dtab = el.dataset.tab;
-  renderDetail();
-}
-
-function goCompose() {
-  // Create a compose tab pre-filled from the selected session, then navigate there
-  if (G.sel) cmpNewTab(G.sel);
-  const navEl=document.querySelector('.nav-item[data-v="compose"]');
-  if (navEl) navItem(navEl);
-}
-
-// ── Compose Workspace ─────────────────────────────────────────────────────────
-function cmpMakeId() { return Math.random().toString(36).slice(2,10); }
-function cmpSaveState() {
-  try {
-    localStorage.setItem('oproxy-compose-collections', JSON.stringify(G.compose.collections));
-    localStorage.setItem('oproxy-compose-vars', JSON.stringify(G.compose.vars));
-  } catch {}
-}
-function cmpSubstVars(str) {
-  return str.replace(/\{\{([^}]+)\}\}/g, (_,k)=>G.compose.vars[k.trim()]??`{{${k}}}`);
-}
-
-function cmpNewTab(fromSession=null) {
-  const tab = {
-    id: cmpMakeId(), name: 'New Request', dirty: false, collectionId: null, savedReqId: null,
-    method: fromSession?.request?.method||'GET',
-    url: (() => {
-      const uri = fromSession?.request?.uri||'';
-      if (!fromSession || /^https?:\/\//i.test(uri)) return uri;
-      const dest = fromSession.request?.headers?.['x-oproxy-destination'] || fromSession.request?.headers?.['X-Oproxy-Destination'] || '';
-      const host = fromSession.request?.host || '';
-      const scheme = dest ? dest.split('://')[0] : (host.endsWith(':443') || G.routes[host]?.startsWith('https') ? 'https' : 'https');
-      return host ? `${scheme}://${host}${uri}` : uri;
-    })(),
-    headers: Object.entries(fromSession?.request?.headers||{}).filter(([k])=>!INTERNAL_HDRS.has(k.toLowerCase())).map(([k,v])=>({enabled:true,key:k,val:v})),
-    params: [],
-    bodyMode: 'raw', bodyRaw: fromSession?.request?.body||'', bodyForm: [],
-    contentType: 'application/json',
-    history: [],
-  };
-  if (fromSession?.request?.uri) tab.name = (fromSession.request.method||'GET') + ' ' + getPath(fromSession.request.uri);
-  G.compose.tabs.push(tab);
-  cmpActivateTab(tab.id);
-}
-function cmpActivateTab(tabId) {
-  G.compose.activeTabId = tabId;
-  renderCmpTabs();
-  renderCmpEditor();
-}
-function cmpCloseTab(tabId) {
-  const idx = G.compose.tabs.findIndex(t=>t.id===tabId);
-  if (idx===-1) return;
-  G.compose.tabs.splice(idx,1);
-  if (G.compose.activeTabId===tabId) {
-    const next = G.compose.tabs[Math.min(idx,G.compose.tabs.length-1)];
-    G.compose.activeTabId = next?.id||null;
-  }
-  renderCmpTabs();
-  renderCmpEditor();
-}
-function cmpDirty() {
-  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId);
-  if (!tab) return;
-  tab.dirty = true;
-  cmpSyncTabFromDom(tab);
-  renderCmpTabs();
-}
-function parseCurl(raw) {
-  // Normalize multi-line cURL (join continuation lines, collapse whitespace)
-  const src = raw.replace(/\\\n/g, ' ').replace(/\r/g, '');
-  // Tokenize respecting single/double quotes
-  const tokens = [];
-  let cur = '', inSq = false, inDq = false;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (c === "'" && !inDq) { inSq = !inSq; continue; }
-    if (c === '"' && !inSq) { inDq = !inDq; continue; }
-    if (c === ' ' && !inSq && !inDq) { if (cur) { tokens.push(cur); cur = ''; } continue; }
-    cur += c;
-  }
-  if (cur) tokens.push(cur);
-
-  // Must start with 'curl'
-  if (!tokens.length || tokens[0].toLowerCase() !== 'curl') return null;
-
-  let method = null, url = null, body = null;
-  const headers = [];
-  let i = 1;
-  while (i < tokens.length) {
-    const t = tokens[i];
-    if (t === '-X' || t === '--request') { method = tokens[++i]; i++; continue; }
-    if (t === '-H' || t === '--header') {
-      const hdr = tokens[++i]; i++;
-      const ci = hdr.indexOf(':');
-      if (ci > 0) headers.push({ key: hdr.slice(0, ci).trim(), val: hdr.slice(ci + 1).trim(), enabled: true });
-      continue;
-    }
-    if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary') { body = tokens[++i]; i++; continue; }
-    if (t === '-u' || t === '--user') {
-      const cred = tokens[++i]; i++;
-      headers.push({ key: 'Authorization', val: 'Basic ' + btoa(cred), enabled: true });
-      continue;
-    }
-    // Skip boolean flags
-    if (t.startsWith('-')) { i++; continue; }
-    // Positional URL
-    if (!url && (t.startsWith('http://') || t.startsWith('https://'))) { url = t; i++; continue; }
-    i++;
-  }
-  if (!url) return null;
-  if (!method) method = body ? 'POST' : 'GET';
-  return { method: method.toUpperCase(), url, headers, body: body || '' };
-}
-
-function cmpMaybeImportCurl(e) {
-  const pasted = (e.clipboardData || window.clipboardData).getData('text').trim();
-  if (!pasted.toLowerCase().startsWith('curl ')) return; // let normal paste proceed
-  e.preventDefault();
-  const parsed = parseCurl(pasted);
-  if (!parsed) return;
-  const tab = G.compose.tabs.find(t => t.id === G.compose.activeTabId); if (!tab) return;
-  tab.method  = parsed.method;
-  tab.url     = parsed.url;
-  tab.headers = parsed.headers;
-  tab.bodyRaw = parsed.body;
-  if (parsed.body) {
-    tab.bodyMode = 'raw';
-    const ctHdr = parsed.headers.find(h => h.key.toLowerCase() === 'content-type');
-    if (ctHdr) tab.contentType = ctHdr.val.split(';')[0].trim();
-  }
-  tab.dirty = true;
-  renderCmpEditor();
-  renderCmpTabs();
-  // Switch to body tab if body present
-  if (parsed.body) {
-    const bodyTab = document.querySelector('.ctab[data-ctab="body"]');
-    if (bodyTab) setCmpBodyTab(bodyTab);
-  }
-  toast('Imported from cURL');
-}
-
-function cmpSyncTabFromDom(tab) {
-  tab.method = document.getElementById('cmp-method')?.value||tab.method;
-  tab.url = document.getElementById('cmp-url')?.value||tab.url;
-  tab.bodyMode = document.getElementById('cmp-body-raw-btn')?.getAttribute('aria-pressed')==='true'?'raw':'form';
-  tab.bodyRaw = document.getElementById('cmp-body-raw-ta')?.value||tab.bodyRaw;
-  tab.contentType = document.getElementById('cmp-body-ct')?.value||tab.contentType;
-  // Sync headers
-  const hdrRows=[]; document.querySelectorAll('#cmp-headers-tbody tr').forEach(row=>{
-    const cb=row.querySelector('input[type=checkbox]'),k=row.querySelector('.cmp-kv-input:nth-of-type(1)'),v=row.querySelector('.cmp-kv-input:nth-of-type(2)');
-    if(k&&v) hdrRows.push({enabled:cb?.checked!==false,key:k.value,val:v.value});
-  }); tab.headers=hdrRows;
-  // Sync params
-  const paramRows=[]; document.querySelectorAll('#cmp-params-tbody tr').forEach(row=>{
-    const cb=row.querySelector('input[type=checkbox]'),k=row.querySelector('.cmp-kv-input:nth-of-type(1)'),v=row.querySelector('.cmp-kv-input:nth-of-type(2)');
-    if(k&&v) paramRows.push({enabled:cb?.checked!==false,key:k.value,val:v.value});
-  }); tab.params=paramRows;
-}
-
-function renderCmpTabs() {
-  const strip = document.getElementById('cmp-tab-strip'); if (!strip) return;
-  // Remove old tabs (leave the + button)
-  strip.querySelectorAll('.cmp-tab').forEach(el=>el.remove());
-  const btn = strip.querySelector('.cmp-tab-new');
-  G.compose.tabs.forEach(tab=>{
-    const el=document.createElement('div');
-    el.className='cmp-tab'+(tab.id===G.compose.activeTabId?' active':'');
-    el.setAttribute('role','tab'); el.setAttribute('aria-selected',tab.id===G.compose.activeTabId);
-    el.innerHTML=`<span class="cmp-tab-name">${esc(tab.name)}</span>${tab.dirty?'<span class="cmp-tab-dirty">●</span>':''}<span class="cmp-tab-x" onclick="event.stopPropagation();cmpCloseTab('${tab.id}')" aria-label="Close tab">✕</span>`;
-    el.addEventListener('click', ()=>cmpActivateTab(tab.id));
-    strip.insertBefore(el, btn);
-  });
-}
-function renderCmpEditor() {
-  const noTab=document.getElementById('cmp-no-tab'), editor=document.getElementById('cmp-editor');
-  if (!noTab||!editor) return;
-  const tab=G.compose.tabs.find(t=>t.id===G.compose.activeTabId);
-  if (!tab) { noTab.style.display=''; editor.style.display='none'; document.getElementById('cmp-response').style.display='none'; return; }
-  noTab.style.display='none'; editor.style.display='';
-  document.getElementById('cmp-method').value=tab.method;
-  document.getElementById('cmp-url').value=tab.url;
-  document.getElementById('cmp-body-ct').value=tab.contentType;
-  document.getElementById('cmp-body-raw-ta').value=tab.bodyRaw;
-  renderCmpKvTable('headers', tab.headers, 'cmp-headers-tbody');
-  renderCmpKvTable('params', tab.params, 'cmp-params-tbody');
-  renderCmpKvTable('form', tab.bodyForm, 'cmp-form-tbody');
-  renderCmpHistory(tab);
-  cmpResolveVars();
-}
-function renderCmpKvTable(type, rows, tbodyId) {
-  const tb=document.getElementById(tbodyId); if (!tb) return;
-  tb.innerHTML=(rows||[]).map((r,i)=>`<tr>
-    <td><input type="checkbox" ${r.enabled!==false?'checked':''} onchange="cmpDirty()"></td>
-    <td><input class="cmp-kv-input" placeholder="${type==='headers'?'Header-Name':'key'}" value="${esc(r.key||'')}" oninput="cmpDirty()"></td>
-    <td><input class="cmp-kv-input" placeholder="value" value="${esc(r.val||'')}" oninput="cmpDirty()"></td>
-    <td><button class="cmp-kv-del" onclick="this.closest('tr').remove();cmpDirty()">✕</button></td>
-  </tr>`).join('');
-}
-function renderCmpHistory(tab) {
-  const el=document.getElementById('cmp-history-list'); if (!el) return;
-  const count=document.getElementById('cmp-history-count'); if(count) count.textContent=tab.history.length;
-  if (!tab.history.length) { el.innerHTML='<div style="padding:10px 14px;color:var(--text4);font-size:11px">No history</div>'; return; }
-  el.innerHTML=[...tab.history].reverse().map(h=>`<div class="cmp-history-row" onclick="cmpRestoreHistory(${JSON.stringify(h)})">
-    ${mbadge(h.method)} <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(getPath(h.url))}</span>
-    ${h.status?sbadge(h.status):'<span style="color:var(--text4)">—</span>'}
-    <span style="color:var(--text4)">${fmtMs(h.ms)}</span>
-  </div>`).join('');
-}
-function cmpRestoreHistory(h) {
-  const tab=G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
-  tab.url=h.url; tab.method=h.method;
-  document.getElementById('cmp-url').value=h.url;
-  document.getElementById('cmp-method').value=h.method;
-  cmpResolveVars();
-}
-
-function cmpAddKvRow(type) {
-  const tbodyId=type==='headers'?'cmp-headers-tbody':type==='params'?'cmp-params-tbody':'cmp-form-tbody';
-  const tb=document.getElementById(tbodyId); if (!tb) return;
-  const ph=type==='headers'?'Header-Name':'key';
-  const row=document.createElement('tr');
-  row.innerHTML=`<td><input type="checkbox" checked onchange="cmpDirty()"></td><td><input class="cmp-kv-input" placeholder="${ph}" oninput="cmpDirty()"></td><td><input class="cmp-kv-input" placeholder="value" oninput="cmpDirty()"></td><td><button class="cmp-kv-del" onclick="this.closest('tr').remove();cmpDirty()">✕</button></td>`;
-  tb.appendChild(row); row.querySelector('input:nth-of-type(2)')?.focus();
-}
-function cmpToggleAllKv(type, checked) {
-  const tbodyId=type==='headers'?'cmp-headers-tbody':'cmp-params-tbody';
-  document.querySelectorAll(`#${tbodyId} input[type=checkbox]`).forEach(cb=>cb.checked=checked);
-  cmpDirty();
-}
-function setCmpBodyTab(el) {
-  document.querySelectorAll('.ctab[data-ctab]').forEach(t=>t.classList.remove('on'));
-  el.classList.add('on');
-  const tab=el.dataset.ctab;
-  document.getElementById('cmp-pane-headers').style.display=tab==='headers'?'':'none';
-  document.getElementById('cmp-pane-params').style.display=tab==='params'?'':'none';
-  document.getElementById('cmp-pane-body').style.display=tab==='body'?'':'none';
-}
-function setCmpBodyMode(mode) {
-  const isRaw=mode==='raw';
-  document.getElementById('cmp-body-raw-btn').setAttribute('aria-pressed',isRaw);
-  document.getElementById('cmp-body-form-btn').setAttribute('aria-pressed',!isRaw);
-  document.getElementById('cmp-body-raw-btn').className='vmode-btn'+(isRaw?' on':'');
-  document.getElementById('cmp-body-form-btn').className='vmode-btn'+(!isRaw?' on':'');
-  document.getElementById('cmp-body-raw-ta').style.display=isRaw?'':'none';
-  document.getElementById('cmp-body-form-editor').style.display=isRaw?'none':'';
-}
-function setCmpResTab(el) {
-  document.querySelectorAll('#cmp-res-tabs .ctab').forEach(t=>t.classList.remove('on'));
-  el.classList.add('on');
-  const t=el.dataset.ctab;
-  document.getElementById('cmp-res-body-pane').style.display=t==='body'?'':'none';
-  document.getElementById('cmp-res-headers-pane').style.display=t==='headers'?'':'none';
-}
-function cmpResolveVars() {
-  const raw=document.getElementById('cmp-url')?.value||'';
-  const resolved=cmpSubstVars(raw);
-  const el=document.getElementById('cmp-resolved-url'); if (!el) return;
-  if (resolved!==raw && raw.includes('{{')) {
-    el.style.display=''; el.innerHTML='→ '+raw.replace(/\{\{([^}]+)\}\}/g,(_,k)=>{
-      const v=G.compose.vars[k.trim()];
-      return v?`<span class="var-resolved">${esc(v)}</span>`:`<span style="color:var(--warning)">{{${esc(k)}}}</span>`;
-    });
-  } else { el.style.display='none'; }
-}
-async function sendCmpRequest() {
-  const tab=G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
-  cmpSyncTabFromDom(tab);
-  let url=cmpSubstVars(tab.url);
-  if (!url){toast('URL is required',true);return;}
-  // Append enabled params
-  const ps=tab.params.filter(p=>p.enabled&&p.key);
-  if (ps.length) {
-    const q=new URLSearchParams(ps.map(p=>[p.key,cmpSubstVars(p.val)]));
-    url+=( url.includes('?')?'&':'?')+q.toString();
-  }
-  const headers={};
-  tab.headers.filter(h=>h.enabled&&h.key&&!INTERNAL_HDRS.has(h.key.toLowerCase())).forEach(h=>{ headers[cmpSubstVars(h.key)]=cmpSubstVars(h.val); });
-  const method=tab.method;
-  let body=undefined;
-  if (method!=='GET'&&method!=='HEAD') {
-    if (tab.bodyMode==='form') {
-      const fd=new URLSearchParams(); tab.bodyForm.filter(f=>f.key).forEach(f=>fd.append(cmpSubstVars(f.key),cmpSubstVars(f.val)));
-      body=fd.toString(); if (!headers['Content-Type']) headers['Content-Type']='application/x-www-form-urlencoded';
-    } else if (tab.bodyRaw) {
-      body=tab.bodyRaw; if (!headers['Content-Type']) headers['Content-Type']=tab.contentType;
-    }
-  }
-  const t0=Date.now();
-  document.getElementById('cmp-send-btn').disabled=true;
-  try {
-    const fwdRes=await fetch('/admin/forward',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({method,url,headers,body:body||null})
-    });
-    const ms=Date.now()-t0;
-    if (!fwdRes.ok && fwdRes.status!==502) throw new Error('Forward endpoint error '+fwdRes.status);
-    const data=await fwdRes.json().catch(()=>null);
-    if (!data) throw new Error('Invalid response from forward endpoint');
-    const resHdrs=data.headers||{};
-    const resBody=data.body||'';
-    const resSize=new TextEncoder().encode(resBody).length;
-    // Show response panel
-    const rp=document.getElementById('cmp-response'); rp.style.display='';
-    document.getElementById('cmp-res-status').innerHTML=sbadge(data.status)+` ${esc(HTTP_REASONS[data.status]||'')}`;
-    document.getElementById('cmp-res-time').textContent=fmtMs(ms);
-    document.getElementById('cmp-res-size').textContent=fmtSz(resSize);
-    document.getElementById('cmp-res-body-pane').innerHTML=renderBody(resBody,resHdrs);
-    document.getElementById('cmp-res-headers-pane').innerHTML=Object.entries(resHdrs).map(([k,v])=>`<div class="hdr-row"><span class="hdr-name">${esc(k)}</span><span class="hdr-val">${esc(v)}</span></div>`).join('');
-    // Record in history
-    tab.history.push({ts:Date.now(),method,url:tab.url,status:data.status,ms});
-    tab.dirty=true; renderCmpHistory(tab); renderCmpTabs();
-    toast('Response received');
-  } catch(e) { toast('Request failed — '+e.message,true); }
-  finally { document.getElementById('cmp-send-btn').disabled=false; }
-}
-
-// ── Compose collections & variables ──────────────────────────────────────────
-function renderCmpCollections() {
-  const el=document.getElementById('cmp-collections-list'); if (!el) return;
-  let html='';
-  if (G.compose._newCollRow) {
-    html+=`<div class="cmp-coll-new-row"><input id="cmp-new-coll-input" placeholder="Collection name" onkeydown="cmpCommitNewColl(event)" onblur="cmpCommitNewColl({key:'Blur'})"></div>`;
-  }
-  if (!G.compose.collections.length && !G.compose._newCollRow) {
-    el.innerHTML='<div style="padding:12px;color:var(--text4);font-size:11px">No collections yet.<br>Click + to create one.</div>'; renderCmpVars(); return;
-  }
-  const pd = G.compose._pendingDelete;
-  html+=G.compose.collections.map(coll=>{
-    const collDelPending = pd?.type==='collection' && pd.collId===coll.id;
-    let rows = `<div class="cmp-coll-item">
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 3.5h10M3 1.5h6L10 3.5H2L3 1.5zM1 3.5v7h10v-7"/></svg>
-      <span style="flex:1;cursor:pointer" ondblclick="cmpStartRenameCollection('${coll.id}')" onclick="cmpToggleColl('${coll.id}')">${esc(coll.name)}</span>
-      <button class="cmp-kv-del" onclick="event.stopPropagation();cmpAskDelCollection('${coll.id}')" title="Delete collection" style="font-size:11px">✕</button>
-    </div>`;
-    if (collDelPending) {
-      rows += `<div class="cmp-del-confirm">
-        <span>Delete "${esc(coll.name)}" and all its requests?</span>
-        <button class="btn btn-sm btn-danger" onclick="cmpConfirmDelCollection('${coll.id}')">Delete</button>
-        <button class="btn btn-sm btn-ghost" onclick="G.compose._pendingDelete=null;renderCmpCollections()">Cancel</button>
-      </div>`;
-    }
-    if (coll.expanded) {
-      rows += coll.requests.map(req => {
-        const isActive = G.compose.tabs.find(t=>t.savedReqId===req.id);
-        const reqDelPending = pd?.type==='request' && pd.reqId===req.id;
-        if (G.compose._renamingReq===req.id) {
-          return `<div class="cmp-req-rename-row">
-            <input id="cmp-rename-req-input" value="${esc(req.name||getPath(req.url))}" onkeydown="cmpCommitRenameReq(event,'${coll.id}','${req.id}')" onblur="cmpCommitRenameReq({key:'Blur'},'${coll.id}','${req.id}')">
-            <button class="btn btn-sm btn-ghost" onclick="G.compose._renamingReq=null;renderCmpCollections()">✕</button>
-          </div>`;
-        }
-        let reqRow = `<div class="cmp-saved-req${isActive?' active':''}" onclick="cmpLoadRequest('${coll.id}','${req.id}')">
-          <span class="cmp-saved-method" style="color:var(--accent)">${esc(req.method)}</span>
-          <span class="cmp-saved-name">${esc(req.name||getPath(req.url))}</span>
-          <button class="cmp-req-edit-btn" onclick="event.stopPropagation();cmpStartRenameReq('${req.id}')" title="Rename">✎</button>
-          <button class="cmp-kv-del" onclick="event.stopPropagation();cmpAskDelRequest('${coll.id}','${req.id}')" title="Delete" style="font-size:11px">✕</button>
-        </div>`;
-        if (reqDelPending) {
-          reqRow += `<div class="cmp-del-confirm" style="padding-left:22px">
-            <span>Delete "${esc(req.name||getPath(req.url))}"?</span>
-            <button class="btn btn-sm btn-danger" onclick="cmpConfirmDelRequest('${coll.id}','${req.id}')">Delete</button>
-            <button class="btn btn-sm btn-ghost" onclick="G.compose._pendingDelete=null;renderCmpCollections()">Cancel</button>
-          </div>`;
-        }
-        return reqRow;
-      }).join('');
-    }
-    return rows;
-  }).join('');
-  el.innerHTML=html;
-  if (G.compose._newCollRow) { const i=document.getElementById('cmp-new-coll-input'); if(i) i.focus(); }
-  if (G.compose._renamingReq) { const i=document.getElementById('cmp-rename-req-input'); if(i){i.focus();i.select();} }
-  renderCmpVars();
-}
-function renderCmpVars() {
-  const el=document.getElementById('cmp-vars-list'); if (!el) return;
-  el.innerHTML=Object.entries(G.compose.vars).map(([k,v])=>`<div class="cmp-var-row">
-    <input class="cmp-var-key" value="${esc(k)}" placeholder="name" onchange="cmpUpdateVar('${esc(k)}',this.value,document.querySelector('.cmp-var-row:has(input.cmp-var-key[value=\\'${esc(k)}\\']) .cmp-var-val')?.value||'${esc(v)}')">
-    <input class="cmp-var-val" value="${esc(v)}" placeholder="value" oninput="G.compose.vars['${esc(k)}']=this.value;cmpSaveState();">
-    <button class="cmp-kv-del" onclick="cmpDelVar('${esc(k)}')">✕</button>
-  </div>`).join('');
-}
-function cmpAddVar() {
-  const key=prompt('Variable name (used as {{key}} in URLs/values):'); if (!key) return;
-  G.compose.vars[key]=''; cmpSaveState(); renderCmpVars();
-}
-function cmpDelVar(key) { delete G.compose.vars[key]; cmpSaveState(); renderCmpVars(); }
-function cmpUpdateVar(oldKey,newKey,val) {
-  if (oldKey!==newKey) delete G.compose.vars[oldKey];
-  G.compose.vars[newKey]=val; cmpSaveState(); renderCmpVars();
-}
-function cmpNewCollection() {
-  G.compose._newCollRow = true;
-  renderCmpCollections();
-}
-function cmpCommitNewColl(e) {
-  if (e.key !== 'Enter' && e.key !== 'Blur') return;
-  if (!G.compose._newCollRow) return;   // blur re-fires when DOM removes input; ignore
-  const inp = document.getElementById('cmp-new-coll-input'); if (!inp) return;
-  const name = inp.value.trim();
-  G.compose._newCollRow = false;
-  if (name) G.compose.collections.push({id:cmpMakeId(), name, expanded:true, requests:[]});
-  cmpSaveState(); renderCmpCollections();
-  // Re-populate collection select in save form if open
-  cmpPopulateSaveCollSelect();
-}
-function cmpStartRenameCollection(id) {
-  const c = G.compose.collections.find(x=>x.id===id); if (!c) return;
-  const name = prompt('Rename collection:', c.name); // keep simple for collection-level rename
-  if (name && name.trim()) { c.name = name.trim(); cmpSaveState(); renderCmpCollections(); }
-}
-function cmpStartRenameReq(reqId) {
-  G.compose._renamingReq = reqId;
-  G.compose._pendingDelete = null;
-  renderCmpCollections();
-}
-function cmpCommitRenameReq(e, collId, reqId) {
-  if (e.key !== 'Enter' && e.key !== 'Blur') return;
-  if (!G.compose._renamingReq) return;
-  const inp = document.getElementById('cmp-rename-req-input'); if (!inp) return;
-  const name = inp.value.trim();
-  if (name) {
-    const coll = G.compose.collections.find(c=>c.id===collId); if (!coll) return;
-    const req = coll.requests.find(r=>r.id===reqId); if (!req) return;
-    req.name = name;
-    // Also update tab name if open
-    const tab = G.compose.tabs.find(t=>t.savedReqId===reqId);
-    if (tab) { tab.name = name; renderCmpTabs(); }
-    cmpSaveState();
-  }
-  G.compose._renamingReq = null;
-  renderCmpCollections();
-}
-function cmpAskDelCollection(id) {
-  G.compose._pendingDelete = {type:'collection', collId:id};
-  G.compose._renamingReq = null;
-  renderCmpCollections();
-}
-function cmpConfirmDelCollection(id) {
-  G.compose.collections = G.compose.collections.filter(c=>c.id!==id);
-  G.compose._pendingDelete = null;
-  cmpSaveState(); renderCmpCollections();
-}
-function cmpToggleColl(id) {
-  const c=G.compose.collections.find(x=>x.id===id); if(c) c.expanded=!c.expanded; cmpSaveState(); renderCmpCollections();
-}
-function cmpLoadRequest(collId, reqId) {
-  const coll=G.compose.collections.find(c=>c.id===collId); if (!coll) return;
-  const req=coll.requests.find(r=>r.id===reqId); if (!req) return;
-  const existing=G.compose.tabs.find(t=>t.collectionId===collId&&t.savedReqId===reqId);
-  if (existing) { cmpActivateTab(existing.id); return; }
-  const tab={id:cmpMakeId(),name:req.name||getPath(req.url),dirty:false,collectionId:collId,savedReqId:reqId,
-    method:req.method||'GET',url:req.url||'',
-    headers:[...(req.headers||[])],params:[...(req.params||[])],
-    bodyMode:req.bodyMode||'raw',bodyRaw:req.bodyRaw||'',bodyForm:[...(req.bodyForm||[])],
-    contentType:req.contentType||'application/json',history:[]};
-  G.compose.tabs.push(tab); cmpActivateTab(tab.id);
-}
-function cmpAskDelRequest(collId, reqId) {
-  G.compose._pendingDelete = {type:'request', collId, reqId};
-  G.compose._renamingReq = null;
-  renderCmpCollections();
-}
-function cmpConfirmDelRequest(collId, reqId) {
-  const coll = G.compose.collections.find(c=>c.id===collId); if (!coll) return;
-  coll.requests = coll.requests.filter(r=>r.id!==reqId);
-  G.compose._pendingDelete = null;
-  cmpSaveState(); renderCmpCollections();
-}
-function cmpToggleSaveForm() {
-  const form = document.getElementById('cmp-save-form'); if (!form) return;
-  if (form.style.display !== 'none') { form.style.display = 'none'; return; }
-  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
-  cmpSyncTabFromDom(tab);
-  cmpPopulateSaveCollSelect();
-  document.getElementById('cmp-save-name').value = tab.name || '';
-  form.style.display = '';
-  document.getElementById('cmp-save-name').focus();
-  document.getElementById('cmp-save-name').select();
-}
-function cmpPopulateSaveCollSelect() {
-  const sel = document.getElementById('cmp-save-coll'); if (!sel) return;
-  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId);
-  sel.innerHTML = G.compose.collections.map(c =>
-    `<option value="${esc(c.id)}"${tab?.collectionId===c.id?' selected':''}>${esc(c.name)}</option>`
-  ).join('');
-  if (!G.compose.collections.length) sel.innerHTML = '<option disabled>No collections</option>';
-}
-function cmpConfirmSave() {
-  const tab = G.compose.tabs.find(t=>t.id===G.compose.activeTabId); if (!tab) return;
-  cmpSyncTabFromDom(tab);
-  const name = (document.getElementById('cmp-save-name')?.value||'').trim() || tab.url || 'Untitled';
-  const collId = document.getElementById('cmp-save-coll')?.value;
-  if (!collId) { toast('Create a collection first', true); return; }
-  const coll = G.compose.collections.find(c=>c.id===collId);
-  if (!coll) { toast('Collection not found', true); return; }
-  const reqData = {name, method:tab.method, url:tab.url, headers:tab.headers, params:tab.params, bodyMode:tab.bodyMode, bodyRaw:tab.bodyRaw, bodyForm:tab.bodyForm, contentType:tab.contentType};
-  if (tab.collectionId===collId && tab.savedReqId) {
-    const idx = coll.requests.findIndex(r=>r.id===tab.savedReqId);
-    if (idx>=0) { coll.requests[idx]={...reqData, id:tab.savedReqId}; }
-    else { const rid=cmpMakeId(); coll.requests.push({...reqData, id:rid}); tab.savedReqId=rid; }
-  } else {
-    const rid = cmpMakeId();
-    coll.requests.push({...reqData, id:rid});
-    tab.collectionId=coll.id; tab.savedReqId=rid;
-  }
-  tab.name=name; tab.dirty=false;
-  document.getElementById('cmp-save-form').style.display='none';
-  cmpSaveState(); renderCmpTabs(); renderCmpCollections(); toast('Saved to '+coll.name);
-}
-
-function renderDetail() {
-  const body = document.getElementById('dbody');
-  if (!G.sel) {
-    body.innerHTML=`<div class="dempty"><svg width="30" height="30" viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.25"><rect x="3" y="3" width="24" height="24" rx="4"/><path d="M9 11h12M9 15h12M9 19h8"/></svg><span>Select a request to inspect</span></div>`;
-    return;
-  }
-  const framesTab = document.getElementById('dtab-frames');
-  const hasFrames = G.sel?.ws_frames?.length > 0;
-  if (framesTab) framesTab.style.display = hasFrames ? '' : 'none';
-  if (!hasFrames && G.dtab === 'frames') G.dtab = 'overview';
-  const fn = {overview:renderOverview,request:renderRequest,response:renderResponse,timing:renderTiming,frames:renderFrames}[G.dtab]||renderOverview;
-  body.innerHTML = fn();
-}
-
-function renderOverview() {
-  const s=G.sel, st=s.metrics?.status_code||s.response?.status, tls=!!(G.routes[s.request?.host]?.startsWith('https://'));
-  const reason = st ? HTTP_REASONS[st] || '' : '';
-  const latMs = s.metrics?.latency_ms;
-  const latColor = !latMs ? '' : latMs < 200 ? 'color:var(--success)' : latMs >= 1000 ? 'color:var(--danger)' : '';
-  return `
-    <div class="dsec">
-      <div class="dsec-title">Request</div>
-      <div class="kv" style="align-items:flex-start">
-        <span class="kk" style="padding-top:1px">URL</span>
-        <div style="flex:1;min-width:0">
-          <div class="kv-val kv-accent" style="font-size:11.5px;word-break:break-all;line-height:1.5">${esc(s.request?.uri||'')}</div>
-          <button class="btn btn-sm btn-ghost" style="margin-top:4px;padding:2px 7px;font-size:10px" onclick="navigator.clipboard.writeText(G.sel?.request?.uri||'').then(()=>toast('Copied'))">Copy URL</button>
-        </div>
-      </div>
-      <div class="kv"><span class="kk">Method</span><span class="kv-val">${mbadge(s.request?.method||'')}</span></div>
-      <div class="kv"><span class="kk">Host</span><span class="kv-val kv-mono">${esc(s.request?.host||'')}</span></div>
-      <div class="kv"><span class="kk">Path</span><span class="kv-val kv-mono trunc">${esc(getPath(s.request?.uri))}</span></div>
-    </div>
-    <div class="dsec">
-      <div class="dsec-title">Response</div>
-      <div class="kv"><span class="kk">Status</span><span class="kv-val" style="display:flex;align-items:center;gap:6px">${sbadge(st)}<span style="font-size:11px;color:var(--text3)">${reason||(!st?'no response':'')}</span></span></div>
-      <div class="kv"><span class="kk">Latency</span><span class="kv-val kv-mono" style="${latColor}">${esc(fmtMs(latMs))}</span></div>
-      <div class="kv"><span class="kk">Res size</span><span class="kv-val kv-mono">${esc(fmtSz(s.metrics?.response_size_bytes))}</span></div>
-      <div class="kv"><span class="kk">Req size</span><span class="kv-val kv-mono">${esc(fmtSz(s.metrics?.request_size_bytes))}</span></div>
-      <div class="kv"><span class="kk">TLS</span><span class="kv-val" style="display:flex;align-items:center;gap:6px">${tlsIcon(tls)}<span>${tls?'Secured':'Unsecured'}</span></span></div>
-    </div>
-    <div class="dsec">
-      <div class="dsec-title">Time</div>
-      <div class="kv"><span class="kk">Captured</span><span class="kv-val kv-mono">${esc(new Date(s.timestamp).toLocaleTimeString())}</span></div>
-      <div class="kv"><span class="kk">Ago</span><span class="kv-val kv-mono">${esc(relT(s.timestamp))}</span></div>
-    </div>`;
-}
-
-const INTERNAL_HDRS = new Set(['x-oproxy-session-id', 'x-oproxy-destination', 'x-oproxy-map-local-file']);
-function renderHeaders(hdrs) {
-  const entries = Object.entries(hdrs||{}).filter(([k]) => !INTERNAL_HDRS.has(k.toLowerCase()));
-  if (!entries.length) return '<span style="color:var(--text4);font-size:12px">No headers</span>';
-  return entries.map(([k,v])=>`<div class="hrow"><span class="hk" title="${esc(k)}">${esc(k)}</span><span class="hv" title="${esc(v)}">${esc(v)}</span></div>`).join('');
-}
-
-function renderRequest() {
-  const s=G.sel;
-  const hdrCount = Object.entries(s.request?.headers||{}).filter(([k])=>!INTERNAL_HDRS.has(k.toLowerCase())).length;
-  return `
-    <div class="dsec"><div class="dsec-title" style="display:flex;align-items:center;justify-content:space-between">Request Headers <span style="font-weight:400;color:var(--text4);letter-spacing:0;text-transform:none;font-size:10px">${hdrCount} headers</span></div>${renderHeaders(s.request?.headers)}</div>
-    <div class="dsec"><div class="dsec-title">Request Body</div>${renderBody(s.request?.body, s.request?.headers)}</div>`;
-}
-
-function renderResponse() {
-  const s=G.sel;
-  if (!s.response) return `<div class="dempty"><span>No response recorded</span><span style="font-size:11px;margin-top:4px;color:var(--text4)">The request may have failed or the outbound connection was refused.</span></div>`;
-  const hdrCount = Object.keys(s.response?.headers||{}).length;
-  return `
-    <div class="dsec"><div class="dsec-title" style="display:flex;align-items:center;justify-content:space-between">Response Headers <span style="font-weight:400;color:var(--text4);letter-spacing:0;text-transform:none;font-size:10px">${hdrCount} headers</span></div>${renderHeaders(s.response.headers)}</div>
-    <div class="dsec"><div class="dsec-title">Response Body</div>${renderBody(s.response.body, s.response.headers)}</div>`;
-}
-
-function renderTiming() {
-  const s=G.sel, ms=s.metrics?.latency_ms;
-  if (!ms) return `<div class="dempty"><span>No timing data available</span></div>`;
-
-  const ttfb = s.metrics?.ttfb_ms || 0;
-  const body = s.metrics?.body_ms || 0;
-  const overhead = Math.max(0, ms - ttfb - body);
-  const total = ttfb + body + overhead || 1;
-
-  const phases = [
-    {label:'TTFB', cls:'wf-wait', ms:ttfb},
-    {label:'Download', cls:'wf-recv', ms:body},
-    {label:'Overhead', cls:'wf-dns', ms:overhead},
-  ].filter(p=>p.ms>0);
-
-  let off=0;
-  const bars = phases.map(p=>{
-    const w = (p.ms/total*100).toFixed(1);
-    const row = `<div class="wf-row">
-      <div class="wf-lbl">${p.label}</div>
-      <div class="wf-track"><div class="wf-bar ${p.cls}" style="left:${off.toFixed(1)}%;width:${w}%"></div></div>
-      <div class="wf-ms">${p.ms}ms</div>
-    </div>`;
-    off += p.ms/total*100;
-    return row;
-  }).join('');
-
-  const legend = phases.map(p=>`<div class="wf-leg"><div class="wf-dot ${p.cls}"></div>${p.label}</div>`).join('');
-
-  return `<div class="dsec">
-    <div class="dsec-title">Waterfall</div>
-    <div class="wf">${bars}</div>
-    <div class="wf-legend">${legend}</div>
-  </div>
-  <div class="dsec">
-    <div class="dsec-title">Summary</div>
-    <div class="kv"><span class="kk">Total</span><span class="kv-val kv-mono">${esc(fmtMs(ms))}</span></div>
-    <div class="kv"><span class="kk">TTFB</span><span class="kv-val kv-mono">${esc(fmtMs(ttfb))}</span></div>
-    <div class="kv"><span class="kk">Download</span><span class="kv-val kv-mono">${esc(fmtMs(body))}</span></div>
-    <div class="kv"><span class="kk">Req size</span><span class="kv-val kv-mono">${esc(fmtSz(s.metrics?.request_size_bytes))}</span></div>
-    <div class="kv"><span class="kk">Res size</span><span class="kv-val kv-mono">${esc(fmtSz(s.metrics?.response_size_bytes))}</span></div>
-  </div>`;
-}
-
-function renderFrames() {
-  const frames = G.sel.ws_frames || [];
-  if (!frames.length) return `<div class="dempty"><span>No frames recorded</span></div>`;
-  const DIRS = {ClientToServer:'↑',ServerToClient:'↓'};
-  const OPCODES = {1:'Text',2:'Binary',8:'Close',9:'Ping',10:'Pong'};
-  const rows = frames.map((f,i) => {
-    const dir = DIRS[f.direction] || '?';
-    const op = OPCODES[f.opcode] || `0x${f.opcode.toString(16)}`;
-    const ts = new Date(f.timestamp).toLocaleTimeString([], {hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3});
-    const payload = f.payload_text != null
-      ? `<span style="color:var(--text)">${esc(f.payload_text.slice(0,120))}${f.payload_text.length>120?'…':''}</span>`
-      : f.payload_hex
-        ? `<span style="color:var(--text3);font-family:monospace;font-size:10px">${esc(f.payload_hex)}</span>`
-        : `<span style="color:var(--text3)">—</span>`;
-    const dirColor = f.direction==='ClientToServer' ? 'var(--accent)' : 'var(--success)';
-    return `<tr>
-      <td style="color:var(--text3);font-size:10px;white-space:nowrap">${ts}</td>
-      <td style="color:${dirColor};font-weight:600;text-align:center">${dir}</td>
-      <td style="color:var(--text2)">${op}</td>
-      <td style="color:var(--text3)">${f.payload_len}</td>
-      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${payload}</td>
-    </tr>`;
-  }).join('');
-  return `<div class="dsec" style="overflow:auto">
-    <div class="dsec-title">WebSocket Frames (${frames.length})</div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="color:var(--text3);border-bottom:0.5px solid var(--border)">
-        <th style="text-align:left;padding:4px 6px;font-weight:500">Time</th>
-        <th style="padding:4px 6px;font-weight:500">Dir</th>
-        <th style="text-align:left;padding:4px 6px;font-weight:500">Type</th>
-        <th style="text-align:right;padding:4px 6px;font-weight:500">Bytes</th>
-        <th style="text-align:left;padding:4px 6px;font-weight:500">Payload</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>`;
-}
-
-function renderCompose() {
-  const s=G.sel;
-  const method = s?.request?.method||'GET';
-  const url = esc(s?.request?.uri||'');
-  const hdrsText = esc(Object.entries(s?.request?.headers||{}).map(([k,v])=>`${k}: ${v}`).join('\n'));
-  const bodyText = esc(s?.request?.body||'');
-  const methods = ['GET','POST','PUT','DELETE','PATCH','HEAD','OPTIONS'];
-  const opts = methods.map(m=>`<option${m===method?' selected':''}>${m}</option>`).join('');
-  return `<div class="compose-wrap">
-    <div class="compose-top">
-      <select class="compose-method finput" id="cmp-method" style="width:90px;font-weight:700;color:var(--accent)">${opts}</select>
-      <input class="compose-url" id="cmp-url" value="${url}" spellcheck="false" placeholder="https://…">
-    </div>
-    <div class="ctab-bar" style="margin-top:4px">
-      <div class="ctab on" onclick="setCTab(this,'headers')">Headers</div>
-      <div class="ctab" onclick="setCTab(this,'body')">Body</div>
-    </div>
-    <textarea class="compose-ta" id="cmp-headers" placeholder="Header-Name: value\nAnother: value">${hdrsText}</textarea>
-    <textarea class="compose-ta" id="cmp-body" style="display:none" placeholder="Request body…">${bodyText}</textarea>
-    <div style="display:flex;gap:6px;flex-wrap:wrap">
-      <button class="btn btn-primary btn-sm" onclick="sendCompose()">
-        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.5 6H1.5M7.5 3l3 3-3 3"/></svg>
-        Send
-      </button>
-      <button class="btn btn-ghost btn-sm" onclick="copyCurlCompose()">Copy as cURL</button>
-    </div>
-    <p class="note" style="font-size:11px">Sends the request through your configured proxy. The response will appear in the traffic table.</p>
-  </div>`;
-}
-
-function setCTab(el, tab) {
-  document.querySelectorAll('.ctab').forEach(t=>t.classList.remove('on'));
-  el.classList.add('on');
-  const hEl=document.getElementById('cmp-headers'), bEl=document.getElementById('cmp-body');
-  if (hEl) hEl.style.display = tab==='headers' ? '' : 'none';
-  if (bEl) bEl.style.display = tab==='body' ? '' : 'none';
-}
-
-async function sendCompose() {
-  const url = document.getElementById('cmp-url')?.value?.trim();
-  const method = document.getElementById('cmp-method')?.value||'GET';
-  const rawHdrs = document.getElementById('cmp-headers')?.value||'';
-  const body = document.getElementById('cmp-body')?.value||'';
-  if (!url) { toast('URL is required', true); return; }
-  const headers = {};
-  rawHdrs.split('\n').forEach(line => {
-    const i = line.indexOf(':');
-    if (i>0) headers[line.slice(0,i).trim()] = line.slice(i+1).trim();
-  });
-  try {
-    const opts = { method, headers };
-    if (body && method!=='GET' && method!=='HEAD') opts.body = body;
-    await fetch(url, opts);
-    toast('Request sent — check the traffic table');
-  } catch(e) {
-    toast('Request failed (CORS or network error) — use cURL instead', true);
-  }
-}
-
-// ── Copy as cURL ──────────────────────────────────────────────────────────────
-function copyCurl() {
-  const s = G.sel;
-  if (!s) { toast('No request selected', true); return; }
-  const hdrLines = Object.entries(s.request?.headers||{})
-    .filter(([k]) => !INTERNAL_HDRS.has(k.toLowerCase()))
-    .map(([k,v]) => `  -H '${k}: ${v.replace(/'/g,"'\\''")}' \\`)
-    .join('\n');
-  const bodyLine = s.request?.body ? `  -d '${s.request.body.replace(/'/g,"'\\''")}' \\` : '';
-  const parts = [`curl -X ${s.request.method} \\`];
-  if (hdrLines) parts.push(hdrLines);
-  if (bodyLine) parts.push(bodyLine);
-  parts.push(`  '${s.request.uri}'`);
-  navigator.clipboard.writeText(parts.join('\n')).then(()=>toast('Copied as cURL'));
-}
-
-function copyCurlCompose() {
-  const tab = G.compose.tabs.find(t => t.id === G.compose.activeTabId);
-  if (!tab) { toast('No active Compose tab', true); return; }
-  cmpSyncTabFromDom(tab);
-  let url = cmpSubstVars(tab.url);
-  if (!url) { toast('No URL in Compose tab', true); return; }
-  const ps = tab.params.filter(p => p.enabled && p.key);
-  if (ps.length) {
-    const q = new URLSearchParams(ps.map(p => [p.key, cmpSubstVars(p.val)]));
-    url += (url.includes('?') ? '&' : '?') + q.toString();
-  }
-  const hdrs = {};
-  tab.headers.filter(h => h.enabled && h.key).forEach(h => { hdrs[cmpSubstVars(h.key)] = cmpSubstVars(h.val); });
-  const method = tab.method;
-  let body = '';
-  if (method !== 'GET' && method !== 'HEAD') {
-    if (tab.bodyMode === 'form') {
-      const fd = new URLSearchParams();
-      tab.bodyForm.filter(f => f.key).forEach(f => fd.append(cmpSubstVars(f.key), cmpSubstVars(f.val)));
-      body = fd.toString();
-      if (!hdrs['Content-Type']) hdrs['Content-Type'] = 'application/x-www-form-urlencoded';
-    } else if (tab.bodyRaw) {
-      body = tab.bodyRaw;
-      if (!hdrs['Content-Type']) hdrs['Content-Type'] = tab.contentType;
-    }
-  }
-  const hdrLines = Object.entries(hdrs)
-    .map(([k,v]) => `  -H '${k}: ${v.replace(/'/g,"'\\''")}' \\`)
-    .join('\n');
-  const bodyLine = body ? `  -d '${body.replace(/'/g,"'\\''")}' \\` : '';
-  const parts = [`curl -X ${method} \\`];
-  if (hdrLines) parts.push(hdrLines);
-  if (bodyLine) parts.push(bodyLine);
-  parts.push(`  '${url}'`);
-  navigator.clipboard.writeText(parts.join('\n')).then(() => toast('Copied as cURL'));
-}
-
-// ── Sort ──────────────────────────────────────────────────────────────────────
-function updateSortReset() {
-  document.getElementById('sort-reset').style.display = G.sortCol ? '' : 'none';
-}
-
-function sortBy(th) {
-  const col = th.dataset.col;
-  document.querySelectorAll('th[data-col]').forEach(t=>t.classList.remove('asc','desc'));
-  if (G.sortCol===col) { G.sortDir *= -1; } else { G.sortCol=col; G.sortDir=1; }
-  th.classList.add(G.sortDir>0?'asc':'desc');
-  updateSortReset();
-  renderCurrent();
-}
-
-function resetSort() {
-  G.sortCol = null;
-  G.sortDir = 1;
-  document.querySelectorAll('th[data-col]').forEach(t=>t.classList.remove('asc','desc'));
-  updateSortReset();
-  renderCurrent();
-}
-
-// ── Host Focus ────────────────────────────────────────────────────────────────
-function onFocusKey(e) {
-  if (e.key!=='Enter') return;
-  const v = document.getElementById('focus-in').value.trim();
-  if (v && !G.focusHosts.includes(v)) {
-    G.focusHosts.push(v);
-    document.getElementById('focus-in').value = '';
-    renderFocusChips();
-    renderCurrent();
-  }
-}
-function removeFocus(h) {
-  G.focusHosts = G.focusHosts.filter(x=>x!==h);
-  renderFocusChips();
-  renderCurrent();
-}
-function renderFocusChips() {
-  document.getElementById('focus-chips').innerHTML =
-    G.focusHosts.map(h=>`<span class="focus-chip">${esc(h)}<span class="focus-chip-x" onclick="removeFocus('${esc(h)}')">✕</span></span>`).join('');
-}
-
-// ── Theme ─────────────────────────────────────────────────────────────────────
-function toggleTheme() {
-  const dark = document.documentElement.getAttribute('data-theme')==='dark';
-  const next = dark ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  document.getElementById('ic-moon').style.display = dark ? '' : 'none';
-  document.getElementById('ic-sun').style.display  = dark ? 'none' : '';
-  localStorage.setItem('oproxy-theme', next);
-}
-
-// ── Modals ────────────────────────────────────────────────────────────────────
-function openShortcuts() { document.getElementById('modal-shortcuts').classList.add('show'); }
-function openExport() {
-  document.getElementById('export-count').textContent = G.sessions.filter(s=>!isProxy(s.request?.host)).length;
-  document.getElementById('modal-export').classList.add('show');
-}
-function closeModal(id) { document.getElementById(id).classList.remove('show'); }
-function selectExportFmt(fmt) {
-  G.exportFmt = fmt;
-  selectOpt('eopt-har', 'eopt-json', 'har', fmt);
-}
-function doExport() {
-  const rows = G.sessions.filter(s=>!isProxy(s.request?.host));
-  if (!rows.length) { toast('No sessions to export', true); return; }
-  let content, filename;
-  if (G.exportFmt==='har') {
-    const har = { log:{ version:'1.2', creator:{name:'oproxy',version:'1.0'}, entries: rows.map(s=>({
-      startedDateTime: s.timestamp,
-      time: s.metrics?.latency_ms||0,
-      request:{ method:s.request?.method||'GET', url:s.request?.uri||'', httpVersion:'HTTP/1.1',
-        headers:Object.entries(s.request?.headers||{}).map(([name,value])=>({name,value})),
-        queryString:[], cookies:[], headersSize:-1, bodySize:s.request?.body?.length||0,
-        postData: s.request?.body?{mimeType:'application/json',text:s.request.body}:undefined },
-      response: s.response ? {status:s.response.status, statusText:'', httpVersion:'HTTP/1.1',
-        headers:Object.entries(s.response.headers||{}).map(([name,value])=>({name,value})),
-        cookies:[], content:{size:s.metrics?.response_size_bytes||0, mimeType:'', text:s.response.body||''},
-        redirectURL:'', headersSize:-1, bodySize:s.metrics?.response_size_bytes||0 }
-        : {status:0,statusText:'',httpVersion:'HTTP/1.1',headers:[],cookies:[],content:{size:0,mimeType:'',text:''},redirectURL:'',headersSize:-1,bodySize:-1},
-      timings:{send:0, wait:s.metrics?.latency_ms||0, receive:0}, cache:{},
-    })) }};
-    content = JSON.stringify(har, null, 2);
-    filename = 'oproxy-export.har';
-  } else {
-    content = JSON.stringify(rows, null, 2);
-    filename = 'oproxy-export.json';
-  }
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([content],{type:'application/json'}));
-  a.download = filename; a.click(); URL.revokeObjectURL(a.href);
-  closeModal('modal-export');
-  toast(`Exported ${rows.length} sessions as ${G.exportFmt.toUpperCase()}`);
-}
-
-// ── Import ────────────────────────────────────────────────────────────────────
-function openImport() {
-  document.getElementById('modal-import').classList.add('show');
-}
-function selectOpt(id1, id2, selVal, newVal) {
-  document.getElementById(id1).classList.toggle('sel', newVal === selVal);
-  document.getElementById(id2).classList.toggle('sel', newVal !== selVal);
-}
-function selectImportMode(mode) {
-  G.importMode = mode;
-  selectOpt('iopt-merge', 'iopt-replace', 'merge', mode);
-}
-function triggerImportFile() {
-  document.getElementById('import-file').value = '';
-  document.getElementById('import-file').click();
-}
-function harEntryToExchange(e) {
-  const id = (typeof crypto.randomUUID === 'function') ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-  let host = '';
-  try { host = new URL(e.request.url).host; } catch {}
-  return {
-    id,
-    timestamp: e.startedDateTime || new Date().toISOString(),
-    request: {
-      method: e.request.method || 'GET',
-      uri: e.request.url || '',
-      headers: Object.fromEntries((e.request.headers||[]).map(h=>[h.name,h.value])),
-      body: e.request.postData?.text || '',
-      host,
-      body_bytes: null,
-    },
-    response: (e.response && e.response.status) ? {
-      status: e.response.status,
-      headers: Object.fromEntries((e.response.headers||[]).map(h=>[h.name,h.value])),
-      body: e.response.content?.text || '',
-      request_uri: e.request.url || '',
-      session_id: null,
-      ttfb_ms: 0,
-      body_ms: 0,
-      body_bytes: null,
-    } : null,
-    metrics: (e.response && e.response.status) ? {
-      latency_ms: Math.round(e.time || 0),
-      request_size_bytes: Math.max(0, e.request.bodySize || 0),
-      response_size_bytes: Math.max(0, e.response.content?.size || e.response.bodySize || 0),
-      status_code: e.response.status,
-      ttfb_ms: Math.round(e.timings?.wait || 0),
-      body_ms: Math.round(e.timings?.receive || 0),
-    } : null,
-    ws_frames: [],
-  };
-}
-async function handleImportFile(input) {
-  const file = input.files[0];
-  if (!file) return;
-  closeModal('modal-import');
-  let sessions;
-  try {
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    if (parsed?.log?.entries) {
-      sessions = parsed.log.entries.map(harEntryToExchange);
-    } else if (Array.isArray(parsed)) {
-      // oproxy JSON export
-      sessions = parsed;
-    } else {
-      toast('Unrecognised format — expected HAR or oproxy JSON array', true);
-      return;
-    }
-  } catch (e) {
-    toast('Failed to parse file: ' + e.message, true);
-    return;
-  }
-  if (!sessions.length) { toast('No sessions found in file', true); return; }
-  try {
-    const res = await fetch('/admin/sessions/import', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ sessions, merge: G.importMode === 'merge' }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
-    G.lastTs = null; // force full reload
-    await fetchSessions();
-    toast(`Imported ${data.imported} session${data.imported===1?'':'s'}`);
-  } catch (e) {
-    toast('Import failed: ' + e.message, true);
-  }
-}
-
-// ── Navigation ────────────────────────────────────────────────────────────────
-function syncChipBar() {
-  const f = G.sideFil;
-  // Pending chip: only useful in 'all' tab
-  const pchip = document.getElementById('chip-pending');
-  const psep  = document.getElementById('chip-sep-pending');
-  const showPending = f === 'all';
-  if (pchip) pchip.style.display = showPending ? '' : 'none';
-  if (psep)  psep.style.display  = showPending ? '' : 'none';
-  // Status chips: irrelevant in 'pending' tab (nothing has a status code)
-  const showStatus = f !== 'pending';
-  document.querySelectorAll('.chip[data-sc]:not(#chip-pending)').forEach(c => {
-    c.style.display = showStatus ? '' : 'none';
-  });
-}
-function navItem(el) {
-  document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
-  el.classList.add('active');
-  G.sideFil = el.dataset.f||'all';
-  syncChipBar();
-  nav(el.dataset.v||'traffic');
-  // Re-render immediately so filter applies to already-loaded sessions
-  // (fetchSessions skips renderTable when there are no new sessions since lastTs)
-  if ((el.dataset.v||'traffic')==='traffic' && G.sessions.length) {
-    if (G.treeMode) renderTree(); else renderTable();
-  }
-}
-function nav(v) {
-  document.querySelectorAll('.view').forEach(e=>e.style.display='none');
-  const el = document.getElementById('v-'+v);
-  if (el) el.style.display = (v==='traffic'||v==='compose')?'flex':'block';
-  document.getElementById('detail').className = 'detail'+(v==='traffic'?'':' hide');
-  G.view = v;
-  if (v==='traffic')      fetchSessions();
-  else if (v==='mapping') { fetchRoutes(); fetchHeaderMaps(); }
-  else if (v==='dns')     fetchDns();
-  else if (v==='rewrites') { fetchRewrites(); fetchModifications(); }
-  else if (v==='throttle') fetchThrottle();
-  else if (v==='breakpoints') fetchBreakpoints();
-  else if (v==='compose') renderCmpCollections();
-  else if (v==='settings') fetchConfig();
-}
-
-// ── Record ────────────────────────────────────────────────────────────────────
-function toggleRec() {
-  G.rec=!G.rec;
-  const btn=document.getElementById('rec-btn'), lbl=document.getElementById('rec-lbl');
-  if (G.rec) { btn.className='btn btn-stop'; lbl.textContent='Stop'; startPoll(); }
-  else       { btn.className='btn btn-primary'; lbl.textContent='Record'; stopPoll(); }
-}
-function startPoll() {
-  // Use SSE for session updates; keep a short poll only for breakpoints.
-  if (!G.sse) {
-    G.sse = new EventSource('/api/sessions/stream');
-    let _sseTick; G.sse.onmessage = () => { if (G.view!=='traffic') return; clearTimeout(_sseTick); _sseTick = setTimeout(fetchSessions, 80); };
-    G.sse.onerror = () => {
-      // SSE lost — fall back to polling until reconnected.
-      if (!G.timer) G.timer = setInterval(()=>{ if (G.view==='traffic') fetchSessions(); }, 2000);
-    };
-    G.sse.onopen = () => { if (G.timer) { clearInterval(G.timer); G.timer=null; } };
-  }
-  // Breakpoints still need polling (no SSE channel for them).
-  if (!G.bpTimer) G.bpTimer = setInterval(()=>{ if (G.view==='breakpoints') fetchBreakpoints(); }, 2000);
-}
-function stopPoll() {
-  if (G.sse) { G.sse.close(); G.sse=null; }
-  if (G.timer) { clearInterval(G.timer); G.timer=null; }
-  if (G.bpTimer) { clearInterval(G.bpTimer); G.bpTimer=null; }
-}
-
-// ── Search & chips ────────────────────────────────────────────────────────────
-function renderCurrent() { if (G.treeMode) renderTree(); else renderTable(); }
-function onSearch(q) { G.srch=q; renderCurrent(); }
-function updateChipReset() {
-  const all = ['2xx','3xx','4xx','5xx','pending'];
-  const anyOff = all.some(s=>!G.scFil.has(s));
-  document.getElementById('chip-reset').style.display = anyOff ? '' : 'none';
-}
-function toggleChip(el) {
-  const sc=el.dataset.sc;
-  G.scFil.has(sc) ? (G.scFil.delete(sc), el.classList.remove('on')) : (G.scFil.add(sc), el.classList.add('on'));
-  updateChipReset();
-  renderCurrent();
-}
-function resetChips() {
-  ['2xx','3xx','4xx','5xx','pending'].forEach(sc => {
-    G.scFil.add(sc);
-    const el = document.querySelector(`.chip[data-sc="${sc}"]`);
-    if (el) el.classList.add('on');
-  });
-  updateChipReset();
-  renderCurrent();
-}
-
-// ── Clear ─────────────────────────────────────────────────────────────────────
-async function clearSessions() {
-  if (!confirm('Clear all captured traffic?')) return;
-  try {
-    await fetch('/admin/sessions',{method:'DELETE'});
-    G.sessions=[]; G.sel=null; G.sessionSig=''; G.lastTs=null; G.treeExpanded.clear(); G.treeClosed.clear();
-    renderCurrent(); updateBadges(); renderDetail();
-    document.getElementById('detail-topbar').style.display='none';
-    toast('Sessions cleared');
-  } catch { toast('Failed to clear',true); }
-}
-
-// ── Routes ────────────────────────────────────────────────────────────────────
-async function fetchRoutes() {
-  try { const r=await fetch('/admin/routes'); G.routes=await r.json(); renderRoutes(); }
-  catch { toast('Failed to load routes',true); }
-}
-function renderRoutes() {
-  const tb=document.getElementById('rt-tbody'), e=Object.entries(G.routes);
-  if (!e.length) { tb.innerHTML=`<tr><td colspan="3" style="text-align:center;color:var(--text4);padding:20px">No route mappings</td></tr>`; return; }
-  tb.innerHTML=e.map(([s,d])=>`<tr><td class="mono">${esc(s)}</td><td class="mono">${esc(d)}</td><td><button class="btn btn-sm btn-danger" onclick="delRoute('${esc(s)}')">Remove</button></td></tr>`).join('');
-}
-async function addRoute() {
-  const src=document.getElementById('rt-src').value.trim(), dst=document.getElementById('rt-dst').value.trim();
-  if (!src||!dst){toast('Both fields required',true);return;}
-  const u={...G.routes,[src]:dst};
-  try {
-    await fetch('/admin/routes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)});
-    G.routes=u; document.getElementById('rt-src').value=''; document.getElementById('rt-dst').value='';
-    renderRoutes(); toast('Route added');
-  } catch { toast('Failed to save',true); }
-}
-async function delRoute(src) {
-  const u={...G.routes}; delete u[src];
-  try {
-    await fetch('/admin/routes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)});
-    G.routes=u; renderRoutes(); toast('Route removed');
-  } catch { toast('Failed to remove',true); }
-}
-
-// ── DNS Override ─────────────────────────────────────────────────────────────
-async function fetchDns() {
-  try { const r=await fetch('/admin/dns'); G.dns=await r.json(); renderDns(); }
-  catch { toast('Failed to load DNS overrides',true); }
-}
-function renderDns() {
-  const tb=document.getElementById('dns-tbody'), e=Object.entries(G.dns||{});
-  if (!e.length) { tb.innerHTML=`<tr><td colspan="3" style="text-align:center;color:var(--text4);padding:20px">No DNS overrides</td></tr>`; return; }
-  tb.innerHTML=e.map(([h,ip])=>`<tr><td class="mono">${esc(h)}</td><td class="mono">${esc(ip)}</td><td><button class="btn btn-sm btn-danger" onclick="delDns('${esc(h)}')">Remove</button></td></tr>`).join('');
-}
-async function addDns() {
-  const host=document.getElementById('dns-host').value.trim(), ip=document.getElementById('dns-ip').value.trim();
-  if (!host||!ip){toast('Both fields required',true);return;}
-  const u={...G.dns,[host]:ip};
-  try {
-    await fetch('/admin/dns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)});
-    G.dns=u; document.getElementById('dns-host').value=''; document.getElementById('dns-ip').value='';
-    renderDns(); toast('DNS override added');
-  } catch { toast('Failed to save',true); }
-}
-async function delDns(host) {
-  try {
-    await fetch(`/admin/dns/${encodeURIComponent(host)}`,{method:'DELETE'});
-    delete G.dns[host]; renderDns(); toast('DNS override removed');
-  } catch { toast('Failed to remove',true); }
-}
-
-// ── Rewrites ──────────────────────────────────────────────────────────────────
-async function fetchRewrites() {
-  try { const r=await fetch('/admin/rewrites'); G.rewrites=await r.json(); renderRewrites(); }
-  catch { toast('Failed to load rewrites',true); }
-}
-function descCriteria(c) {
-  if (!c) return '—';
-  const [k,v]=Object.entries(c)[0]||[];
-  if (k==='Header') return `Header(${v?.name})=${v?.value}`;
-  return `${k}: ${typeof v==='string'?v:JSON.stringify(v)}`;
-}
-function descAction(a) {
-  if (!a) return '—';
-  const [k,v]=Object.entries(a)[0]||[];
-  if (k==='ReplaceBody') return `Replace /${v?.pattern}/→${v?.replacement}`;
-  if (k==='AddHeader') return `Add ${v?.name}: ${v?.value}`;
-  if (k==='RemoveHeader') return `Remove ${v?.name}`;
-  if (k==='ReplaceHeader') return `Replace hdr ${v?.name}`;
-  return k;
-}
-function renderRewrites() {
-  const tb=document.getElementById('rw-tbody');
-  if (!G.rewrites.length) { tb.innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--text4);padding:20px">No rewrite rules — click + Add Rule</td></tr>`; return; }
-  const n=G.rewrites.length;
-  tb.innerHTML=G.rewrites.map((r,i)=>`<tr>
-    <td>${esc(r.name)}</td>
-    <td class="mono" style="color:var(--text3);font-size:11px">${esc(descCriteria(r.criteria))}</td>
-    <td style="color:var(--text3);font-size:11px">${esc(r.scope||'Both')}</td>
-    <td style="color:var(--text3);font-size:11px">${esc(descAction(r.action))}</td>
-    <td>
-      <div class="toggle-wrap" onclick="toggleRwEnabled(${i})" role="switch" aria-checked="${!!r.enabled}" aria-label="Enable rule ${esc(r.name)}">
-        <div class="toggle${r.enabled!==false?' on':''}"></div>
-      </div>
-    </td>
-    <td>
-      <div class="order-btns">
-        <div class="order-btn${i===0?' disabled':''}" onclick="${i>0?`moveRw(${i},-1)`:''}" role="button" aria-label="Move up" aria-disabled="${i===0}">
-          <svg width="8" height="6" viewBox="0 0 8 6"><path d="M1 5l3-4 3 4" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-        </div>
-        <div class="order-btn${i===n-1?' disabled':''}" onclick="${i<n-1?`moveRw(${i},1)`:''}" role="button" aria-label="Move down" aria-disabled="${i===n-1}">
-          <svg width="8" height="6" viewBox="0 0 8 6"><path d="M1 1l3 4 3-4" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-        </div>
-      </div>
-    </td>
-    <td style="display:flex;gap:4px">
-      <button class="btn btn-sm btn-ghost" onclick="editRw(${i})" aria-label="Edit rule">Edit</button>
-      <button class="btn btn-sm btn-danger" onclick="delRw(${i})" aria-label="Delete rule">✕</button>
-    </td>
-  </tr>`).join('');
-}
-function toggleRwForm() {
-  G.rwEditIdx=null;
-  const f=document.getElementById('rw-form');
-  const open=!f.style.display;
-  if (open) { f.style.display='none'; } else {
-    // Reset form for add mode
-    document.getElementById('rw-name').value='';
-    document.getElementById('rw-crit-v').value='';
-    document.getElementById('rw-crit-sample').value='';
-    document.getElementById('rw-crit-status').className='regex-status';
-    document.getElementById('rw-crit-status').textContent='';
-    document.getElementById('rw-act-pat').value='';
-    document.getElementById('rw-act-rep').value='';
-    document.getElementById('rw-act-hdr').value='';
-    document.getElementById('rw-hdr-name').value='';
-    document.getElementById('rw-scope').value='Both';
-    document.getElementById('rw-crit').value='Path';
-    document.getElementById('rw-action').value='ReplaceBody';
-    document.getElementById('rw-save-btn').textContent='Save';
-    onRwCritChange(); onRwActionChange();
-    f.style.display='';
-    document.getElementById('rw-name').focus();
-  }
-}
-function cancelRwForm() {
-  G.rwEditIdx=null;
-  document.getElementById('rw-form').style.display='none';
-}
-function onRwCritChange() {
-  const v=document.getElementById('rw-crit').value, isHdr=v==='Header', isHost=v==='Host';
-  document.getElementById('rw-crit-a').querySelector('label').textContent=
-    isHdr?'Header value pattern':isHost?'Hostname (contains)':v+' pattern (regex)';
-  document.getElementById('rw-hdr-name-wrap').style.display=isHdr?'':'none';
-  document.getElementById('rw-crit-tester').style.display=isHost?'none':'';
-}
-function onRwActionChange() {
-  const v=document.getElementById('rw-action').value;
-  const hasHdr=v==='AddHeader'||v==='RemoveHeader'||v==='ReplaceHeader';
-  const hasPat=v!=='RemoveHeader', hasRep=v==='ReplaceBody'||v==='ReplaceHeader';
-  document.getElementById('rw-act-pat-wrap').style.display=hasPat?'':'none';
-  document.getElementById('rw-act-rep-wrap').style.display=hasRep?'':'none';
-  document.getElementById('rw-act-hdr-wrap').style.display=hasHdr?'':'none';
-  if (v==='ReplaceBody') document.getElementById('rw-act-pat').placeholder='regex pattern';
-  else if (v==='AddHeader') document.getElementById('rw-act-pat').placeholder='header value';
-}
-function onRegexTest(patId, sampleId, statusId) {
-  const pattern=document.getElementById(patId)?.value||'';
-  const sample=document.getElementById(sampleId)?.value||'';
-  const el=document.getElementById(statusId); if (!el) return;
-  if (!pattern) { el.className='regex-status'; el.textContent=''; return; }
-  try {
-    const re=new RegExp(pattern);
-    if (!sample) { el.className='regex-status no-match'; el.textContent='Enter sample to test'; return; }
-    if (re.test(sample)) { el.className='regex-status match'; el.textContent='✓ Match'; }
-    else { el.className='regex-status no-match'; el.textContent='No match'; }
-  } catch(e) { el.className='regex-status error'; el.textContent='Invalid regex'; }
-}
-function buildRwRule() {
-  const crit=document.getElementById('rw-crit').value, critVal=document.getElementById('rw-crit-v').value.trim();
-  const act=document.getElementById('rw-action').value, pat=document.getElementById('rw-act-pat').value.trim();
-  const rep=document.getElementById('rw-act-rep').value, hdrName=document.getElementById('rw-act-hdr').value.trim();
-  const critHdrName=document.getElementById('rw-hdr-name').value.trim();
-  const scope=document.getElementById('rw-scope').value;
-  let criteria = crit==='Header' ? {Header:{name:critHdrName,value:critVal}} : {[crit]:critVal};
-  let action;
-  if (act==='ReplaceBody') action={ReplaceBody:{pattern:pat,replacement:rep}};
-  else if (act==='AddHeader') action={AddHeader:{name:hdrName,value:pat}};
-  else if (act==='RemoveHeader') action={RemoveHeader:{name:hdrName}};
-  else if (act==='ReplaceHeader') action={ReplaceHeader:{name:hdrName,pattern:pat,replacement:rep}};
-  return {name:document.getElementById('rw-name').value.trim()||'Rule '+(G.rewrites.length+1),criteria,action,scope,enabled:true};
-}
-function editRw(i) {
-  G.rwEditIdx=i;
-  const r=G.rewrites[i];
-  const f=document.getElementById('rw-form'); f.style.display='';
-  document.getElementById('rw-name').value=r.name||'';
-  document.getElementById('rw-scope').value=r.scope||'Both';
-  const crit=Object.keys(r.criteria)[0];
-  document.getElementById('rw-crit').value=crit;
-  if (crit==='Header') {
-    document.getElementById('rw-hdr-name').value=r.criteria.Header.name||'';
-    document.getElementById('rw-crit-v').value=r.criteria.Header.value||'';
-  } else {
-    document.getElementById('rw-crit-v').value=r.criteria[crit]||'';
-  }
-  const act=Object.keys(r.action)[0];
-  document.getElementById('rw-action').value=act;
-  if (act==='ReplaceBody')   { document.getElementById('rw-act-pat').value=r.action.ReplaceBody.pattern||''; document.getElementById('rw-act-rep').value=r.action.ReplaceBody.replacement||''; }
-  if (act==='AddHeader')     { document.getElementById('rw-act-hdr').value=r.action.AddHeader.name||''; document.getElementById('rw-act-pat').value=r.action.AddHeader.value||''; }
-  if (act==='RemoveHeader')  { document.getElementById('rw-act-hdr').value=r.action.RemoveHeader.name||''; }
-  if (act==='ReplaceHeader') { document.getElementById('rw-act-hdr').value=r.action.ReplaceHeader.name||''; document.getElementById('rw-act-pat').value=r.action.ReplaceHeader.pattern||''; document.getElementById('rw-act-rep').value=r.action.ReplaceHeader.replacement||''; }
-  document.getElementById('rw-save-btn').textContent='Update';
-  onRwCritChange(); onRwActionChange();
-  document.getElementById('rw-name').focus();
-}
-async function toggleRwEnabled(i) {
-  const rule={...G.rewrites[i], enabled:!G.rewrites[i].enabled};
-  try {
-    await fetch(`/admin/rewrites/${i}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
-    G.rewrites[i]=rule; renderRewrites();
-  } catch { toast('Failed to toggle rule',true); }
-}
-async function moveRw(i,dir) {
-  const rules=[...G.rewrites], j=i+dir;
-  if (j<0||j>=rules.length) return;
-  [rules[i],rules[j]]=[rules[j],rules[i]];
-  try {
-    await fetch('/admin/rewrites/replace-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rules)});
-    G.rewrites=rules; renderRewrites();
-  } catch { toast('Failed to reorder',true); }
-}
-async function saveRw() {
-  const rule=buildRwRule();
-  if (!rule.criteria||!rule.action){toast('Fill in all fields',true);return;}
-  try {
-    if (G.rwEditIdx!==null) {
-      await fetch(`/admin/rewrites/${G.rwEditIdx}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
-      G.rewrites[G.rwEditIdx]=rule; G.rwEditIdx=null; toast('Rule updated');
-    } else {
-      await fetch('/admin/rewrites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
-      G.rewrites.push(rule); toast('Rule added');
-    }
-    renderRewrites(); cancelRwForm();
-  } catch { toast('Failed to save rule',true); }
-}
-async function delRw(i) {
-  try {
-    await fetch(`/admin/rewrites/${i}`,{method:'DELETE'});
-    G.rewrites.splice(i,1); renderRewrites(); toast('Rule removed');
-  } catch { toast('Failed to remove rule',true); }
-}
-
-// ── Header Map ────────────────────────────────────────────────────────────────
-function setMappingTab(el) {
-  document.querySelectorAll('.chip[data-mv]').forEach(c=>c.classList.remove('on'));
-  el.classList.add('on');
-  const mv=el.dataset.mv;
-  document.getElementById('mv-host-remap').style.display=mv==='host-remap'?'':'none';
-  document.getElementById('mv-header-map').style.display=mv==='header-map'?'':'none';
-  document.getElementById('mv-map-local').style.display=mv==='map-local'?'':'none';
-  if (mv==='map-local') fetchMapLocal();
-}
-function toggleHdrMapForm() {
-  const f=document.getElementById('hdrmap-form'); f.style.display=f.style.display?'':'none';
-}
-function onHmScopeChange() {
-  const v=document.getElementById('hm-scope').value;
-  const wrap=document.getElementById('hm-match-wrap');
-  wrap.style.display=v==='all'?'none':'';
-  document.getElementById('hm-match-label').textContent=v==='host'?'Host pattern':'Path pattern (regex)';
-}
-function onHmActionChange() {
-  const v=document.getElementById('hm-action').value;
-  document.getElementById('hm-value-wrap').style.display=v==='Remove'?'none':'';
-}
-async function fetchHeaderMaps() {
-  try {
-    const r=await fetch('/admin/header-maps');
-    if (!r.ok) { G.headerMaps=[]; return; }
-    G.headerMaps=await r.json(); renderHdrMap();
-  } catch { G.headerMaps=[]; }
-}
-function renderHdrMap() {
-  const tb=document.getElementById('hdrmap-tbody');
-  if (!tb) return;
-  if (!G.headerMaps.length) { tb.innerHTML=`<tr><td colspan="6" style="text-align:center;color:var(--text4);padding:20px">No header map rules</td></tr>`; return; }
-  tb.innerHTML=G.headerMaps.map(r=>`<tr>
-    <td><span class="hdrmap-scope-chip">${esc(r.scope==='all'?'All':r.scope==='host'?'Host':'Path')}</span>${r.match?` <span style="font-size:11px;color:var(--text3)">${esc(r.match)}</span>`:''}</td>
-    <td style="font-size:11px;font-weight:600;color:var(--${r.action==='Remove'?'danger':r.action==='Append'?'warning':'accent'})">${esc(r.action)}</td>
-    <td class="mono" style="font-size:11px">${esc(r.name)}</td>
-    <td style="font-size:11px;color:var(--text3)">${esc(r.value||'—')}</td>
-    <td><div class="toggle-wrap" onclick="toggleHdrMapEnabled('${esc(r.id)}')" role="switch" aria-checked="${!!r.enabled}"><div class="toggle${r.enabled!==false?' on':''}"></div></div></td>
-    <td><button class="btn btn-sm btn-danger" onclick="delHdrMapRule('${esc(r.id)}')">✕</button></td>
-  </tr>`).join('');
-}
-async function saveHdrMapRule() {
-  const scope=document.getElementById('hm-scope').value;
-  const match=document.getElementById('hm-match').value.trim();
-  const action=document.getElementById('hm-action').value;
-  const name=document.getElementById('hm-name').value.trim();
-  const value=document.getElementById('hm-value').value.trim();
-  if (!name){toast('Header name required',true);return;}
-  const rule={id:'',scope,match,action,name,value,enabled:true};
-  try {
-    const r=await fetch('/admin/header-maps',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
-    const saved=await r.json(); G.headerMaps.push(saved); renderHdrMap();
-    document.getElementById('hm-name').value=''; document.getElementById('hm-value').value='';
-    toggleHdrMapForm(); toast('Header map rule added');
-  } catch { toast('Failed to save rule',true); }
-}
-async function delHdrMapRule(id) {
-  try {
-    await fetch(`/admin/header-maps/${id}`,{method:'DELETE'});
-    G.headerMaps=G.headerMaps.filter(r=>r.id!==id); renderHdrMap(); toast('Rule removed');
-  } catch { toast('Failed to remove rule',true); }
-}
-async function toggleHdrMapEnabled(id) {
-  const r=G.headerMaps.find(x=>x.id===id); if (!r) return;
-  const updated={...r,enabled:!r.enabled};
-  try {
-    await fetch(`/admin/header-maps/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(updated)});
-    Object.assign(r,updated); renderHdrMap();
-  } catch { toast('Failed to toggle',true); }
-}
-
-// ── Modifications ─────────────────────────────────────────────────────────────
-async function fetchModifications() {
-  try {
-    const r = await fetch('/admin/modifications');
-    G.modifications = await r.json();
-    renderModifications();
-  } catch { toast('Failed to load modifications', true); }
-}
-function toggleModForm() {
-  const f = document.getElementById('mod-form');
-  const btn = document.getElementById('mod-add-btn');
-  const open = f.style.display === 'none' || f.style.display === '';
-  if (open) {
-    f.style.display = 'block'; btn.textContent = '✕ Cancel';
-    document.getElementById('mod-pattern').value = '';
-    document.getElementById('mod-body').value = '';
-    document.getElementById('mod-hdrs-tbody').innerHTML = '';
-    modAddHdrRow();
-  } else { f.style.display = 'none'; btn.textContent = '+ Add Rule'; }
-}
-function modAddHdrRow() {
-  const tb = document.getElementById('mod-hdrs-tbody');
-  const i = tb.rows.length;
-  const tr = document.createElement('tr');
-  tr.innerHTML = `<td><input class="cmp-kv-input" id="mod-hk-${i}" placeholder="Header-Name" style="width:100%"></td><td><input class="cmp-kv-input" id="mod-hv-${i}" placeholder="value" style="width:100%"></td><td><button class="cmp-kv-del" onclick="this.closest('tr').remove()">✕</button></td>`;
-  tb.appendChild(tr);
-}
-async function saveMod() {
-  const pattern = document.getElementById('mod-pattern').value.trim();
-  if (!pattern) { toast('URI pattern is required', true); return; }
-  const header_replacements = {};
-  document.getElementById('mod-hdrs-tbody').querySelectorAll('tr').forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    if (inputs.length >= 2) { const k = inputs[0].value.trim(), v = inputs[1].value.trim(); if (k) header_replacements[k] = v; }
-  });
-  const body = document.getElementById('mod-body').value.trim();
-  const rule = { request_uri_pattern: pattern, header_replacements, body_replacement: body || null };
-  try {
-    await fetch('/admin/modifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rule) });
-    toggleModForm();
-    toast('Modification rule added');
-    await fetchModifications();
-  } catch { toast('Failed to save rule', true); }
-}
-async function delMod(i) {
-  try {
-    await fetch(`/admin/modifications/${i}`, { method: 'DELETE' });
-    toast('Rule removed');
-    await fetchModifications();
-  } catch { toast('Failed to remove rule', true); }
-}
-function renderModifications() {
-  const tb = document.getElementById('mod-tbody'); if (!tb) return;
-  if (!G.modifications.length) {
-    tb.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--text4);padding:20px">No modification rules — click + Add Rule</td></tr>`;
-    return;
-  }
-  tb.innerHTML = G.modifications.map((r, i) => {
-    const hdrs = Object.entries(r.header_replacements || {}).map(([k, v]) => `<span class="hdrmap-scope-chip" style="margin-right:3px">${esc(k)}: ${esc(v)}</span>`).join('');
-    const body = r.body_replacement ? `<span style="font-family:var(--mono);font-size:10px;color:var(--text3)">${esc(r.body_replacement.slice(0, 40))}${r.body_replacement.length > 40 ? '…' : ''}</span>` : `<span style="color:var(--text4)">—</span>`;
-    return `<tr>
-      <td class="trunc" style="font-family:var(--mono);font-size:11px">${esc(r.request_uri_pattern)}</td>
-      <td style="max-width:240px">${hdrs || '<span style="color:var(--text4)">—</span>'}</td>
-      <td>${body}</td>
-      <td><button class="btn btn-sm btn-danger" onclick="delMod(${i})">Delete</button></td>
-    </tr>`;
-  }).join('');
-}
-
-// ── Settings ──────────────────────────────────────────────────────────────────
-async function fetchConfig() {
-  try {
-    const [cfgR, hlthR] = await Promise.all([fetch('/admin/config'), fetch('/health')]);
-    const cfg = await cfgR.json();
-    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-    set('cfg-port', cfg.port);
-    set('cfg-bind', cfg.bind_host);
-    set('cfg-mitm', cfg.mitm_enabled ? 'Enabled' : 'Disabled');
-    set('cfg-uptime', fmtDuration(cfg.uptime_secs));
-    set('cfg-storage', cfg.storage_path);
-    set('cfg-max-sessions', cfg.max_sessions.toLocaleString());
-    set('cfg-timeout', cfg.timeout_secs + 's');
-    set('cfg-ws', cfg.inspect_ws_frames ? 'On' : 'Off');
-    const inp = document.getElementById('cfg-max-body');
-    if (inp && !inp._dirty) inp.value = cfg.max_body_bytes;
-  } catch { toast('Failed to load config', true); }
-}
-function fmtDuration(secs) {
-  if (secs < 60) return secs + 's';
-  if (secs < 3600) return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
-  return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
-}
-async function applyMaxBody() {
-  const v = parseInt(document.getElementById('cfg-max-body').value);
-  if (!v || v < 1024) { toast('Must be ≥ 1024 bytes', true); return; }
-  try {
-    const r = await fetch('/admin/config/reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max_body_bytes: v }) });
-    const d = await r.json();
-    toast('max_body_bytes → ' + d.max_body_bytes.toLocaleString());
-    document.getElementById('cfg-max-body')._dirty = false;
-    await fetchConfig();
-  } catch { toast('Failed to apply', true); }
-}
-
-// ── Throttle ──────────────────────────────────────────────────────────────────
-const THROTTLE_PRESETS = {
-  slow3g: {enabled:true, latency_ms:400, bandwidth_limit_kbps:400},
-  fast3g: {enabled:true, latency_ms:150, bandwidth_limit_kbps:1500},
-  '4g':   {enabled:true, latency_ms:50,  bandwidth_limit_kbps:20000},
-};
-function applyThrottlePreset(key) {
-  const p = THROTTLE_PRESETS[key];
-  if (!p) return;
-  document.getElementById('th-en').value = 'true';
-  document.getElementById('th-lat').value = p.latency_ms;
-  document.getElementById('th-bw').value = p.bandwidth_limit_kbps;
-}
-async function fetchThrottle() {
-  try {
-    const r=await fetch('/admin/throttling'); const d=await r.json();
-    G.throttle=d;
-    document.getElementById('th-en').value=d.enabled?'true':'false';
-    document.getElementById('th-lat').value=d.latency_ms||0;
-    document.getElementById('th-bw').value=d.bandwidth_limit_kbps||0;
-  } catch {}
-}
-async function saveThrottle() {
-  const cfg={
-    enabled:document.getElementById('th-en').value==='true',
-    latency_ms:parseInt(document.getElementById('th-lat').value)||0,
-    bandwidth_limit_kbps:parseInt(document.getElementById('th-bw').value)||0,
-  };
-  try {
-    await fetch('/admin/throttling',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
-    toast('Throttle applied');
-  } catch { toast('Failed to apply throttle',true); }
-}
-
-// ── Map Local ─────────────────────────────────────────────────────────────────
-async function fetchMapLocal() {
-  try {
-    const r = await fetch('/admin/map-local');
-    G.mapLocal = await r.json();
-    renderMapLocal();
-  } catch { toast('Failed to load map-local rules', true); }
-}
-function renderMapLocal() {
-  const tb = document.getElementById('ml-tbody');
-  if (!tb) return;
-  const entries = Object.entries(G.mapLocal || {});
-  if (!entries.length) { tb.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--text4);padding:14px">No rules</td></tr>`; return; }
-  tb.innerHTML = entries.map(([host, fp]) => `<tr>
-    <td><code>${esc(host)}</code></td>
-    <td><code style="color:var(--text3)">${esc(fp)}</code></td>
-    <td><button class="btn btn-sm btn-danger" onclick="delMapLocal('${esc(host)}')">✕</button></td>
-  </tr>`).join('');
-}
-async function addMapLocal() {
-  const host = document.getElementById('ml-host').value.trim();
-  const fp   = document.getElementById('ml-path').value.trim();
-  if (!host || !fp) { toast('Fill host and file path', true); return; }
-  try {
-    await fetch('/admin/map-local', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({host, file_path: fp})});
-    document.getElementById('ml-host').value = '';
-    document.getElementById('ml-path').value = '';
-    await fetchMapLocal();
-    toast('Rule added');
-  } catch { toast('Failed to add rule', true); }
-}
-async function delMapLocal(host) {
-  try {
-    await fetch(`/admin/map-local/${encodeURIComponent(host)}`, {method:'DELETE'});
-    await fetchMapLocal();
-    toast('Rule removed');
-  } catch { toast('Failed to remove rule', true); }
-}
-
-// ── Breakpoints ───────────────────────────────────────────────────────────────
-async function fetchBreakpoints() {
-  try {
-    const [r1, r2] = await Promise.all([fetch('/admin/breakpoints'), fetch('/admin/breakpoints/pending')]);
-    G.bpRules = await r1.json();
-    G.bpPending = await r2.json();
-    renderBpRules();
-    renderBpPending();
-    document.getElementById('nb-bp').textContent = G.bpRules.filter(r=>r.enabled).length;
-  } catch { toast('Failed to load breakpoints', true); }
-}
-function renderBpRules() {
-  const tb = document.getElementById('bp-rules-tbody');
-  if (!G.bpRules.length) { tb.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--text4);padding:20px">No rules — add one above</td></tr>'; return; }
-  tb.innerHTML = G.bpRules.map(r=>`<tr>
-    <td class="mono">${esc(r.pattern)}</td>
-    <td><span class="mbadge ${r.bp_type==='Request'?'mGET':'mPOST'}">${esc(r.bp_type)}</span></td>
-    <td style="color:${r.enabled?'var(--success)':'var(--text4)'}">${r.enabled?'On':'Off'}</td>
-    <td><button class="btn btn-sm btn-danger" onclick="delBpRule('${r.id}')">✕</button></td>
-  </tr>`).join('');
-}
-function renderBpPending() {
-  const el = document.getElementById('bp-pending-list');
-  if (!G.bpPending.length) { el.innerHTML='<div class="card-body"><p class="note">No breakpoints are paused right now.</p></div>'; return; }
-  el.innerHTML = G.bpPending.map(bp=>renderBpItem(bp)).join('');
-}
-function renderBpItem(bp) {
-  const isReq=!!bp.context.Request, ctx=isReq?bp.context.Request:bp.context.Response;
-  const label=isReq?`${ctx.method} ${ctx.uri}`:`${ctx.status} ${ctx.request_uri||ctx.uri||''}`;
-  const hdrs=ctx.headers||{};
-  const hdrRows=Object.entries(hdrs).map(([k,v],i)=>`<tr>
-    <td><input class="cmp-kv-input" id="bpe-hk-${bp.id}-${i}" value="${esc(k)}" placeholder="Header-Name" style="width:100%"></td>
-    <td><input class="cmp-kv-input" id="bpe-hv-${bp.id}-${i}" value="${esc(v)}" placeholder="value" style="width:100%"></td>
-    <td><button class="cmp-kv-del" onclick="this.closest('tr').remove()">✕</button></td>
-  </tr>`).join('');
-  const methodOpts=['GET','POST','PUT','DELETE','PATCH','HEAD','OPTIONS'].map(m=>`<option${m===(ctx.method||'')?'selected':''}>${m}</option>`).join('');
-  return `<div style="border-bottom:0.5px solid var(--border)">
-    <div style="padding:13px 15px;display:flex;align-items:center;gap:8px">
-      <span class="mbadge ${isReq?'mGET':'mPOST'}">${isReq?'REQ':'RES'}</span>
-      <span class="mono" style="font-size:11.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span>
-      <button class="btn btn-sm btn-primary" onclick="resolveBp('${bp.id}','continue')">Continue</button>
-      <button class="btn btn-sm" onclick="toggleBpEdit('${bp.id}')">Edit…</button>
-      <button class="btn btn-sm btn-danger" onclick="resolveBp('${bp.id}','drop')">Drop</button>
-    </div>
-    <div id="bp-edit-${bp.id}" class="bpe-panel" style="display:none">
-      <div class="bpe-section-title">Edit ${isReq?'Request':'Response'}</div>
-      ${isReq?`
-      <div class="form-row" style="margin-bottom:8px">
-        <div class="fgroup" style="max-width:90px">
-          <label class="flabel">Method</label>
-          <select class="finput fselect" id="bpe-method-${bp.id}">${methodOpts}</select>
-        </div>
-        <div class="fgroup">
-          <label class="flabel">URL</label>
-          <input class="finput" id="bpe-url-${bp.id}" value="${esc(ctx.uri||'')}" style="font-family:var(--mono)">
-        </div>
-      </div>`:
-      `<div class="form-row" style="margin-bottom:8px">
-        <div class="fgroup" style="max-width:90px">
-          <label class="flabel">Status</label>
-          <input class="finput" type="number" id="bpe-status-${bp.id}" value="${esc(ctx.status||200)}" style="font-family:var(--mono)">
-        </div>
-      </div>`}
-      <div class="fgroup" style="margin-bottom:8px">
-        <label class="flabel" style="margin-bottom:4px">Headers</label>
-        <table class="cmp-kv-table" style="margin-top:2px">
-          <thead><tr><th>Name</th><th>Value</th><th style="width:28px"></th></tr></thead>
-          <tbody id="bpe-hdrs-${bp.id}">${hdrRows}</tbody>
-        </table>
-        <button class="btn btn-sm btn-ghost" style="margin-top:4px" onclick="bpeAddHdrRow('${bp.id}')">+ Add header</button>
-      </div>
-      <div class="fgroup" style="margin-bottom:10px">
-        <label class="flabel" style="margin-bottom:4px">Body</label>
-        <textarea class="finput" id="bpe-body-${bp.id}" rows="5" style="font-family:var(--mono);font-size:11px;resize:vertical">${esc(ctx.body||'')}</textarea>
-      </div>
-      <div style="display:flex;gap:6px;align-items:center">
-        <button class="btn btn-primary btn-sm" onclick="resolveBpModify('${bp.id}')">
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.5 6H1.5M7.5 3l3 3-3 3"/></svg>
-          Send Modified
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick="toggleBpEdit('${bp.id}')">Cancel</button>
-      </div>
-    </div>
-  </div>`;
-}
-function bpeAddHdrRow(id) {
-  const tbody=document.getElementById(`bpe-hdrs-${id}`); if (!tbody) return;
-  const i=tbody.rows.length;
-  const tr=document.createElement('tr');
-  tr.innerHTML=`<td><input class="cmp-kv-input" id="bpe-hk-${id}-${i}" placeholder="Header-Name" style="width:100%"></td><td><input class="cmp-kv-input" id="bpe-hv-${id}-${i}" placeholder="value" style="width:100%"></td><td><button class="cmp-kv-del" onclick="this.closest('tr').remove()">✕</button></td>`;
-  tbody.appendChild(tr);
-}
-function toggleBpForm() { const f=document.getElementById('bp-form'); f.style.display=f.style.display?'':'none'; }
-function toggleBpEdit(id) { const el=document.getElementById(`bp-edit-${id}`); el.style.display=el.style.display?'':'none'; }
-async function saveBpRule() {
-  const pattern=document.getElementById('bp-pattern').value.trim();
-  if (!pattern){toast('Pattern is required',true);return;}
-  const rule={id:'',pattern,bp_type:document.getElementById('bp-type').value,enabled:true};
-  try {
-    await fetch('/admin/breakpoints',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rule)});
-    document.getElementById('bp-pattern').value=''; toggleBpForm(); toast('Rule added'); await fetchBreakpoints();
-  } catch { toast('Failed to save rule',true); }
-}
-async function delBpRule(id) {
-  try { await fetch(`/admin/breakpoints/${id}`,{method:'DELETE'}); toast('Rule removed'); await fetchBreakpoints(); }
-  catch { toast('Failed to remove rule',true); }
-}
-async function resolveBp(id, action, context=null) {
-  const payload={action}; if(context) payload.context=context;
-  try {
-    await fetch(`/admin/breakpoints/pending/${id}/resolve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    toast(action==='drop'?'Request dropped':'Breakpoint resolved'); await fetchBreakpoints();
-  } catch { toast('Failed to resolve',true); }
-}
-async function resolveBpModify(id) {
-  const bp=G.bpPending.find(b=>b.id===id); if (!bp) return;
-  const isReq=!!bp.context.Request, orig=isReq?bp.context.Request:bp.context.Response;
-  const newBody=document.getElementById(`bpe-body-${id}`)?.value??orig.body??'';
-  // Collect headers from edit table
-  const newHeaders={};
-  const tbody=document.getElementById(`bpe-hdrs-${id}`);
-  if (tbody) {
-    tbody.querySelectorAll('tr').forEach(row=>{
-      const inputs=row.querySelectorAll('input');
-      if (inputs.length>=2) { const k=inputs[0].value.trim(),v=inputs[1].value.trim(); if(k) newHeaders[k]=v; }
-    });
-  }
-  let context;
-  if (isReq) {
-    const method=document.getElementById(`bpe-method-${id}`)?.value||orig.method;
-    const uri=document.getElementById(`bpe-url-${id}`)?.value||orig.uri;
-    context={Request:{...orig,method,uri,headers:newHeaders,body:newBody}};
-  } else {
-    const status=parseInt(document.getElementById(`bpe-status-${id}`)?.value)||orig.status;
-    context={Response:{...orig,status,headers:newHeaders,body:newBody}};
-  }
-  await resolveBp(id,'modify',context);
-}
-
-// ── Resize handle ─────────────────────────────────────────────────────────────
-(()=>{
-  const h=document.getElementById('resize-handle'), p=document.getElementById('detail');
-  let drag=false, sx=0, sw=0;
-  h.addEventListener('mousedown', e=>{drag=true;sx=e.clientX;sw=p.offsetWidth;h.classList.add('drag');e.preventDefault()});
-  document.addEventListener('mousemove', e=>{if(!drag)return; p.style.width=Math.max(240,Math.min(640,sw-(e.clientX-sx)))+'px'});
-  document.addEventListener('mouseup', ()=>{drag=false;h.classList.remove('drag')});
-})();
-
-// ── Keyboard shortcuts ────────────────────────────────────────────────────────
-document.addEventListener('keydown', e => {
-  const inInput = e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.isContentEditable;
-  if (e.key==='Escape') {
-    document.querySelectorAll('.overlay.show').forEach(m=>m.classList.remove('show'));
-    if (!inInput) { G.sel=null; renderTable(); renderDetail(); document.getElementById('sb-sel').textContent='No selection'; document.getElementById('detail-topbar').style.display='none'; }
-    return;
-  }
-  if (inInput) return;
-  if (e.key==='?') { openShortcuts(); return; }
-  if ((e.metaKey||e.ctrlKey) && e.key==='d') { e.preventDefault(); toggleTheme(); }
-  if ((e.metaKey||e.ctrlKey) && e.key==='f') { e.preventDefault(); document.getElementById('srch').focus(); }
-  if ((e.metaKey||e.ctrlKey) && e.key==='k') { e.preventDefault(); clearSessions(); }
-  if ((e.metaKey||e.ctrlKey) && e.key==='r') { e.preventDefault(); if (G.sel) goCompose(); }
-  if ((e.metaKey||e.ctrlKey) && e.key==='c' && G.sel) { e.preventDefault(); copyCurl(); }
-  if (e.key===' ') { e.preventDefault(); toggleRec(); }
-});
-
-// ── Boot ──────────────────────────────────────────────────────────────────────
-(async () => {
-  const saved = localStorage.getItem('oproxy-theme');
-  if (saved === 'dark') {
-    document.documentElement.setAttribute('data-theme','dark');
-    document.getElementById('ic-moon').style.display='none';
-    document.getElementById('ic-sun').style.display='';
-  }
-
-  // Restore compose collections and vars
-  try { const sc=localStorage.getItem('oproxy-compose-collections'); if(sc) G.compose.collections=JSON.parse(sc); } catch {}
-  try { const sv=localStorage.getItem('oproxy-compose-vars'); if(sv) G.compose.vars=JSON.parse(sv); } catch {}
-
-  // Hydrate MITM indicators from /health
-  try {
-    const d = await fetch('/health').then(r=>r.json());
-    const on = !!d.mitm_enabled;
-    const badge = document.getElementById('tb-mitm');
-    badge.className = 'mitm-badge ' + (on ? 'mitm-on' : 'mitm-off');
-    document.getElementById('tb-mitm-lbl').textContent = on ? 'MITM on' : 'MITM off';
-    document.getElementById('sb-mitm-dot').style.background = on ? 'var(--success)' : 'var(--text4)';
-    document.getElementById('sb-mitm').textContent = on ? 'MITM on' : 'MITM off';
-    const mv = document.getElementById('mitm-val');
-    if (mv) mv.textContent = on ? 'Intercept (MITM)' : 'Passthrough (tunnelled)';
-  } catch {}
-
-  try { const r=await fetch('/admin/routes'); G.routes=await r.json(); } catch {}
-  await fetchSessions();
-  startPoll();
-})();
-
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(()=>{});
-}
-</script>
+<div id="proxy-offline" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:9999;flex-direction:column;align-items:center;justify-content:center">
+  <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="var(--text4)" stroke-width="2"><circle cx="24" cy="24" r="20"/><path d="M24 14v12M24 32v2"/></svg>
+  <h2 style="margin:16px 0 6px;font-size:20px;font-weight:600;color:var(--text)">oproxy is not running</h2>
+  <p style="color:var(--text3);font-size:13px;margin:0 0 20px">Start the proxy server, then reload this page.</p>
+  <button class="btn btn-primary" onclick="location.reload()">Reload</button>
+</div>
+
+<script src="/js/state.js?v=5"></script>
+<script src="/js/traffic.js?v=5"></script>
+<script src="/js/compose.js?v=5"></script>
+<script src="/js/rules.js?v=5"></script>
+<script src="/js/breakpoints.js?v=5"></script>
+<script src="/js/chrome.js?v=5"></script>
 </body>
 </html>

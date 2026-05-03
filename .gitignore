@@ -13,6 +13,13 @@ storage/
 # ── Log files ──────────────────────────────────────────────────────────────────
 server.log
 server.log.*
+tests/browser/server.log.*
+
+# ── Browser tests ──────────────────────────────────────────────────────────────
+tests/browser/
+
+#MCPs
+.playwright-mcp
 
 # ── IDE / editor ───────────────────────────────────────────────────────────────
 .vscode/
@@ -37,3 +44,31 @@ Thumbs.db
 plans/
 
 PRD.md
+.mcp.json
+tests/browser/global-setup.js
+tests/browser/global-teardown.js
+tests/browser/package-lock.json
+tests/browser/package.json
+tests/browser/playwright.config.js
+tests/browser/specs/01-page-load.spec.js
+tests/browser/specs/02-theme.spec.js
+tests/browser/specs/03-navigation.spec.js
+tests/browser/specs/04-traffic.spec.js
+tests/browser/specs/05-modals.spec.js
+tests/browser/specs/06-breakpoints.spec.js
+tests/browser/specs/07-rewrites.spec.js
+tests/browser/specs/08-mapping.spec.js
+tests/browser/specs/09-dns.spec.js
+tests/browser/specs/10-ssl.spec.js
+tests/browser/specs/11-throttle.spec.js
+tests/browser/specs/12-mock.spec.js
+tests/browser/specs/13-scripts.spec.js
+tests/browser/specs/14-webhooks.spec.js
+tests/browser/specs/15-compose.spec.js
+tests/browser/specs/16-settings.spec.js
+tests/browser/specs/17-sessions-api.spec.js
+tests/browser/specs/18-import-export.spec.js
+tests/browser/specs/19-session-detail.spec.js
+tests/browser/specs/20-capture-filter.spec.js
+tests/browser/specs/21-sse-stream.spec.js
+ROADMAP.md

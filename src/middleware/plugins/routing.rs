@@ -31,9 +31,22 @@ impl Middleware for RoutingMiddleware {
         if let Some(file_path) = map_local.get(&ctx.host) {
             match tokio::fs::read_to_string(file_path).await {
                 Ok(contents) => {
-                    // Stash the file contents in the body and mark as a local response via header.
-                    ctx.body = contents;
-                    ctx.headers.insert("x-oproxy-map-local-file".to_string(), file_path.clone());
+                    // Infer content-type from extension; fall back to application/octet-stream.
+                    let ct = match std::path::Path::new(file_path).extension().and_then(|e| e.to_str()) {
+                        Some("json") => "application/json",
+                        Some("html") | Some("htm") => "text/html",
+                        Some("js") => "application/javascript",
+                        Some("css") => "text/css",
+                        Some("xml") => "application/xml",
+                        Some("txt") => "text/plain",
+                        _ => "application/octet-stream",
+                    };
+                    let mock = serde_json::json!({
+                        "status": 200,
+                        "headers": { "Content-Type": ct },
+                        "body": contents,
+                    });
+                    ctx.headers.insert("x-oproxy-mock-response".to_string(), mock.to_string());
                     return MiddlewareAction::StopAndReturn;
                 }
                 Err(e) => {
@@ -176,7 +189,10 @@ mod tests {
         let mut ctx = req("local.mock");
         let action = mw.on_request(&mut ctx).await;
         assert_eq!(action, MiddlewareAction::StopAndReturn);
-        assert_eq!(ctx.body, "hello map local");
+        // Body is now served via x-oproxy-mock-response header, not ctx.body directly.
+        let mock_resp = ctx.headers.get("x-oproxy-mock-response").expect("mock response header set");
+        let v: serde_json::Value = serde_json::from_str(mock_resp).unwrap();
+        assert_eq!(v["body"].as_str().unwrap(), "hello map local");
 
         let _ = tokio::fs::remove_file(&tmp).await;
     }

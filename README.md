@@ -8,6 +8,10 @@
 
 ---
 
+<video src="assets/demo.mp4" autoplay loop muted playsinline style="width:100%;border-radius:8px;"></video>
+
+---
+
 ## ✨ Key Features
 
 * **🔍 Traffic Inspection** — Capture and search every request/response in a live session log.

@@ -32,6 +32,62 @@ pub struct InspectionMetrics {
     pub ttfb_ms: u64,
     #[serde(default)]
     pub body_ms: u64,
+    /// DNS resolution time in milliseconds (None when already resolved / not measured).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    /// TCP connect handshake time in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_connect_ms: Option<u64>,
+    /// TLS handshake time in milliseconds (None for plain HTTP connections).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphQLInfo {
+    pub operation_type: String,
+    pub operation_name: Option<String>,
+    pub variables: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtInfo {
+    pub header: serde_json::Value,
+    pub claims: serde_json::Value,
+    pub expired: bool,
+    pub alg_none_warning: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcField {
+    pub field_number: u32,
+    pub wire_type: u8,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcMessage {
+    pub direction: String,
+    pub compressed: bool,
+    pub length: u32,
+    pub fields: Vec<GrpcField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcInfo {
+    pub service: Option<String>,
+    pub method: Option<String>,
+    pub messages: Vec<GrpcMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InspectorData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql: Option<GraphQLInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwt: Option<JwtInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc: Option<GrpcInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +101,12 @@ pub struct Exchange {
     pub metrics: Option<InspectionMetrics>,
     #[serde(default)]
     pub ws_frames: Vec<WsFrame>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspector_data: Option<InspectorData>,
 }
 
 pub struct SessionManager {
@@ -109,6 +171,9 @@ impl SessionManager {
                 response: None,
                 metrics: None,
                 ws_frames: Vec::new(),
+                note: None,
+                tags: Vec::new(),
+                inspector_data: None,
             });
         }
         self.notify();
@@ -160,9 +225,44 @@ impl SessionManager {
         self.notify();
     }
 
+    /// Update the note and/or tags on an existing session.
+    /// `note: Some(x)` replaces the note; `None` leaves it unchanged.
+    /// `tags: Some(v)` replaces the tag list; `None` leaves it unchanged.
+    /// Returns `false` if no session with `id` exists.
+    pub fn annotate(&self, id: &str, note: Option<String>, tags: Option<Vec<String>>) -> bool {
+        {
+            let mut exchanges = self.exchanges.write().unwrap();
+            match exchanges.get_mut(id) {
+                None => return false,
+                Some(ex) => {
+                    if let Some(n) = note { ex.note = if n.is_empty() { None } else { Some(n) }; }
+                    if let Some(t) = tags { ex.tags = t; }
+                    ex.updated_at = Some(Utc::now());
+                }
+            }
+        }
+        self.notify();
+        true
+    }
+
     pub fn get_all_sessions(&self) -> Vec<Exchange> {
         let exchanges = self.exchanges.read().unwrap();
         exchanges.values().cloned().collect()
+    }
+
+    /// Full-text search across URI, headers, body, notes, and tags.
+    /// Supports `tag:x`, `host:x`, `method:GET`, `status:200` prefix syntax.
+    /// Multiple terms use AND semantics. Empty query returns all sessions.
+    pub fn search_sessions(&self, query: &str) -> Vec<Exchange> {
+        if query.trim().is_empty() {
+            return self.get_all_sessions();
+        }
+        let terms = parse_search_query(query);
+        let exchanges = self.exchanges.read().unwrap();
+        exchanges.values()
+            .filter(|ex| terms.iter().all(|t| t.matches(ex)))
+            .cloned()
+            .collect()
     }
 
     pub fn get_session(&self, id: &str) -> Option<Exchange> {
@@ -177,9 +277,76 @@ impl SessionManager {
         }
         self.notify();
     }
+
+    pub fn update_inspector_data(&self, id: &str, data: InspectorData) -> bool {
+        let mut exchanges = self.exchanges.write().unwrap();
+        if let Some(ex) = exchanges.get_mut(id) {
+            ex.inspector_data = Some(data);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub type SharedSessionManager = Arc<SessionManager>;
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+pub enum SearchTerm {
+    Tag(String),
+    Host(String),
+    Method(String),
+    Status(u16),
+    Text(String),
+}
+
+impl SearchTerm {
+    pub fn matches(&self, ex: &Exchange) -> bool {
+        match self {
+            SearchTerm::Tag(t) => ex.tags.iter().any(|tag| tag.to_lowercase().contains(t.as_str())),
+            SearchTerm::Host(h) => ex.request.host.to_lowercase().contains(h.as_str()),
+            SearchTerm::Method(m) => ex.request.method.to_lowercase() == m.as_str(),
+            SearchTerm::Status(s) => ex.response.as_ref().map(|r| r.status == *s).unwrap_or(false),
+            SearchTerm::Text(t) => {
+                let t = t.as_str();
+                ex.request.uri.to_lowercase().contains(t)
+                    || ex.request.body.to_lowercase().contains(t)
+                    || ex.request.headers.iter().any(|(k, v)| {
+                        k.to_lowercase().contains(t) || v.to_lowercase().contains(t)
+                    })
+                    || ex.response.as_ref().map(|r| {
+                        r.body.to_lowercase().contains(t)
+                            || r.headers.iter().any(|(k, v)| {
+                                k.to_lowercase().contains(t) || v.to_lowercase().contains(t)
+                            })
+                    }).unwrap_or(false)
+                    || ex.note.as_deref().map(|n| n.to_lowercase().contains(t)).unwrap_or(false)
+            }
+        }
+    }
+}
+
+pub fn parse_search_query(query: &str) -> Vec<SearchTerm> {
+    query.split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(|token| {
+            if let Some(t) = token.strip_prefix("tag:") {
+                SearchTerm::Tag(t.to_lowercase())
+            } else if let Some(h) = token.strip_prefix("host:") {
+                SearchTerm::Host(h.to_lowercase())
+            } else if let Some(m) = token.strip_prefix("method:") {
+                SearchTerm::Method(m.to_lowercase())
+            } else if let Some(s) = token.strip_prefix("status:") {
+                s.parse::<u16>()
+                    .map(SearchTerm::Status)
+                    .unwrap_or_else(|_| SearchTerm::Text(s.to_lowercase()))
+            } else {
+                SearchTerm::Text(token.to_lowercase())
+            }
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -250,6 +417,7 @@ mod tests {
             status_code: 404,
             ttfb_ms: 0,
             body_ms: 0,
+            ..Default::default()
         };
         sm.record_response_with_metrics("id1".to_string(), res("/x", 404), metrics);
         let session = sm.get_session("id1").unwrap();
@@ -343,5 +511,334 @@ mod tests {
         for (i, e) in all.iter().enumerate() {
             assert_eq!(e.id, format!("id-{}", i));
         }
+    }
+
+    #[test]
+    fn record_request_has_no_updated_at() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let session = sm.get_session("id1").unwrap();
+        assert!(session.updated_at.is_none(), "updated_at must be None until a response arrives");
+    }
+
+    #[test]
+    fn record_response_sets_updated_at() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let before = Utc::now();
+        sm.record_response("id1".to_string(), res("/test", 200));
+        let after = Utc::now();
+        let session = sm.get_session("id1").unwrap();
+        let updated_at = session.updated_at.expect("updated_at must be set after record_response");
+        assert!(updated_at >= before && updated_at <= after, "updated_at must be recent");
+    }
+
+    #[test]
+    fn record_response_with_metrics_sets_updated_at() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let metrics = InspectionMetrics { latency_ms: 10, request_size_bytes: 0, response_size_bytes: 0, status_code: 200, ttfb_ms: 0, body_ms: 0, ..Default::default() };
+        let before = Utc::now();
+        sm.record_response_with_metrics("id1".to_string(), res("/test", 200), metrics);
+        let after = Utc::now();
+        let session = sm.get_session("id1").unwrap();
+        let updated_at = session.updated_at.expect("updated_at must be set after record_response_with_metrics");
+        assert!(updated_at >= before && updated_at <= after);
+    }
+
+    // ── annotations ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn annotate_stores_note_and_tags() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let ok = sm.annotate("id1", Some("auth bug".to_string()), Some(vec!["auth".to_string(), "bug".to_string()]));
+        assert!(ok);
+        let ex = sm.get_session("id1").unwrap();
+        assert_eq!(ex.note.as_deref(), Some("auth bug"));
+        assert_eq!(ex.tags, vec!["auth", "bug"]);
+    }
+
+    #[test]
+    fn annotate_partial_note_only_leaves_tags_unchanged() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        sm.annotate("id1", None, Some(vec!["existing".to_string()]));
+        sm.annotate("id1", Some("new note".to_string()), None);
+        let ex = sm.get_session("id1").unwrap();
+        assert_eq!(ex.note.as_deref(), Some("new note"));
+        assert_eq!(ex.tags, vec!["existing"]);
+    }
+
+    #[test]
+    fn annotate_partial_tags_only_leaves_note_unchanged() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        sm.annotate("id1", Some("original".to_string()), None);
+        sm.annotate("id1", None, Some(vec!["new-tag".to_string()]));
+        let ex = sm.get_session("id1").unwrap();
+        assert_eq!(ex.note.as_deref(), Some("original"));
+        assert_eq!(ex.tags, vec!["new-tag"]);
+    }
+
+    #[test]
+    fn annotate_empty_string_clears_note() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        sm.annotate("id1", Some("note".to_string()), None);
+        sm.annotate("id1", Some(String::new()), None);
+        let ex = sm.get_session("id1").unwrap();
+        assert!(ex.note.is_none());
+    }
+
+    #[test]
+    fn annotate_empty_tags_clears_tags() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        sm.annotate("id1", None, Some(vec!["tag".to_string()]));
+        sm.annotate("id1", None, Some(vec![]));
+        let ex = sm.get_session("id1").unwrap();
+        assert!(ex.tags.is_empty());
+    }
+
+    #[test]
+    fn annotate_missing_session_returns_false() {
+        let sm = SessionManager::new(10_000);
+        let ok = sm.annotate("nonexistent", Some("note".to_string()), None);
+        assert!(!ok);
+    }
+
+    #[test]
+    fn annotate_sets_updated_at() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let before = Utc::now();
+        sm.annotate("id1", Some("note".to_string()), None);
+        let after = Utc::now();
+        let ex = sm.get_session("id1").unwrap();
+        let ua = ex.updated_at.unwrap();
+        assert!(ua >= before && ua <= after);
+    }
+
+    #[test]
+    fn annotate_triggers_sse_notification() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let mut rx = sm.subscribe();
+        // Drain the record_request notification.
+        let _ = rx.try_recv();
+        sm.annotate("id1", Some("note".to_string()), None);
+        assert!(rx.try_recv().is_ok(), "annotate must fire SSE notification");
+    }
+
+    #[tokio::test]
+    async fn annotation_roundtrip_through_save_load() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/save-annot-test"));
+        sm.annotate("id1", Some("important".to_string()), Some(vec!["prod".to_string()]));
+
+        let path = std::env::temp_dir().join("oproxy_annot_roundtrip_test.json");
+        sm.save_to_file(&path).await.expect("save failed");
+
+        let sm2 = SessionManager::new(10_000);
+        sm2.load_from_file(&path).await.expect("load failed");
+        let ex = sm2.get_session("id1").unwrap();
+        assert_eq!(ex.note.as_deref(), Some("important"));
+        assert_eq!(ex.tags, vec!["prod"]);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // ── InspectionMetrics waterfall fields ───────────────────────────────────
+
+    #[test]
+    fn inspection_metrics_optional_timing_fields_default_to_none() {
+        let m: InspectionMetrics = Default::default();
+        assert!(m.dns_ms.is_none());
+        assert!(m.tcp_connect_ms.is_none());
+        assert!(m.tls_ms.is_none());
+    }
+
+    #[test]
+    fn inspection_metrics_timing_fields_roundtrip_via_serde() {
+        let m = InspectionMetrics {
+            latency_ms: 120,
+            request_size_bytes: 256,
+            response_size_bytes: 1024,
+            status_code: 200,
+            ttfb_ms: 80,
+            body_ms: 40,
+            dns_ms: Some(10),
+            tcp_connect_ms: Some(15),
+            tls_ms: Some(25),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let m2: InspectionMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(m2.dns_ms, Some(10));
+        assert_eq!(m2.tcp_connect_ms, Some(15));
+        assert_eq!(m2.tls_ms, Some(25));
+    }
+
+    #[test]
+    fn inspection_metrics_absent_timing_fields_omitted_from_json() {
+        let m = InspectionMetrics { latency_ms: 10, ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("dns_ms"), "absent optional fields must not appear in JSON");
+        assert!(!json.contains("tcp_connect_ms"));
+        assert!(!json.contains("tls_ms"));
+    }
+
+    #[test]
+    fn record_response_with_timing_metrics_stores_optional_fields() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let metrics = InspectionMetrics {
+            latency_ms: 120,
+            request_size_bytes: 0,
+            response_size_bytes: 0,
+            status_code: 200,
+            ttfb_ms: 80,
+            body_ms: 40,
+            dns_ms: Some(5),
+            tcp_connect_ms: Some(10),
+            tls_ms: Some(20),
+        };
+        sm.record_response_with_metrics("id1".to_string(), res("/test", 200), metrics);
+        let ex = sm.get_session("id1").unwrap();
+        let m = ex.metrics.unwrap();
+        assert_eq!(m.dns_ms, Some(5));
+        assert_eq!(m.tcp_connect_ms, Some(10));
+        assert_eq!(m.tls_ms, Some(20));
+    }
+
+    // ── search_sessions ───────────────────────────────────────────────────────
+
+    fn req_with_host(uri: &str, host: &str) -> RequestContext {
+        let mut h = HashMap::new();
+        h.insert("host".to_string(), host.to_string());
+        RequestContext {
+            method: "GET".to_string(),
+            uri: uri.to_string(),
+            headers: h,
+            body: String::new(),
+            host: host.to_string(),
+            body_bytes: None,
+        }
+    }
+
+    #[test]
+    fn search_empty_query_returns_all() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/a"));
+        sm.record_request("b".to_string(), req("/b"));
+        let results = sm.search_sessions("");
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_text_matches_uri() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/api/users"));
+        sm.record_request("b".to_string(), req("/health"));
+        let results = sm.search_sessions("users");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn search_host_prefix() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req_with_host("/x", "api.example.com"));
+        sm.record_request("b".to_string(), req_with_host("/y", "static.example.com"));
+        let results = sm.search_sessions("host:api.example");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn search_tag_prefix() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/a"));
+        sm.record_request("b".to_string(), req("/b"));
+        sm.annotate("a", None, Some(vec!["auth".to_string()]));
+        let results = sm.search_sessions("tag:auth");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn search_multiple_terms_and_semantics() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/api/auth/login"));
+        sm.record_request("b".to_string(), req("/api/users"));
+        // only "a" matches both "api" and "login"
+        let results = sm.search_sessions("api login");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn search_status_prefix() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/a"));
+        sm.record_request("b".to_string(), req("/b"));
+        sm.record_response("a".to_string(), res("/a", 404));
+        sm.record_response("b".to_string(), res("/b", 200));
+        let results = sm.search_sessions("status:404");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn search_note_matches_text() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/a"));
+        sm.record_request("b".to_string(), req("/b"));
+        sm.annotate("a", Some("critical bug".to_string()), None);
+        let results = sm.search_sessions("critical");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("a".to_string(), req("/api"));
+        let results = sm.search_sessions("zzz_no_match");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parse_search_query_tag_term() {
+        let terms = parse_search_query("tag:auth");
+        assert_eq!(terms.len(), 1);
+        let mut ex = Exchange {
+            id: "x".to_string(), timestamp: Utc::now(), updated_at: None,
+            request: req("/x"), response: None, metrics: None, ws_frames: vec![],
+            note: None, tags: vec!["auth".to_string()], inspector_data: None,
+        };
+        assert!(terms[0].matches(&ex));
+        ex.tags = vec![];
+        assert!(!terms[0].matches(&ex));
+    }
+
+    #[test]
+    fn import_sessions_preserves_existing_updated_at() {
+        let sm = SessionManager::new(10_000);
+        let fixed_time = Utc::now() - chrono::Duration::hours(2);
+        let exchange = Exchange {
+            id: "imported".to_string(),
+            timestamp: fixed_time,
+            updated_at: Some(fixed_time),
+            request: req("/imported"),
+            response: None,
+            metrics: None,
+            ws_frames: vec![],
+            note: None,
+            tags: vec![],
+            inspector_data: None,
+        };
+        sm.import_sessions(vec![exchange]);
+        let session = sm.get_session("imported").unwrap();
+        assert_eq!(session.updated_at, Some(fixed_time));
     }
 }

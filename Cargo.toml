@@ -44,3 +44,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "1"
 futures-util = "=0.3.31"
 base64 = "0.21"
+similar = "2"
+graphql-parser = "0.4"
+prost = "0.12"
+mlua = { version = "0.9", features = ["lua54", "vendored", "async", "send"] }
+hmac = "0.12"
+sha2 = "0.10"
