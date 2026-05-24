@@ -2,6 +2,7 @@
 name = "oproxy"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 license = "MIT"
 description = "Programmable HTTP/HTTPS proxy for inspecting, debugging, and manipulating network traffic"
 repository = "https://github.com/sauravrao637/oproxy"
@@ -14,25 +15,25 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-axum = "0.7"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
-rcgen = "0.11"
-rustls = "0.21"
-tokio-rustls = "0.24"
+tokio = { version = "1.52.3", features = ["full"] }
+axum = "0.8.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rcgen = "0.14"
+rustls = "0.23"
+tokio-rustls = "0.26"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1.0.150"
 serde_yaml = "0.9"
 paste = "1.0"
-tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.5", features = ["full"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-stream = "0.3.6"
 async-trait = "0.1"
-uuid = { version = "1.0", features = ["v4", "serde"] }
-regex = "1.10"
+uuid = { version = "1.23", features = ["v4", "serde"] }
+regex = "1.12"
 flate2 = "1"
-brotli = "3"
+brotli = "8"
 bytes = "1"
 indexmap = { version = "2", features = ["serde"] }
 hyper = { version = "1", features = ["http1", "http2", "server"] }
@@ -41,12 +42,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 tokio-stream = { version = "0.1", features = ["sync"] }
-thiserror = "1"
-futures-util = "=0.3.31"
-base64 = "0.21"
-similar = "2"
+thiserror = "2"
+futures-util = "0.3.32"
+base64 = "0.22"
+similar = "3"
 graphql-parser = "0.4"
-prost = "0.12"
-mlua = { version = "0.9", features = ["lua54", "vendored", "async", "send"] }
-hmac = "0.12"
-sha2 = "0.10"
+prost = "0.14"
+mlua = { version = "0.11", features = ["lua54", "vendored", "async", "send"] }
+hmac = "0.13"
+sha2 = "0.11"

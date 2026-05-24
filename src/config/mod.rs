@@ -2,16 +2,39 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
-fn default_timeout_secs() -> u64 { 30 }
-fn default_max_body_bytes() -> usize { 10 * 1024 * 1024 }
-fn default_pool_max_idle_per_host() -> usize { 10 }
-fn default_pool_idle_timeout_secs() -> u64 { 30 }
-fn default_max_sessions() -> usize { 10_000 }
-fn default_bind_host() -> String { "0.0.0.0".to_string() }
-fn default_log_level() -> String { "info".to_string() }
-fn default_log_dir() -> PathBuf { PathBuf::from(".") }
-fn default_log_file() -> String { "server.log".to_string() }
-fn default_inspect_ws_frames() -> bool { true }
+fn default_timeout_secs() -> u64 {
+    30
+}
+fn default_max_body_bytes() -> usize {
+    10 * 1024 * 1024
+}
+fn default_pool_max_idle_per_host() -> usize {
+    10
+}
+fn default_pool_idle_timeout_secs() -> u64 {
+    30
+}
+fn default_max_sessions() -> usize {
+    10_000
+}
+fn default_max_retained_body_bytes() -> usize {
+    64 * 1024 * 1024
+}
+fn default_bind_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_dir() -> PathBuf {
+    PathBuf::from(".")
+}
+fn default_log_file() -> String {
+    "server.log".to_string()
+}
+fn default_inspect_ws_frames() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogConfig {
@@ -59,6 +82,10 @@ pub struct Config {
     /// Maximum sessions retained in memory; oldest evicted when full.
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+    /// Approximate request/response body bytes retained across sessions.
+    /// Older bodies are dropped when the budget is exceeded; metadata stays.
+    #[serde(default = "default_max_retained_body_bytes")]
+    pub max_retained_body_bytes: usize,
     /// Optional second listener port that accepts TLS connections (HTTPS proxy).
     /// When set, the proxy accepts CONNECT and plain requests over TLS on this port.
     /// Requires the CA cert to be trusted by the client. Disabled by default.
@@ -100,6 +127,7 @@ impl Default for Config {
             pool_max_idle_per_host: default_pool_max_idle_per_host(),
             pool_idle_timeout_secs: default_pool_idle_timeout_secs(),
             max_sessions: default_max_sessions(),
+            max_retained_body_bytes: default_max_retained_body_bytes(),
             log: LogConfig::default(),
             https_port: None,
             inspect_ws_frames: default_inspect_ws_frames(),
@@ -132,7 +160,9 @@ impl Config {
         }
 
         if self.max_body_bytes == 0 {
-            warnings.push("max_body_bytes is 0 — request/response bodies will not be buffered".to_string());
+            warnings.push(
+                "max_body_bytes is 0 — request/response bodies will not be buffered".to_string(),
+            );
         }
 
         // Check storage path is writable by attempting a temp file.
@@ -163,8 +193,8 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let path = std::env::var("OPROXY_CONFIG")
-            .unwrap_or_else(|_| "./configs/default.yaml".to_string());
+        let path =
+            std::env::var("OPROXY_CONFIG").unwrap_or_else(|_| "./configs/default.yaml".to_string());
 
         let mut config = match std::fs::read_to_string(&path) {
             Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
@@ -190,7 +220,9 @@ impl Config {
                     info!(port = port, "OPROXY_PORT override applied");
                     config.port = port;
                 }
-                Err(_) => warn!(value = %port_str, "OPROXY_PORT is not a valid port number, ignoring"),
+                Err(_) => {
+                    warn!(value = %port_str, "OPROXY_PORT is not a valid port number, ignoring")
+                }
             }
         }
         if let Ok(val) = std::env::var("OPROXY_MITM_ENABLED") {
@@ -211,11 +243,37 @@ impl Config {
         if let Ok(val) = std::env::var("OPROXY_HTTPS_PORT") {
             match val.parse::<u16>() {
                 Ok(p) => config.https_port = Some(p),
-                Err(_) => warn!(value = %val, "OPROXY_HTTPS_PORT is not a valid port number, ignoring"),
+                Err(_) => {
+                    warn!(value = %val, "OPROXY_HTTPS_PORT is not a valid port number, ignoring")
+                }
             }
         }
         if let Ok(val) = std::env::var("OPROXY_INSPECT_WS_FRAMES") {
             config.inspect_ws_frames = !matches!(val.to_lowercase().as_str(), "0" | "false" | "no");
+        }
+        if let Ok(val) = std::env::var("OPROXY_MAX_BODY_BYTES") {
+            match val.parse::<usize>() {
+                Ok(v) => config.max_body_bytes = v,
+                Err(_) => {
+                    warn!(value = %val, "OPROXY_MAX_BODY_BYTES is not a valid byte count, ignoring")
+                }
+            }
+        }
+        if let Ok(val) = std::env::var("OPROXY_MAX_SESSIONS") {
+            match val.parse::<usize>() {
+                Ok(v) => config.max_sessions = v,
+                Err(_) => {
+                    warn!(value = %val, "OPROXY_MAX_SESSIONS is not a valid session count, ignoring")
+                }
+            }
+        }
+        if let Ok(val) = std::env::var("OPROXY_MAX_RETAINED_BODY_BYTES") {
+            match val.parse::<usize>() {
+                Ok(v) => config.max_retained_body_bytes = v,
+                Err(_) => {
+                    warn!(value = %val, "OPROXY_MAX_RETAINED_BODY_BYTES is not a valid byte count, ignoring")
+                }
+            }
         }
 
         for w in config.validate() {
@@ -239,12 +297,13 @@ mod tests {
     fn default_values() {
         let cfg = Config::default();
         assert_eq!(cfg.port, 8080);
-        assert_eq!(cfg.bind_host, "0.0.0.0");
+        assert_eq!(cfg.bind_host, "127.0.0.1");
         assert!(!cfg.mitm.enabled);
         assert_eq!(cfg.mitm.root_ca_path, PathBuf::from("./certs"));
         assert_eq!(cfg.storage_path, PathBuf::from("./storage"));
         assert_eq!(cfg.timeout_secs, 30);
         assert_eq!(cfg.max_body_bytes, 10 * 1024 * 1024);
+        assert_eq!(cfg.max_retained_body_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.pool_max_idle_per_host, 10);
         assert_eq!(cfg.pool_idle_timeout_secs, 30);
         assert_eq!(cfg.max_sessions, 10_000);
@@ -263,11 +322,14 @@ mod tests {
             std::env::remove_var("OPROXY_STORAGE_PATH");
         }
         let cfg = Config::load();
-        unsafe { std::env::remove_var("OPROXY_CONFIG"); }
+        unsafe {
+            std::env::remove_var("OPROXY_CONFIG");
+        }
         assert_eq!(cfg.port, 8080);
         assert!(!cfg.mitm.enabled);
         assert_eq!(cfg.timeout_secs, 30);
         assert_eq!(cfg.max_sessions, 10_000);
+        assert_eq!(cfg.max_retained_body_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
@@ -348,6 +410,27 @@ mod tests {
     }
 
     #[test]
+    fn capture_limit_env_vars_override_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
+            std::env::set_var("OPROXY_MAX_BODY_BYTES", "4096");
+            std::env::set_var("OPROXY_MAX_SESSIONS", "123");
+            std::env::set_var("OPROXY_MAX_RETAINED_BODY_BYTES", "8192");
+        }
+        let cfg = Config::load();
+        unsafe {
+            std::env::remove_var("OPROXY_CONFIG");
+            std::env::remove_var("OPROXY_MAX_BODY_BYTES");
+            std::env::remove_var("OPROXY_MAX_SESSIONS");
+            std::env::remove_var("OPROXY_MAX_RETAINED_BODY_BYTES");
+        }
+        assert_eq!(cfg.max_body_bytes, 4096);
+        assert_eq!(cfg.max_sessions, 123);
+        assert_eq!(cfg.max_retained_body_bytes, 8192);
+    }
+
+    #[test]
     fn oproxy_log_level_env_var() {
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
@@ -389,9 +472,19 @@ mod tests {
         assert_eq!(restored.storage_path, original.storage_path);
         assert_eq!(restored.timeout_secs, original.timeout_secs);
         assert_eq!(restored.max_body_bytes, original.max_body_bytes);
-        assert_eq!(restored.pool_max_idle_per_host, original.pool_max_idle_per_host);
-        assert_eq!(restored.pool_idle_timeout_secs, original.pool_idle_timeout_secs);
+        assert_eq!(
+            restored.pool_max_idle_per_host,
+            original.pool_max_idle_per_host
+        );
+        assert_eq!(
+            restored.pool_idle_timeout_secs,
+            original.pool_idle_timeout_secs
+        );
         assert_eq!(restored.max_sessions, original.max_sessions);
+        assert_eq!(
+            restored.max_retained_body_bytes,
+            original.max_retained_body_bytes
+        );
         assert_eq!(restored.log.level, original.log.level);
         assert_eq!(restored.log.dir, original.log.dir);
         assert_eq!(restored.log.file, original.log.file);
@@ -403,10 +496,11 @@ mod tests {
         let yaml = "port: 7777\nmitm:\n  enabled: false\n  root_ca_path: ./certs\nstorage_path: ./storage\n";
         let cfg: Config = serde_yaml::from_str(yaml).expect("deserialize failed");
         assert_eq!(cfg.port, 7777);
-        assert_eq!(cfg.bind_host, "0.0.0.0");
+        assert_eq!(cfg.bind_host, "127.0.0.1");
         assert_eq!(cfg.timeout_secs, 30);
         assert_eq!(cfg.max_body_bytes, 10 * 1024 * 1024);
         assert_eq!(cfg.max_sessions, 10_000);
+        assert_eq!(cfg.max_retained_body_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.file, "server.log");
     }
@@ -421,7 +515,9 @@ mod tests {
             std::env::remove_var("OPROXY_PORT");
         }
         let cfg = Config::load();
-        unsafe { std::env::remove_var("OPROXY_CONFIG"); }
+        unsafe {
+            std::env::remove_var("OPROXY_CONFIG");
+        }
         let _ = std::fs::remove_file(&path);
         assert_eq!(cfg.port, 7777);
         assert!(cfg.mitm.enabled);

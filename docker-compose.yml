@@ -2,15 +2,18 @@ services:
   oproxy:
     image: oproxy:latest
     build: .
-    ports:
-      - "8080:8080"
+    network_mode: host
     environment:
+      # The process must bind inside the container, but host publishing above
+      # keeps the admin UI/API and proxy reachable only from this machine.
+      OPROXY_BIND_HOST: "0.0.0.0"
       OPROXY_MITM_ENABLED: "true"
     volumes:
       # Persist root CA key/cert across container replacements.
       # Trust /app/certs/root.crt once; it never changes between restarts.
       - oproxy-certs:/app/certs
-      # Persist rules, sessions, and other state.
+      # Persist rules, hot config, and manually saved session files.
+      # The live session log is in memory unless you save it under /app/storage.
       - oproxy-storage:/app/storage
     restart: unless-stopped
 

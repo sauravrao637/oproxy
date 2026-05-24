@@ -12,9 +12,9 @@
 
 port: 8080
 
-# Bind to 0.0.0.0 to accept connections from all interfaces.
-# Use 127.0.0.1 to restrict to localhost only.
-bind_host: "0.0.0.0"
+# Local-only by default. Set OPROXY_BIND_HOST=0.0.0.0 only when you
+# intentionally want LAN clients to reach this proxy/admin API.
+bind_host: "127.0.0.1"
 
 # ── MITM / TLS ─────────────────────────────────────────────────────────────────
 
@@ -61,3 +61,7 @@ socks5_port: 1080
 
 # Maximum sessions retained in the in-memory traffic log.
 max_sessions: 10000
+
+# Approximate request/response body bytes retained across sessions.
+# Older bodies are discarded first while session metadata remains available.
+max_retained_body_bytes: 67108864

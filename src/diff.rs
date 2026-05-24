@@ -170,11 +170,18 @@ pub fn diff_exchanges(a: &Exchange, b: &Exchange) -> SessionDiff {
 mod tests {
     use super::*;
     use crate::middleware::{RequestContext, ResponseContext};
-    use crate::session::{Exchange, InspectionMetrics};
+    use crate::session::{Exchange, InspectionMetrics, SessionSource};
     use chrono::Utc;
     use std::collections::HashMap;
 
-    fn make_exchange(id: &str, method: &str, uri: &str, body: &str, status: u16, resp_body: &str) -> Exchange {
+    fn make_exchange(
+        id: &str,
+        method: &str,
+        uri: &str,
+        body: &str,
+        status: u16,
+        resp_body: &str,
+    ) -> Exchange {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         let mut resp_headers = HashMap::new();
@@ -209,6 +216,7 @@ mod tests {
                 status_code: status,
                 ..Default::default()
             }),
+            source: SessionSource::Proxy,
             ws_frames: vec![],
             note: None,
             tags: vec![],
@@ -274,27 +282,48 @@ mod tests {
     fn header_added_detected() {
         let a = make_exchange("a", "GET", "/api", "", 200, "");
         let mut b = make_exchange("b", "GET", "/api", "", 200, "");
-        b.request.headers.insert("x-custom".to_string(), "value".to_string());
+        b.request
+            .headers
+            .insert("x-custom".to_string(), "value".to_string());
         let diff = diff_exchanges(&a, &b);
-        assert!(diff.request_diff.headers_added.iter().any(|h| h.contains("x-custom")));
+        assert!(
+            diff.request_diff
+                .headers_added
+                .iter()
+                .any(|h| h.contains("x-custom"))
+        );
     }
 
     #[test]
     fn header_removed_detected() {
         let mut a = make_exchange("a", "GET", "/api", "", 200, "");
-        a.request.headers.insert("x-custom".to_string(), "value".to_string());
+        a.request
+            .headers
+            .insert("x-custom".to_string(), "value".to_string());
         let b = make_exchange("b", "GET", "/api", "", 200, "");
         let diff = diff_exchanges(&a, &b);
-        assert!(diff.request_diff.headers_removed.iter().any(|h| h.contains("x-custom")));
+        assert!(
+            diff.request_diff
+                .headers_removed
+                .iter()
+                .any(|h| h.contains("x-custom"))
+        );
     }
 
     #[test]
     fn header_changed_detected() {
         let a = make_exchange("a", "GET", "/api", "", 200, "");
         let mut b = make_exchange("b", "GET", "/api", "", 200, "");
-        b.request.headers.insert("content-type".to_string(), "text/plain".to_string());
+        b.request
+            .headers
+            .insert("content-type".to_string(), "text/plain".to_string());
         let diff = diff_exchanges(&a, &b);
-        assert!(diff.request_diff.headers_changed.iter().any(|c| c.name == "content-type"));
+        assert!(
+            diff.request_diff
+                .headers_changed
+                .iter()
+                .any(|c| c.name == "content-type")
+        );
     }
 
     #[test]

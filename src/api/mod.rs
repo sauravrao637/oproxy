@@ -92,6 +92,7 @@ impl ApiHandler {
         limit: Option<usize>,
         offset: Option<usize>,
         q: Option<&str>,
+        include_bodies: bool,
     ) -> SessionListResponse {
         let all = match q {
             Some(query) if !query.trim().is_empty() => self.session_manager.search_sessions(query),
@@ -100,19 +101,38 @@ impl ApiHandler {
         let total = all.len();
         let mut sessions: Vec<_> = if let Some(since_dt) = since {
             all.into_iter()
-                .filter(|e| e.timestamp > since_dt || e.response.is_none() || e.updated_at.map_or(false, |t| t > since_dt))
+                .filter(|e| {
+                    e.timestamp > since_dt
+                        || e.response.is_none()
+                        || e.updated_at.is_some_and(|t| t > since_dt)
+                })
                 .collect()
         } else {
             all
         };
-        sessions.sort_unstable_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sessions.sort_unstable_by_key(|session| std::cmp::Reverse(session.timestamp));
 
         let off = offset.unwrap_or(0);
-        let paged: Vec<_> = if let Some(lim) = limit {
+        let mut paged: Vec<_> = if let Some(lim) = limit {
             sessions.into_iter().skip(off).take(lim).collect()
         } else {
             sessions.into_iter().skip(off).collect()
         };
+
+        if !include_bodies {
+            for exchange in &mut paged {
+                exchange.request.body.clear();
+                exchange.request.body_bytes = None;
+                if let Some(response) = &mut exchange.response {
+                    response.body.clear();
+                    response.body_bytes = None;
+                }
+                for frame in &mut exchange.ws_frames {
+                    frame.payload_text = None;
+                    frame.payload_hex = None;
+                }
+            }
+        }
 
         SessionListResponse {
             sessions: paged,
@@ -130,14 +150,6 @@ impl ApiHandler {
 
     pub async fn clear_sessions(&self) {
         self.session_manager.clear_sessions();
-    }
-
-    pub async fn get_all_metrics(&self) -> Vec<crate::session::InspectionMetrics> {
-        self.session_manager
-            .get_all_sessions()
-            .into_iter()
-            .filter_map(|e| e.metrics)
-            .collect()
     }
 
     pub async fn add_rewrite_rule(&self, rule: RewriteRule) {
@@ -189,14 +201,6 @@ impl ApiHandler {
         rules.retain(|r| r.id != id);
     }
 
-    pub async fn list_breakpoints(&self) -> Vec<(String, BreakpointContext)> {
-        let pending = self.breakpoint_manager.pending.read().await;
-        pending
-            .iter()
-            .map(|(id, bp)| (id.clone(), bp.context.clone()))
-            .collect()
-    }
-
     pub async fn resolve_breakpoint(
         &self,
         id: String,
@@ -217,6 +221,10 @@ impl ApiHandler {
 
     pub async fn delete_breakpoint_rule(&self, id: &str) {
         self.breakpoint_manager.delete_rule(id).await;
+    }
+
+    pub async fn update_breakpoint_rule(&self, id: &str, rule: BreakpointRule) -> bool {
+        self.breakpoint_manager.update_rule(id, rule).await
     }
 
     pub async fn list_pending(&self) -> Vec<PendingBreakpointInfo> {
@@ -241,7 +249,9 @@ impl ApiHandler {
 
     pub async fn delete_modification(&self, index: usize) {
         let mut rules = self.modification_middleware.rules.write().await;
-        if index < rules.len() { rules.remove(index); }
+        if index < rules.len() {
+            rules.remove(index);
+        }
     }
 
     pub async fn annotate_session(
@@ -256,13 +266,13 @@ impl ApiHandler {
 
 /// Pretty-print a body string based on its content-type.
 /// Returns the original string unchanged if it cannot be pretty-printed.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn pretty_body(body: &str, content_type: &str) -> String {
-    if content_type.contains("application/json") || content_type.contains("/json") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Ok(s) = serde_json::to_string_pretty(&v) {
-                return s;
-            }
-        }
+    if (content_type.contains("application/json") || content_type.contains("/json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Ok(s) = serde_json::to_string_pretty(&v)
+    {
+        return s;
     }
     body.to_string()
 }
@@ -308,7 +318,7 @@ mod tests {
         let h = make_handler();
         h.session_manager.record_request("a".to_string(), req("/a"));
         h.session_manager.record_request("b".to_string(), req("/b"));
-        let r = h.list_sessions(None, None, None, None).await;
+        let r = h.list_sessions(None, None, None, None, true).await;
         assert_eq!(r.total, 2);
         assert_eq!(r.sessions.len(), 2);
     }
@@ -318,20 +328,27 @@ mod tests {
         let h = make_handler();
         h.session_manager.record_request("a".to_string(), req("/a"));
         // Attach a response so the session is "completed" — pending sessions always pass since filter.
-        h.session_manager.record_response("a".to_string(), ResponseContext {
-            status: 200,
-            headers: HashMap::new(),
-            body: String::new(),
-            request_uri: "/a".to_string(),
-            session_id: None,
-            ttfb_ms: 0,
-            body_ms: 0,
-            body_bytes: None,
-        });
+        h.session_manager.record_response(
+            "a".to_string(),
+            ResponseContext {
+                status: 200,
+                headers: HashMap::new(),
+                body: String::new(),
+                request_uri: "/a".to_string(),
+                session_id: None,
+                ttfb_ms: 0,
+                body_ms: 0,
+                body_bytes: None,
+            },
+        );
         let future = chrono::Utc::now() + chrono::Duration::hours(1);
-        let r = h.list_sessions(Some(future), None, None, None).await;
+        let r = h.list_sessions(Some(future), None, None, None, true).await;
         assert_eq!(r.total, 1);
-        assert_eq!(r.sessions.len(), 0, "completed session older than since must be excluded");
+        assert_eq!(
+            r.sessions.len(),
+            0,
+            "completed session older than since must be excluded"
+        );
     }
 
     #[tokio::test]
@@ -339,7 +356,7 @@ mod tests {
         let h = make_handler();
         h.session_manager.record_request("a".to_string(), req("/a"));
         let past = chrono::Utc::now() - chrono::Duration::hours(1);
-        let r = h.list_sessions(Some(past), None, None, None).await;
+        let r = h.list_sessions(Some(past), None, None, None, true).await;
         assert_eq!(r.sessions.len(), 1);
     }
 
@@ -349,21 +366,56 @@ mod tests {
     async fn list_sessions_limit_caps_results() {
         let h = make_handler();
         for i in 0..5u32 {
-            h.session_manager.record_request(format!("id-{i}"), req(&format!("/{i}")));
+            h.session_manager
+                .record_request(format!("id-{i}"), req(&format!("/{i}")));
         }
-        let r = h.list_sessions(None, Some(2), None, None).await;
+        let r = h.list_sessions(None, Some(2), None, None, true).await;
         assert_eq!(r.total, 5);
         assert_eq!(r.sessions.len(), 2);
         assert_eq!(r.limit, Some(2));
     }
 
     #[tokio::test]
+    async fn list_sessions_can_return_bodyless_summaries() {
+        let h = make_handler();
+        let mut request = req("/large");
+        request.body = "request-body".to_string();
+        h.session_manager.record_request("id1".to_string(), request);
+        h.session_manager.record_response(
+            "id1".to_string(),
+            ResponseContext {
+                status: 200,
+                headers: HashMap::new(),
+                body: "response-body".to_string(),
+                request_uri: "/large".to_string(),
+                session_id: None,
+                ttfb_ms: 0,
+                body_ms: 0,
+                body_bytes: None,
+            },
+        );
+
+        let summary = h.list_sessions(None, None, None, None, false).await;
+        assert_eq!(summary.sessions[0].request.body, "");
+        assert_eq!(
+            summary.sessions[0].response.as_ref().unwrap().body,
+            "",
+            "list summaries must not ship full bodies"
+        );
+
+        let detail = h.get_session_details("id1").await.unwrap();
+        assert_eq!(detail.exchange.request.body, "request-body");
+        assert_eq!(detail.exchange.response.unwrap().body, "response-body");
+    }
+
+    #[tokio::test]
     async fn list_sessions_offset_skips_entries() {
         let h = make_handler();
         for i in 0..5u32 {
-            h.session_manager.record_request(format!("id-{i}"), req(&format!("/{i}")));
+            h.session_manager
+                .record_request(format!("id-{i}"), req(&format!("/{i}")));
         }
-        let r = h.list_sessions(None, None, Some(3), None).await;
+        let r = h.list_sessions(None, None, Some(3), None, true).await;
         assert_eq!(r.total, 5);
         assert_eq!(r.sessions.len(), 2); // 5 - skip 3
         assert_eq!(r.offset, Some(3));
@@ -373,9 +425,10 @@ mod tests {
     async fn list_sessions_limit_and_offset() {
         let h = make_handler();
         for i in 0..10u32 {
-            h.session_manager.record_request(format!("id-{i}"), req(&format!("/{i}")));
+            h.session_manager
+                .record_request(format!("id-{i}"), req(&format!("/{i}")));
         }
-        let r = h.list_sessions(None, Some(3), Some(4), None).await;
+        let r = h.list_sessions(None, Some(3), Some(4), None, true).await;
         assert_eq!(r.total, 10);
         assert_eq!(r.sessions.len(), 3);
     }
@@ -383,8 +436,9 @@ mod tests {
     #[tokio::test]
     async fn list_sessions_offset_beyond_end_returns_empty() {
         let h = make_handler();
-        h.session_manager.record_request("id1".to_string(), req("/a"));
-        let r = h.list_sessions(None, None, Some(100), None).await;
+        h.session_manager
+            .record_request("id1".to_string(), req("/a"));
+        let r = h.list_sessions(None, None, Some(100), None, true).await;
         assert_eq!(r.total, 1);
         assert_eq!(r.sessions.len(), 0);
     }
@@ -394,7 +448,8 @@ mod tests {
     #[tokio::test]
     async fn get_session_details_returns_some_for_known_id() {
         let h = make_handler();
-        h.session_manager.record_request("x".to_string(), req("/detail"));
+        h.session_manager
+            .record_request("x".to_string(), req("/detail"));
         let detail = h.get_session_details("x").await;
         assert!(detail.is_some());
         assert_eq!(detail.unwrap().exchange.request.uri, "/detail");
@@ -414,7 +469,7 @@ mod tests {
         h.session_manager.record_request("a".to_string(), req("/a"));
         h.session_manager.record_request("b".to_string(), req("/b"));
         h.clear_sessions().await;
-        let r = h.list_sessions(None, None, None, None).await;
+        let r = h.list_sessions(None, None, None, None, true).await;
         assert_eq!(r.total, 0);
     }
 
@@ -425,7 +480,10 @@ mod tests {
         let raw = r#"{"b":2,"a":1}"#;
         let out = pretty_body(raw, "application/json");
         assert!(out.contains('\n'), "pretty JSON must be multi-line");
-        assert!(out.contains("\"a\": 1") || out.contains("\"b\": 2"), "keys must be present");
+        assert!(
+            out.contains("\"a\": 1") || out.contains("\"b\": 2"),
+            "keys must be present"
+        );
     }
 
     #[test]
@@ -461,6 +519,9 @@ mod tests {
         // "application/vnd.api+json" contains "+json" not "/json", so it falls through.
         let raw = r#"{"x":1}"#;
         let out = pretty_body(raw, "application/vnd.api+json");
-        assert_eq!(out, raw, "vendor +json types are not pretty-printed by current impl");
+        assert_eq!(
+            out, raw,
+            "vendor +json types are not pretty-printed by current impl"
+        );
     }
 }

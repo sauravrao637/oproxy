@@ -1,14 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="115" fill="#0A7AFF"/>
-  <!-- Arrows suggesting bidirectional proxy traffic -->
-  <g fill="none" stroke="#FFFFFF" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
-    <!-- Left-to-right arrow (top) -->
-    <line x1="100" y1="180" x2="320" y2="180"/>
-    <polyline points="280,140 320,180 280,220"/>
-    <!-- Right-to-left arrow (bottom) -->
-    <line x1="412" y1="332" x2="192" y2="332"/>
-    <polyline points="232,292 192,332 232,372"/>
-  </g>
-  <!-- Central node dot -->
-  <circle cx="256" cy="256" r="28" fill="#FFFFFF" opacity="0.9"/>
+  <defs>
+    <linearGradient id="bg" x1="96" y1="72" x2="416" y2="440" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2CCCEB"/>
+      <stop offset="1" stop-color="#5CA8FF"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="148" y1="118" x2="364" y2="394" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#071014"/>
+      <stop offset="1" stop-color="#10222A"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#11181F"/>
+  <rect x="44" y="44" width="424" height="424" rx="92" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="132" fill="none" stroke="url(#mark)" stroke-width="44"/>
+  <circle cx="256" cy="256" r="54" fill="#11181F"/>
+  <path d="M154 256h204" fill="none" stroke="#11181F" stroke-width="34" stroke-linecap="round"/>
+  <circle cx="154" cy="256" r="26" fill="#11181F"/>
+  <circle cx="358" cy="256" r="26" fill="#11181F"/>
 </svg>

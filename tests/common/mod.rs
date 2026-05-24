@@ -1,7 +1,7 @@
+use oproxy::core::engine::ProxyEngine;
+use oproxy::middleware::chain::MiddlewareChain;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use oproxy::middleware::chain::MiddlewareChain;
-use oproxy::core::engine::ProxyEngine;
 
 pub async fn create_test_engine() -> ProxyEngine {
     let chain = Arc::new(RwLock::new(MiddlewareChain::new()));

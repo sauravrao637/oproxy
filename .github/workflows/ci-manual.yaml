@@ -1,0 +1,37 @@
+name: Manual CI Checks
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rust-ui-browser:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/design/package-lock.json
+
+      - name: Build UI
+        run: |
+          npm ci --prefix src/design
+          npm run build --prefix src/design
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust tests
+        run: RUSTFLAGS="-D warnings" cargo test
+
+      - name: Browser smoke tests
+        working-directory: tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test --config=playwright.config.js specs/00-beta-smoke.spec.js specs/10-ssl.spec.js

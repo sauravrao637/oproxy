@@ -1,6 +1,5 @@
-use crate::session::{Exchange, SharedSessionManager};
+use crate::session::{Exchange, SessionSource, SharedSessionManager};
 use reqwest::Client;
-use std::sync::Arc;
 use tracing::{info, warn};
 
 pub struct PlaybackEngine {
@@ -34,9 +33,17 @@ impl PlaybackEngine {
             let mut builder = self.http_client.request(reqwest_method, &uri);
             for (name, value) in &exchange.request.headers {
                 // Skip hop-by-hop headers that shouldn't be re-sent.
-                if matches!(name.to_lowercase().as_str(),
-                    "host" | "connection" | "transfer-encoding" | "keep-alive"
-                    | "proxy-authenticate" | "proxy-authorization" | "te" | "trailer" | "upgrade"
+                if matches!(
+                    name.to_lowercase().as_str(),
+                    "host"
+                        | "connection"
+                        | "transfer-encoding"
+                        | "keep-alive"
+                        | "proxy-authenticate"
+                        | "proxy-authorization"
+                        | "te"
+                        | "trailer"
+                        | "upgrade"
                 ) {
                     continue;
                 }
@@ -58,7 +65,11 @@ impl PlaybackEngine {
                     let new_id = uuid::Uuid::new_v4().to_string();
                     let mut req_ctx = exchange.request.clone();
                     req_ctx.method = format!("[REPLAY] {}", req_ctx.method);
-                    self.session_manager.record_request(new_id.clone(), req_ctx);
+                    self.session_manager.record_request_with_source(
+                        new_id.clone(),
+                        req_ctx,
+                        SessionSource::Playback,
+                    );
                     let body = resp.text().await.unwrap_or_default();
                     self.session_manager.record_response(
                         new_id,

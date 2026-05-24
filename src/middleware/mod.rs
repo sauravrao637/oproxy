@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use std::collections::HashMap;
 use bytes::Bytes;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RequestContext {
@@ -34,7 +34,7 @@ pub struct ResponseContext {
     // Time to read response body after headers received.
     #[serde(default)]
     pub body_ms: u64,
-    /// Canonical bytes of the response body (decoded from gzip/br if needed).
+    /// Canonical bytes of the response body (decoded from gzip/deflate/br if needed).
     /// Engine uses these when no middleware modified `body`. Not serialised.
     #[serde(skip)]
     pub body_bytes: Option<Bytes>,
@@ -44,7 +44,8 @@ pub struct ResponseContext {
 pub enum MiddlewareAction {
     Continue,      // Proceed to next middleware
     StopAndReturn, // Stop chain and return current response (e.g., Map Local)
-    Pause,         // Halt execution (e.g., Breakpoint)
+    #[allow(dead_code)]
+    Pause, // Halt execution (e.g., Breakpoint)
 }
 
 #[async_trait]

@@ -1,42 +1,45 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::net::SocketAddr;
-use std::collections::HashMap;
 use tower::ServiceExt as _;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod core;
-mod middleware;
-mod session;
+mod api;
 mod certs;
 mod config;
-mod api;
-mod storage;
-mod management;
-mod setup;
+mod core;
+mod diff;
 mod export;
 mod har;
-mod diff;
-mod webhooks;
+mod management;
+mod middleware;
+mod redaction;
+mod session;
+mod setup;
+mod storage;
 mod transport;
+mod webhooks;
 
 use crate::api::ApiHandler;
 use crate::core::engine::ProxyEngine;
 use crate::middleware::chain::MiddlewareChain;
-use crate::middleware::plugins::routing::{RoutingMiddleware, ThrottlingMiddleware, ThrottlingConfig};
-use crate::middleware::plugins::inspection::InspectionMiddleware;
-use crate::middleware::plugins::modification::ModificationMiddleware;
-use crate::middleware::plugins::rewrite::RewriteMiddleware;
-use crate::middleware::plugins::breakpoints::{BreakpointMiddleware, BreakpointManager};
-use crate::middleware::plugins::capture_filter::{CaptureFilterMiddleware, CaptureFilterConfig};
+use crate::middleware::plugins::breakpoints::{BreakpointManager, BreakpointMiddleware};
+use crate::middleware::plugins::capture_filter::{CaptureFilterConfig, CaptureFilterMiddleware};
 use crate::middleware::plugins::dns_override::DnsOverrideMiddleware;
-use crate::middleware::plugins::header_map::HeaderMapMiddleware;
-use crate::middleware::plugins::jwt_inspector::JwtInspectorMiddleware;
 use crate::middleware::plugins::graphql_inspector::GraphQLInspectorMiddleware;
 use crate::middleware::plugins::grpc_inspector::GrpcInspectorMiddleware;
-use crate::middleware::plugins::mock::MockMiddleware;
+use crate::middleware::plugins::header_map::HeaderMapMiddleware;
+use crate::middleware::plugins::inspection::InspectionMiddleware;
+use crate::middleware::plugins::jwt_inspector::JwtInspectorMiddleware;
 use crate::middleware::plugins::lua_engine::LuaEngineMiddleware;
+use crate::middleware::plugins::mock::MockMiddleware;
+use crate::middleware::plugins::modification::ModificationMiddleware;
+use crate::middleware::plugins::rewrite::RewriteMiddleware;
+use crate::middleware::plugins::routing::{
+    RoutingMiddleware, ThrottlingConfig, ThrottlingMiddleware,
+};
 
 // Shared state threaded through every axum handler and the proxy engine.
 pub(crate) struct AppState {
@@ -48,10 +51,10 @@ pub(crate) struct AppState {
     pub(crate) map_local: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) capture_filter: Arc<RwLock<CaptureFilterConfig>>,
     pub(crate) session_manager: crate::session::SharedSessionManager,
-    pub(crate) breakpoint_manager: Arc<BreakpointManager>,
     pub(crate) api_handler: Arc<ApiHandler>,
     pub(crate) storage_path: std::path::PathBuf,
     pub(crate) started_at: std::time::Instant,
+    pub(crate) endpoint_metrics: crate::management::SharedEndpointMetrics,
     pub(crate) config: crate::config::Config,
     pub(crate) webhooks: crate::webhooks::SharedWebhooks,
     pub(crate) mock_rules: crate::middleware::plugins::mock::SharedMockRules,
@@ -76,9 +79,15 @@ fn setup_logging(config: &crate::config::Config) -> WorkerGuard {
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
     #[error("Invalid bind address '{addr}': {source}")]
-    InvalidAddr { addr: String, source: std::net::AddrParseError },
+    InvalidAddr {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
     #[error("Failed to bind listener on {addr}: {source}")]
-    BindFailed { addr: String, source: std::io::Error },
+    BindFailed {
+        addr: String,
+        source: std::io::Error,
+    },
     #[error("Failed to initialise certificate authority: {0}")]
     CaInit(String),
 }
@@ -87,7 +96,10 @@ enum StartupError {
 async fn main() -> Result<(), StartupError> {
     let config = crate::config::Config::load();
     let _guard = setup_logging(&config);
-    let session_manager = Arc::new(crate::session::SessionManager::new(config.max_sessions));
+    let session_manager = Arc::new(crate::session::SessionManager::with_body_budget(
+        config.max_sessions,
+        config.max_retained_body_bytes,
+    ));
 
     let storage_path = config.storage_path.clone();
 
@@ -102,31 +114,41 @@ async fn main() -> Result<(), StartupError> {
 
     let mut chain = MiddlewareChain::new();
     // CaptureFilter runs first: injects skip-recording header for filtered hosts.
-    chain.add_middleware(Arc::new(CaptureFilterMiddleware::new(capture_filter.clone())));
+    chain.add_middleware(Arc::new(CaptureFilterMiddleware::new(
+        capture_filter.clone(),
+    )));
     // DNS override must run before RoutingMiddleware so the host rewrite is visible to it.
-    chain.add_middleware(Arc::new(DnsOverrideMiddleware { overrides: dns_overrides.clone() }));
-    let map_local = Arc::new(tokio::sync::RwLock::new(storage::load_map_local(&storage_path)));
+    chain.add_middleware(Arc::new(DnsOverrideMiddleware {
+        overrides: dns_overrides.clone(),
+    }));
+    let map_local = Arc::new(tokio::sync::RwLock::new(storage::load_map_local(
+        &storage_path,
+    )));
     let routing_mw = Arc::new({
         let mut mw = RoutingMiddleware::new(routing_table.clone());
         mw.map_local = map_local.clone();
         mw
     });
     chain.add_middleware(routing_mw);
-    chain.add_middleware(Arc::new(ThrottlingMiddleware { config: throttling_config.clone() }));
+    chain.add_middleware(Arc::new(ThrottlingMiddleware {
+        config: throttling_config.clone(),
+    }));
 
     let rewrite_middleware = Arc::new(RewriteMiddleware::new(initial_rewrites));
     chain.add_middleware(rewrite_middleware.clone());
 
-    let header_map_middleware = Arc::new(HeaderMapMiddleware::new(
-        storage::load_header_maps(&storage_path),
-    ));
+    let header_map_middleware = Arc::new(HeaderMapMiddleware::new(storage::load_header_maps(
+        &storage_path,
+    )));
     chain.add_middleware(header_map_middleware.clone());
 
     let breakpoint_manager = Arc::new(BreakpointManager::new());
     for rule in storage::load_breakpoints(&storage_path) {
         breakpoint_manager.add_rule(rule).await;
     }
-    chain.add_middleware(Arc::new(BreakpointMiddleware::new(breakpoint_manager.clone())));
+    chain.add_middleware(Arc::new(BreakpointMiddleware::new(
+        breakpoint_manager.clone(),
+    )));
     // Inspector plugins run BEFORE InspectionMiddleware so they can set x-oproxy-jwt /
     // x-oproxy-graphql / x-oproxy-grpc headers that InspectionMiddleware reads on the
     // same on_request pass and stores into the session's inspector_data.
@@ -162,7 +184,9 @@ async fn main() -> Result<(), StartupError> {
         effective_max_body,
         config.pool_max_idle_per_host,
         config.pool_idle_timeout_secs,
-        upstream_proxy.as_deref().or(config.upstream_proxy.as_deref()),
+        upstream_proxy
+            .as_deref()
+            .or(config.upstream_proxy.as_deref()),
     ));
 
     let api_handler = Arc::new(ApiHandler::new(
@@ -180,14 +204,20 @@ async fn main() -> Result<(), StartupError> {
         dispatcher.spawn(session_manager.subscribe(), session_manager.clone());
         shared
     };
-    let mock_rules_shared = Arc::new(tokio::sync::RwLock::new(storage::load_mock_rules(&storage_path)));
-    let lua_scripts_shared = Arc::new(tokio::sync::RwLock::new(storage::load_lua_scripts(&storage_path)));
+    let mock_rules_shared = Arc::new(tokio::sync::RwLock::new(storage::load_mock_rules(
+        &storage_path,
+    )));
+    let lua_scripts_shared = Arc::new(tokio::sync::RwLock::new(storage::load_lua_scripts(
+        &storage_path,
+    )));
 
     // Wire Mock and Lua into the middleware chain now that their shared state is ready.
     {
         let mut chain = middleware_chain.write().await;
         chain.add_middleware(Arc::new(MockMiddleware::new(mock_rules_shared.clone())));
-        chain.add_middleware(Arc::new(LuaEngineMiddleware::new(lua_scripts_shared.clone())));
+        chain.add_middleware(Arc::new(LuaEngineMiddleware::new(
+            lua_scripts_shared.clone(),
+        )));
     }
 
     let state = Arc::new(AppState {
@@ -199,27 +229,32 @@ async fn main() -> Result<(), StartupError> {
         map_local: map_local.clone(),
         capture_filter: capture_filter.clone(),
         session_manager,
-        breakpoint_manager,
         api_handler,
         storage_path,
         started_at: std::time::Instant::now(),
+        endpoint_metrics: management::new_endpoint_metrics(),
         config: config.clone(),
         webhooks: webhooks_shared,
         mock_rules: mock_rules_shared,
         lua_scripts: lua_scripts_shared,
     });
 
-    let app = management::management_router(state.clone())
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            management::proxy_dispatch_layer,
-        ));
+    let app = management::management_router(state.clone()).layer(
+        axum::middleware::from_fn_with_state(state.clone(), management::proxy_dispatch_layer),
+    );
 
     let addr_str = format!("{}:{}", config.bind_host, config.port);
-    let addr: SocketAddr = addr_str.parse()
-        .map_err(|e| StartupError::InvalidAddr { addr: addr_str.clone(), source: e })?;
-    let listener = tokio::net::TcpListener::bind(addr).await
-        .map_err(|e| StartupError::BindFailed { addr: addr_str, source: e })?;
+    let addr: SocketAddr = addr_str.parse().map_err(|e| StartupError::InvalidAddr {
+        addr: addr_str.clone(),
+        source: e,
+    })?;
+    let listener =
+        tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| StartupError::BindFailed {
+                addr: addr_str,
+                source: e,
+            })?;
     println!("oproxy listening on http://{}", addr);
 
     // Optional HTTPS listener: binds on https_port (if configured) and terminates TLS
@@ -229,10 +264,10 @@ async fn main() -> Result<(), StartupError> {
         if let Some(https_port) = config.https_port {
             match ca.get_certificate_for_domain("localhost").await {
                 Ok((cert_der, key_der)) => {
-                    let cert_chain = vec![rustls::Certificate(cert_der)];
-                    let private_key = rustls::PrivateKey(key_der);
+                    let cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+                    let private_key: rustls::pki_types::PrivateKeyDer<'static> =
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(key_der).into();
                     match rustls::ServerConfig::builder()
-                        .with_safe_defaults()
                         .with_no_client_auth()
                         .with_single_cert(cert_chain, private_key)
                     {
@@ -240,12 +275,20 @@ async fn main() -> Result<(), StartupError> {
                             let tls_addr_str = format!("{}:{}", config.bind_host, https_port);
                             let tls_addr: SocketAddr = match tls_addr_str.parse() {
                                 Ok(a) => a,
-                                Err(e) => return Err(StartupError::InvalidAddr { addr: tls_addr_str, source: e }),
+                                Err(e) => {
+                                    return Err(StartupError::InvalidAddr {
+                                        addr: tls_addr_str,
+                                        source: e,
+                                    });
+                                }
                             };
                             match tokio::net::TcpListener::bind(tls_addr).await {
                                 Ok(tls_l) => {
                                     println!("oproxy HTTPS listener on https://{}", tls_addr);
-                                    Some((tls_l, tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg))))
+                                    Some((
+                                        tls_l,
+                                        tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg)),
+                                    ))
                                 }
                                 Err(e) => {
                                     tracing::warn!(error=%e, "Failed to bind HTTPS listener, continuing without it");
@@ -280,36 +323,62 @@ async fn main() -> Result<(), StartupError> {
                     loop {
                         let (mut stream, _peer) = match socks5_listener.accept().await {
                             Ok(pair) => pair,
-                            Err(e) => { tracing::warn!(error=%e, "SOCKS5 accept error"); continue; }
+                            Err(e) => {
+                                tracing::warn!(error=%e, "SOCKS5 accept error");
+                                continue;
+                            }
                         };
                         let engine = eng_s5.clone();
                         let dns = dns_s5.clone();
                         tokio::spawn(async move {
-                            let target = match crate::transport::socks5::handshake(&mut stream).await {
-                                Ok(t) => t,
-                                Err(e) => { tracing::debug!(error=%e, "SOCKS5 handshake failed"); return; }
-                            };
+                            let target =
+                                match crate::transport::socks5::handshake(&mut stream).await {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        tracing::debug!(error=%e, "SOCKS5 handshake failed");
+                                        return;
+                                    }
+                                };
                             // Apply DNS override
                             let resolved_host = {
                                 let ovr = dns.read().await;
-                                ovr.get(&target.host).cloned().unwrap_or_else(|| target.host.clone())
+                                ovr.get(&target.host)
+                                    .cloned()
+                                    .unwrap_or_else(|| target.host.clone())
                             };
                             let resolved = crate::transport::socks5::Socks5Target {
                                 host: resolved_host,
                                 port: target.port,
                             };
-                            if engine.mitm_enabled {
+                            if engine.mitm_enabled && is_tls_port(resolved.port) {
                                 if let Some(ca) = engine.ca.clone() {
+                                    if let Err(e) =
+                                        crate::transport::socks5::send_success_reply(&mut stream)
+                                            .await
+                                    {
+                                        tracing::debug!(error=%e, "SOCKS5 success reply failed");
+                                        return;
+                                    }
                                     // MITM path: intercept TLS same as HTTP CONNECT.
                                     // TcpStream implements AsyncRead+AsyncWrite directly.
-                                    mitm_intercept(stream, resolved.host.clone(), engine.clone(), ca).await;
+                                    mitm_intercept(
+                                        stream,
+                                        resolved.host.clone(),
+                                        engine.clone(),
+                                        ca,
+                                    )
+                                    .await;
                                 } else {
-                                    if let Err(e) = crate::transport::socks5::tunnel(stream, &resolved).await {
+                                    if let Err(e) =
+                                        crate::transport::socks5::tunnel(stream, &resolved).await
+                                    {
                                         tracing::debug!(error=%e, "SOCKS5 tunnel error");
                                     }
                                 }
                             } else {
-                                if let Err(e) = crate::transport::socks5::tunnel(stream, &resolved).await {
+                                if let Err(e) =
+                                    crate::transport::socks5::tunnel(stream, &resolved).await
+                                {
                                     tracing::debug!(error=%e, "SOCKS5 tunnel error");
                                 }
                             }
@@ -328,7 +397,7 @@ async fn main() -> Result<(), StartupError> {
     let shutdown = async {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler failed");
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
@@ -361,7 +430,10 @@ async fn main() -> Result<(), StartupError> {
             loop {
                 let (tcp_stream, _peer) = match tls_tcp.accept().await {
                     Ok(pair) => pair,
-                    Err(e) => { tracing::warn!(error=%e, "HTTPS accept error"); continue; }
+                    Err(e) => {
+                        tracing::warn!(error=%e, "HTTPS accept error");
+                        continue;
+                    }
                 };
                 match tls_acceptor.accept(tcp_stream).await {
                     Ok(tls_stream) => {
@@ -371,29 +443,36 @@ async fn main() -> Result<(), StartupError> {
                         let engine = eng_tls.clone();
                         let dns = dns_tls.clone();
                         tokio::spawn(async move {
-                            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                                let app = app.clone();
-                                let sm = sm.clone();
-                                let engine = engine.clone();
-                                let dns = dns.clone();
-                                async move {
-                                    if req.method() == hyper::Method::CONNECT {
-                                        return Ok::<_, std::convert::Infallible>(handle_connect(req, sm, engine, dns).await);
+                            let svc = hyper::service::service_fn(
+                                move |req: hyper::Request<hyper::body::Incoming>| {
+                                    let app = app.clone();
+                                    let sm = sm.clone();
+                                    let engine = engine.clone();
+                                    let dns = dns.clone();
+                                    async move {
+                                        if req.method() == hyper::Method::CONNECT {
+                                            return Ok::<_, std::convert::Infallible>(
+                                                handle_connect(req, sm, engine, dns).await,
+                                            );
+                                        }
+                                        if is_websocket_upgrade(&req) {
+                                            let sid = uuid::Uuid::new_v4().to_string();
+                                            return Ok::<_, std::convert::Infallible>(
+                                                handle_websocket(req, sm, sid, inspect_ws_frames)
+                                                    .await,
+                                            );
+                                        }
+                                        let req = req.map(axum::body::Body::new);
+                                        Ok(app.oneshot(req).await.unwrap_or_else(|e| match e {}))
                                     }
-                                    if is_websocket_upgrade(&req) {
-                                        let sid = uuid::Uuid::new_v4().to_string();
-                                        return Ok::<_, std::convert::Infallible>(
-                                            handle_websocket(req, sm, sid, inspect_ws_frames).await
-                                        );
-                                    }
-                                    let req = req.map(axum::body::Body::new);
-                                    Ok(app.oneshot(req).await.unwrap_or_else(|e| match e {}))
-                                }
-                            });
-                            hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                                .serve_connection_with_upgrades(io, svc)
-                                .await
-                                .ok();
+                                },
+                            );
+                            hyper_util::server::conn::auto::Builder::new(
+                                hyper_util::rt::TokioExecutor::new(),
+                            )
+                            .serve_connection_with_upgrades(io, svc)
+                            .await
+                            .ok();
                         });
                     }
                     Err(e) => tracing::debug!(error=%e, "HTTPS TLS handshake failed"),
@@ -414,7 +493,7 @@ async fn main() -> Result<(), StartupError> {
                 break;
             }
         };
-        let _ = peer;
+        tracing::debug!(peer = %peer, "new connection");
         let io = hyper_util::rt::TokioIo::new(stream);
         let app = app.clone();
         let sm = session_manager.clone();
@@ -422,25 +501,28 @@ async fn main() -> Result<(), StartupError> {
         let dns = dns_overrides.clone();
 
         tokio::spawn(async move {
-            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let app = app.clone();
-                let sm = sm.clone();
-                let engine = engine.clone();
-                let dns = dns.clone();
-                async move {
-                    if req.method() == hyper::Method::CONNECT {
-                        return Ok::<_, std::convert::Infallible>(handle_connect(req, sm, engine, dns).await);
+            let svc =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    let sm = sm.clone();
+                    let engine = engine.clone();
+                    let dns = dns.clone();
+                    async move {
+                        if req.method() == hyper::Method::CONNECT {
+                            return Ok::<_, std::convert::Infallible>(
+                                handle_connect(req, sm, engine, dns).await,
+                            );
+                        }
+                        if is_websocket_upgrade(&req) {
+                            let sid = uuid::Uuid::new_v4().to_string();
+                            return Ok::<_, std::convert::Infallible>(
+                                handle_websocket(req, sm, sid, inspect_ws_frames).await,
+                            );
+                        }
+                        let req = req.map(axum::body::Body::new);
+                        Ok(app.oneshot(req).await.unwrap_or_else(|e| match e {}))
                     }
-                    if is_websocket_upgrade(&req) {
-                        let sid = uuid::Uuid::new_v4().to_string();
-                        return Ok::<_, std::convert::Infallible>(
-                            handle_websocket(req, sm, sid, inspect_ws_frames).await
-                        );
-                    }
-                    let req = req.map(axum::body::Body::new);
-                    Ok(app.oneshot(req).await.unwrap_or_else(|e| match e {}))
-                }
-            });
+                });
 
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                 .serve_connection_with_upgrades(io, svc)
@@ -449,6 +531,11 @@ async fn main() -> Result<(), StartupError> {
         });
     }
     Ok(())
+}
+
+/// Common TLS ports for MITM interception in SOCKS5 mode.
+fn is_tls_port(port: u16) -> bool {
+    matches!(port, 443 | 8443 | 4443)
 }
 
 fn is_websocket_upgrade(req: &hyper::Request<hyper::body::Incoming>) -> bool {
@@ -467,10 +554,18 @@ async fn handle_connect(
     engine: Arc<ProxyEngine>,
     dns_overrides: Arc<RwLock<HashMap<String, String>>>,
 ) -> hyper::Response<axum::body::Body> {
-    let host = req.uri().authority().map(|a| a.to_string()).unwrap_or_default();
+    let host = req
+        .uri()
+        .authority()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     // Apply DNS override before connecting: replace IP while keeping original port.
     let addr = {
-        let raw = if host.contains(':') { host.clone() } else { format!("{}:443", host) };
+        let raw = if host.contains(':') {
+            host.clone()
+        } else {
+            format!("{}:443", host)
+        };
         let ovr = dns_overrides.read().await;
         if !ovr.is_empty() {
             let (hostname, port_part) = raw.split_once(':').unwrap_or((&raw, "443"));
@@ -490,14 +585,17 @@ async fn handle_connect(
     let is_mitm = engine.mitm_enabled && engine.ca.is_some();
     let session_id = uuid::Uuid::new_v4().to_string();
     if !is_mitm {
-        sm.record_request(session_id.clone(), crate::middleware::RequestContext {
-            method: "CONNECT".to_string(),
-            uri: format!("https://{}", host),
-            headers: std::collections::HashMap::new(),
-            body: String::new(),
-            host: host.clone(),
-            body_bytes: None,
-        });
+        sm.record_request(
+            session_id.clone(),
+            crate::middleware::RequestContext {
+                method: "CONNECT".to_string(),
+                uri: format!("https://{}", host),
+                headers: std::collections::HashMap::new(),
+                body: String::new(),
+                host: host.clone(),
+                body_bytes: None,
+            },
+        );
     }
 
     let on_upgrade = hyper::upgrade::on(req);
@@ -506,11 +604,17 @@ async fn handle_connect(
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(upgraded) => {
-                if engine.mitm_enabled {
-                    if let Some(ca) = engine.ca.clone() {
-                        mitm_intercept(hyper_util::rt::TokioIo::new(upgraded), hostname.clone(), engine.clone(), ca).await;
-                        return;
-                    }
+                if engine.mitm_enabled
+                    && let Some(ca) = engine.ca.clone()
+                {
+                    mitm_intercept(
+                        hyper_util::rt::TokioIo::new(upgraded),
+                        hostname.clone(),
+                        engine.clone(),
+                        ca,
+                    )
+                    .await;
+                    return;
                 }
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(mut upstream) => {
@@ -522,7 +626,11 @@ async fn handle_connect(
                             crate::middleware::ResponseContext {
                                 status: 200,
                                 headers: std::collections::HashMap::new(),
-                                body: format!("↑{} ↓{}", fmt_bytes(to_server), fmt_bytes(to_client)),
+                                body: format!(
+                                    "↑{} ↓{}",
+                                    fmt_bytes(to_server),
+                                    fmt_bytes(to_client)
+                                ),
                                 request_uri: format!("https://{}", host),
                                 session_id: Some(session_id),
                                 ttfb_ms: 0,
@@ -599,10 +707,10 @@ async fn mitm_intercept<IO>(
         }
     };
 
-    let cert_chain = vec![rustls::Certificate(cert_der)];
-    let private_key = rustls::PrivateKey(key_der);
+    let cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+    let private_key: rustls::pki_types::PrivateKeyDer<'static> =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(key_der).into();
     let server_config = match rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(cert_chain, private_key)
     {
@@ -719,7 +827,11 @@ async fn read_ws_frame<R: tokio::io::AsyncRead + Unpin>(
     reader.read_exact(&mut payload).await?;
     raw.extend_from_slice(&payload);
     let decoded = if let Some(key) = mask_key {
-        payload.iter().enumerate().map(|(i, &b)| b ^ key[i % 4]).collect()
+        payload
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| b ^ key[i % 4])
+            .collect()
     } else {
         payload
     };
@@ -752,18 +864,26 @@ async fn relay_ws_frames<R, W>(
         } else {
             let chunk = &decoded[..decoded.len().min(64)];
             let mut hex = String::with_capacity(chunk.len() * 2);
-            for b in chunk { use std::fmt::Write as _; let _ = write!(hex, "{:02x}", b); }
+            for b in chunk {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{:02x}", b);
+            }
             (None, if hex.is_empty() { None } else { Some(hex) })
         };
-        sm.append_ws_frame(&session_id, crate::session::WsFrame {
-            timestamp: chrono::Utc::now(),
-            direction: direction.clone(),
-            opcode,
-            payload_len,
-            payload_text,
-            payload_hex,
-        });
-        if opcode == 0x8 { break; }
+        sm.append_ws_frame(
+            &session_id,
+            crate::session::WsFrame {
+                timestamp: chrono::Utc::now(),
+                direction: direction.clone(),
+                opcode,
+                payload_len,
+                payload_text,
+                payload_hex,
+            },
+        );
+        if opcode == 0x8 {
+            break;
+        }
     }
 }
 
@@ -872,14 +992,17 @@ async fn handle_websocket(
             req_headers_map.insert(k.to_string(), v.to_string());
         }
     }
-    sm.record_request(session_id.clone(), crate::middleware::RequestContext {
-        method: "WS".to_string(),
-        uri: format!("ws://{}:{}{}", target_host, port, path_and_query),
-        headers: req_headers_map,
-        body: String::new(),
-        host: target_host.clone(),
-        body_bytes: None,
-    });
+    sm.record_request(
+        session_id.clone(),
+        crate::middleware::RequestContext {
+            method: "WS".to_string(),
+            uri: format!("ws://{}:{}{}", target_host, port, path_and_query),
+            headers: req_headers_map,
+            body: String::new(),
+            host: target_host.clone(),
+            body_bytes: None,
+        },
+    );
 
     // Bytes read past \r\n\r\n belong to the WS data stream.
     let header_end = header_buf
@@ -899,7 +1022,9 @@ async fn handle_websocket(
                         use tokio::io::AsyncWriteExt;
                         let _ = client_io.write_all(&leftover).await;
                     }
-                    if let Err(e) = tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await {
+                    if let Err(e) =
+                        tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await
+                    {
                         tracing::debug!(error=%e, "WS tunnel closed");
                     }
                     return;
@@ -913,11 +1038,17 @@ async fn handle_websocket(
                 let sm_c = sm.clone();
                 let sid_c = session_id.clone();
                 let mut task_c = tokio::spawn(relay_ws_frames(
-                    client_read, server_tcp_write, sm_c, sid_c,
+                    client_read,
+                    server_tcp_write,
+                    sm_c,
+                    sid_c,
                     crate::session::WsDirection::ClientToServer,
                 ));
                 let mut task_s = tokio::spawn(relay_ws_frames(
-                    server_read, client_write, sm, session_id,
+                    server_read,
+                    client_write,
+                    sm,
+                    session_id,
                     crate::session::WsDirection::ServerToClient,
                 ));
                 tokio::select! {
@@ -929,18 +1060,20 @@ async fn handle_websocket(
         }
     });
 
-    builder
-        .body(axum::body::Body::empty())
-        .unwrap_or_else(|_| {
-            hyper::Response::builder()
-                .status(500)
-                .body(axum::body::Body::empty())
-                .unwrap()
-        })
+    builder.body(axum::body::Body::empty()).unwrap_or_else(|_| {
+        hyper::Response::builder()
+            .status(500)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    })
 }
 
 fn fmt_bytes(n: u64) -> String {
-    if n < 1024 { format!("{n}B") }
-    else if n < 1_048_576 { format!("{:.1}KB", n as f64 / 1024.0) }
-    else { format!("{:.1}MB", n as f64 / 1_048_576.0) }
+    if n < 1024 {
+        format!("{n}B")
+    } else if n < 1_048_576 {
+        format!("{:.1}KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", n as f64 / 1_048_576.0)
+    }
 }

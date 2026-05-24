@@ -1,15 +1,27 @@
+use crate::middleware::RequestContext;
 use crate::session::Exchange;
-use crate::middleware::{RequestContext, ResponseContext};
 
 // ── Export ────────────────────────────────────────────────────────────────────
 
 pub fn export_as_curl(ex: &Exchange) -> String {
+    export_as_curl_with_redaction(ex, true)
+}
+
+pub fn export_as_curl_raw(ex: &Exchange) -> String {
+    export_as_curl_with_redaction(ex, false)
+}
+
+fn export_as_curl_with_redaction(ex: &Exchange, redact: bool) -> String {
     let req = &ex.request;
     let mut parts: Vec<String> = vec![format!("curl -X {} '{}'", req.method, req.uri)];
+    let headers = if redact {
+        crate::redaction::redact_headers(&req.headers)
+    } else {
+        req.headers.clone()
+    };
 
-    for (k, v) in &req.headers {
-        let kl = k.to_lowercase();
-        if kl == "content-length" || kl == "transfer-encoding" {
+    for (k, v) in &headers {
+        if should_skip_replay_header(k) {
             continue;
         }
         let escaped = v.replace('\'', "'\\''");
@@ -17,7 +29,12 @@ pub fn export_as_curl(ex: &Exchange) -> String {
     }
 
     if !req.body.is_empty() {
-        let escaped = req.body.replace('\'', "'\\''");
+        let body = if redact {
+            crate::redaction::redact_body_text(&req.body)
+        } else {
+            req.body.clone()
+        };
+        let escaped = body.replace('\'', "'\\''");
         parts.push(format!("--data '{}'", escaped));
     }
 
@@ -25,15 +42,26 @@ pub fn export_as_curl(ex: &Exchange) -> String {
 }
 
 pub fn export_as_fetch(ex: &Exchange) -> String {
+    export_as_fetch_with_redaction(ex, true)
+}
+
+pub fn export_as_fetch_raw(ex: &Exchange) -> String {
+    export_as_fetch_with_redaction(ex, false)
+}
+
+fn export_as_fetch_with_redaction(ex: &Exchange, redact: bool) -> String {
     let req = &ex.request;
     let method = req.method.as_str();
+    let headers = if redact {
+        crate::redaction::redact_headers(&req.headers)
+    } else {
+        req.headers.clone()
+    };
 
-    let headers_obj: Vec<String> = req.headers.iter()
-        .filter(|(k, _)| {
-            let kl = k.to_lowercase();
-            kl != "content-length" && kl != "transfer-encoding"
-        })
-        .map(|(k, v)| format!("    \"{}\": \"{}\"", k, v.replace('"', "\\\"")))
+    let headers_obj: Vec<String> = headers
+        .iter()
+        .filter(|(k, _)| !should_skip_replay_header(k))
+        .map(|(k, v)| format!("    {}: {}", js_string(k), js_string(v)))
         .collect();
 
     let mut opts_parts = vec![
@@ -42,7 +70,12 @@ pub fn export_as_fetch(ex: &Exchange) -> String {
     ];
 
     if !req.body.is_empty() {
-        opts_parts.push(format!("  body: \"{}\"", req.body.replace('"', "\\\"")));
+        let body = if redact {
+            crate::redaction::redact_body_text(&req.body)
+        } else {
+            req.body.clone()
+        };
+        opts_parts.push(format!("  body: {}", js_string(&body)));
     }
 
     format!(
@@ -53,14 +86,25 @@ pub fn export_as_fetch(ex: &Exchange) -> String {
 }
 
 pub fn export_as_python(ex: &Exchange) -> String {
-    let req = &ex.request;
+    export_as_python_with_redaction(ex, true)
+}
 
-    let headers_entries: Vec<String> = req.headers.iter()
-        .filter(|(k, _)| {
-            let kl = k.to_lowercase();
-            kl != "content-length" && kl != "transfer-encoding"
-        })
-        .map(|(k, v)| format!("    \"{}\": \"{}\"", k, v.replace('"', "\\\"")))
+pub fn export_as_python_raw(ex: &Exchange) -> String {
+    export_as_python_with_redaction(ex, false)
+}
+
+fn export_as_python_with_redaction(ex: &Exchange, redact: bool) -> String {
+    let req = &ex.request;
+    let headers = if redact {
+        crate::redaction::redact_headers(&req.headers)
+    } else {
+        req.headers.clone()
+    };
+
+    let headers_entries: Vec<String> = headers
+        .iter()
+        .filter(|(k, _)| !should_skip_replay_header(k))
+        .map(|(k, v)| format!("    {}: {}", python_string(k), python_string(v)))
         .collect();
 
     let headers_str = format!("{{\n{}\n}}", headers_entries.join(",\n"));
@@ -68,16 +112,50 @@ pub fn export_as_python(ex: &Exchange) -> String {
     let body_line = if req.body.is_empty() {
         String::new()
     } else {
-        let escaped = req.body.replace('"', "\\\"").replace('\n', "\\n");
-        format!("\ndata = \"{}\"\n", escaped)
+        let body = if redact {
+            crate::redaction::redact_body_text(&req.body)
+        } else {
+            req.body.clone()
+        };
+        format!("\ndata = {}\n", python_string(&body))
     };
 
-    let data_arg = if req.body.is_empty() { "" } else { ", data=data" };
+    let data_arg = if req.body.is_empty() {
+        ""
+    } else {
+        ", data=data"
+    };
 
     format!(
         "import requests\n\nurl = \"{}\"\nheaders = {}{}\nresponse = requests.request(\"{}\", url, headers=headers{})\nprint(response.text)",
         req.uri, headers_str, body_line, req.method, data_arg
     )
+}
+
+fn should_skip_replay_header(header: &str) -> bool {
+    let header = header.trim().to_ascii_lowercase();
+    matches!(
+        header.as_str(),
+        "host"
+            | "content-length"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    ) || header.starts_with("x-oproxy-")
+}
+
+fn js_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn python_string(value: &str) -> String {
+    format!("{:?}", value)
 }
 
 // ── Import (parse curl command) ───────────────────────────────────────────────
@@ -94,21 +172,26 @@ pub struct ParsedCurl {
 /// Handles: `-X METHOD`, `-H 'Name: Value'`, `--data`/`-d`/`--data-raw`, URL.
 /// Strips shell line continuations (`\` + newline) before parsing.
 pub fn parse_curl(input: &str) -> Result<ParsedCurl, String> {
-    // Normalise: strip leading "curl", collapse line continuations, tokenise.
-    let normalised = input
-        .trim()
-        .trim_start_matches("curl")
-        .replace("\\\n", " ")
-        .replace("\\\r\n", " ");
+    // Normalise line continuations, then tokenise the full command so invalid
+    // free-form text cannot be mistaken for a URL.
+    let normalised = input.trim().replace("\\\n", " ").replace("\\\r\n", " ");
 
     let tokens = tokenise_shell(&normalised)?;
+    if tokens.is_empty() {
+        return Err("No curl command found".to_string());
+    }
+    let command = tokens[0].rsplit('/').next().unwrap_or(tokens[0].as_str());
+    if command != "curl" {
+        return Err("Input must start with curl".to_string());
+    }
+
     let mut out = ParsedCurl {
         method: String::new(),
         url: String::new(),
         headers: std::collections::HashMap::new(),
         body: String::new(),
     };
-    let mut i = 0usize;
+    let mut i = 1usize;
     while i < tokens.len() {
         match tokens[i].as_str() {
             "-X" | "--request" => {
@@ -119,10 +202,11 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl, String> {
             }
             "-H" | "--header" => {
                 i += 1;
-                if i < tokens.len() {
-                    if let Some((k, v)) = tokens[i].split_once(':') {
-                        out.headers.insert(k.trim().to_string(), v.trim().to_string());
-                    }
+                if i < tokens.len()
+                    && let Some((k, v)) = tokens[i].split_once(':')
+                {
+                    out.headers
+                        .insert(k.trim().to_string(), v.trim().to_string());
                 }
             }
             "-d" | "--data" | "--data-raw" | "--data-binary" | "--data-ascii" => {
@@ -150,10 +234,21 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl, String> {
     if out.url.is_empty() {
         return Err("No URL found in curl command".to_string());
     }
+    validate_http_url(&out.url)?;
     if out.method.is_empty() {
         out.method = if out.body.is_empty() { "GET" } else { "POST" }.to_string();
     }
+    reqwest::Method::from_bytes(out.method.as_bytes())
+        .map_err(|_| format!("Invalid HTTP method: {}", out.method))?;
     Ok(out)
+}
+
+fn validate_http_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => Err(format!("Unsupported URL scheme: {scheme}")),
+    }
 }
 
 /// Minimal POSIX-style shell tokeniser: handles single-quoted, double-quoted,
@@ -230,14 +325,22 @@ impl From<ParsedCurl> for RequestContext {
             headers: p.headers,
             body: p.body.clone(),
             host,
-            body_bytes: if p.body.is_empty() { None } else { Some(bytes::Bytes::from(p.body.into_bytes())) },
+            body_bytes: if p.body.is_empty() {
+                None
+            } else {
+                Some(bytes::Bytes::from(p.body.into_bytes()))
+            },
         }
     }
 }
 
 fn extract_host(url: &str) -> String {
     // Strip scheme then take up to the first / or end.
-    let rest = if let Some(r) = url.find("://").map(|i| &url[i + 3..]) { r } else { url };
+    let rest = if let Some(r) = url.find("://").map(|i| &url[i + 3..]) {
+        r
+    } else {
+        url
+    };
     rest.split('/').next().unwrap_or("").to_string()
 }
 
@@ -246,13 +349,15 @@ fn extract_host(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Exchange;
-    use crate::middleware::{RequestContext, ResponseContext};
+    use crate::middleware::RequestContext;
+    use crate::session::{Exchange, SessionSource};
     use chrono::Utc;
 
     fn make_exchange(method: &str, uri: &str, headers: Vec<(&str, &str)>, body: &str) -> Exchange {
         let mut hmap = std::collections::HashMap::new();
-        for (k, v) in headers { hmap.insert(k.to_string(), v.to_string()); }
+        for (k, v) in headers {
+            hmap.insert(k.to_string(), v.to_string());
+        }
         Exchange {
             id: "test-id".to_string(),
             timestamp: Utc::now(),
@@ -267,6 +372,7 @@ mod tests {
             },
             response: None,
             metrics: None,
+            source: SessionSource::Proxy,
             ws_frames: vec![],
             note: None,
             tags: vec![],
@@ -278,7 +384,12 @@ mod tests {
 
     #[test]
     fn curl_get_no_body() {
-        let ex = make_exchange("GET", "https://example.com/api", vec![("accept", "application/json")], "");
+        let ex = make_exchange(
+            "GET",
+            "https://example.com/api",
+            vec![("accept", "application/json")],
+            "",
+        );
         let out = export_as_curl(&ex);
         assert!(out.contains("curl -X GET 'https://example.com/api'"));
         assert!(out.contains("-H 'accept: application/json'"));
@@ -287,7 +398,12 @@ mod tests {
 
     #[test]
     fn curl_post_with_body() {
-        let ex = make_exchange("POST", "https://example.com/api", vec![("content-type", "application/json")], r#"{"key":"val"}"#);
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/api",
+            vec![("content-type", "application/json")],
+            r#"{"key":"val"}"#,
+        );
         let out = export_as_curl(&ex);
         assert!(out.contains("curl -X POST"));
         assert!(out.contains("--data"));
@@ -296,9 +412,36 @@ mod tests {
 
     #[test]
     fn curl_strips_content_length_header() {
-        let ex = make_exchange("POST", "https://example.com/", vec![("content-length", "42"), ("x-custom", "yes")], "body");
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/",
+            vec![("content-length", "42"), ("x-custom", "yes")],
+            "body",
+        );
         let out = export_as_curl(&ex);
         assert!(!out.contains("content-length"));
+        assert!(out.contains("x-custom"));
+    }
+
+    #[test]
+    fn curl_strips_internal_and_hop_by_hop_headers() {
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/",
+            vec![
+                ("host", "example.com"),
+                ("proxy-connection", "Keep-Alive"),
+                ("x-oproxy-session-id", "sid"),
+                ("connection", "close"),
+                ("x-custom", "yes"),
+            ],
+            "body",
+        );
+        let out = export_as_curl(&ex);
+        assert!(!out.contains("host:"));
+        assert!(!out.contains("proxy-connection"));
+        assert!(!out.contains("x-oproxy-session-id"));
+        assert!(!out.contains("connection:"));
         assert!(out.contains("x-custom"));
     }
 
@@ -307,6 +450,35 @@ mod tests {
         let ex = make_exchange("GET", "https://x.com/", vec![("x-val", "it's here")], "");
         let out = export_as_curl(&ex);
         assert!(out.contains("it'\\''s here"));
+    }
+
+    #[test]
+    fn curl_redacts_sensitive_headers_and_body_by_default() {
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/",
+            vec![("authorization", "Bearer raw-token")],
+            r#"{"password":"raw-password","name":"dev"}"#,
+        );
+        let out = export_as_curl(&ex);
+
+        assert!(out.contains(crate::redaction::REDACTED));
+        assert!(!out.contains("raw-token"));
+        assert!(!out.contains("raw-password"));
+    }
+
+    #[test]
+    fn raw_curl_preserves_sensitive_values_for_explicit_use() {
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/",
+            vec![("authorization", "Bearer raw-token")],
+            r#"{"password":"raw-password"}"#,
+        );
+        let out = export_as_curl_raw(&ex);
+
+        assert!(out.contains("raw-token"));
+        assert!(out.contains("raw-password"));
     }
 
     // ── export_as_fetch ───────────────────────────────────────────────────────
@@ -326,6 +498,21 @@ mod tests {
         let out = export_as_fetch(&ex);
         assert!(out.contains("\"POST\""));
         assert!(out.contains("body:"));
+    }
+
+    #[test]
+    fn fetch_uses_valid_json_string_for_multiline_redacted_body() {
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/",
+            vec![("content-type", "application/json")],
+            r#"{"token":"raw-token","name":"dev"}"#,
+        );
+        let out = export_as_fetch(&ex);
+
+        assert!(out.contains(r#"body: "{\n  \"name\": \"dev\",\n  \"token\": \"[redacted]\"\n}""#));
+        assert!(!out.contains("body: \"{\n"));
+        assert!(!out.contains("raw-token"));
     }
 
     // ── export_as_python ──────────────────────────────────────────────────────
@@ -369,7 +556,10 @@ mod tests {
         let c = parse_curl(r#"curl -X POST https://api.example.com/create -H 'Content-Type: application/json' -d '{"name":"test"}'"#).unwrap();
         assert_eq!(c.method, "POST");
         assert_eq!(c.url, "https://api.example.com/create");
-        assert_eq!(c.headers.get("Content-Type").map(String::as_str), Some("application/json"));
+        assert_eq!(
+            c.headers.get("Content-Type").map(String::as_str),
+            Some("application/json")
+        );
         assert!(c.body.contains("name"));
     }
 
@@ -401,10 +591,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_text_that_is_not_curl() {
+        let err = parse_curl("not curl").unwrap_err();
+        assert!(err.contains("start with curl"));
+    }
+
+    #[test]
+    fn parse_rejects_non_http_url() {
+        let err = parse_curl("curl file:///tmp/data").unwrap_err();
+        assert!(err.contains("Unsupported URL scheme"));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_method() {
+        let err = parse_curl("curl -X 'BAD METHOD' https://example.com/").unwrap_err();
+        assert!(err.contains("Invalid HTTP method"));
+    }
+
+    #[test]
     fn parse_multiple_headers() {
-        let c = parse_curl(r#"curl https://x.com -H 'Accept: */*' -H 'Authorization: Bearer tok'"#).unwrap();
+        let c = parse_curl(r#"curl https://x.com -H 'Accept: */*' -H 'Authorization: Bearer tok'"#)
+            .unwrap();
         assert_eq!(c.headers.get("Accept").map(String::as_str), Some("*/*"));
-        assert_eq!(c.headers.get("Authorization").map(String::as_str), Some("Bearer tok"));
+        assert_eq!(
+            c.headers.get("Authorization").map(String::as_str),
+            Some("Bearer tok")
+        );
     }
 
     #[test]

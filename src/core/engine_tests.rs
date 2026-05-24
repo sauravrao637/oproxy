@@ -1,29 +1,57 @@
 #[cfg(test)]
 mod tests {
     use crate::core::engine::ProxyEngine;
-    use crate::session::SessionManager;
+    use crate::middleware::chain::MiddlewareChain;
     use crate::middleware::plugins::inspection::InspectionMiddleware;
     use crate::middleware::plugins::routing::RoutingMiddleware;
-    use crate::middleware::{RequestContext, ResponseContext, Middleware};
+    use crate::middleware::{Middleware, RequestContext, ResponseContext};
+    use crate::session::SessionManager;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::{Router, routing::get};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
-    use crate::middleware::chain::MiddlewareChain;
 
     fn req(uri: &str, host: &str) -> RequestContext {
-        RequestContext { method: "GET".to_string(), uri: uri.to_string(), headers: HashMap::new(), body: "".to_string(), host: host.to_string(), body_bytes: None }
+        RequestContext {
+            method: "GET".to_string(),
+            uri: uri.to_string(),
+            headers: HashMap::new(),
+            body: "".to_string(),
+            host: host.to_string(),
+            body_bytes: None,
+        }
     }
 
     #[tokio::test]
     async fn engine_created_with_mitm_disabled() {
-        let engine = ProxyEngine::new(Arc::new(RwLock::new(MiddlewareChain::new())), None, false, 30, 10*1024*1024, 10, 30, None);
+        let engine = ProxyEngine::new(
+            Arc::new(RwLock::new(MiddlewareChain::new())),
+            None,
+            false,
+            30,
+            10 * 1024 * 1024,
+            10,
+            30,
+            None,
+        );
         assert!(!engine.mitm_enabled);
         assert!(engine.ca.is_none());
     }
 
     #[tokio::test]
     async fn engine_created_with_mitm_enabled_flag() {
-        let engine = ProxyEngine::new(Arc::new(RwLock::new(MiddlewareChain::new())), None, true, 30, 10*1024*1024, 10, 30, None);
+        let engine = ProxyEngine::new(
+            Arc::new(RwLock::new(MiddlewareChain::new())),
+            None,
+            true,
+            30,
+            10 * 1024 * 1024,
+            10,
+            30,
+            None,
+        );
         assert!(engine.mitm_enabled);
     }
 
@@ -73,23 +101,43 @@ mod tests {
     #[tokio::test]
     async fn engine_strips_internal_headers_before_forward() {
         let mut headers: HashMap<String, String> = HashMap::new();
-        headers.insert("x-oproxy-destination".to_string(), "http://10.0.0.1".to_string());
+        headers.insert(
+            "x-oproxy-destination".to_string(),
+            "http://10.0.0.1".to_string(),
+        );
         headers.insert("x-oproxy-session-id".to_string(), "some-uuid".to_string());
         headers.insert("accept".to_string(), "text/html".to_string());
 
         headers.remove("x-oproxy-destination");
         headers.remove("x-oproxy-session-id");
 
-        assert!(!headers.contains_key("x-oproxy-destination"), "destination header must be stripped");
-        assert!(!headers.contains_key("x-oproxy-session-id"), "session ID header must be stripped");
-        assert!(headers.contains_key("accept"), "legitimate headers must be preserved");
+        assert!(
+            !headers.contains_key("x-oproxy-destination"),
+            "destination header must be stripped"
+        );
+        assert!(
+            !headers.contains_key("x-oproxy-session-id"),
+            "session ID header must be stripped"
+        );
+        assert!(
+            headers.contains_key("accept"),
+            "legitimate headers must be preserved"
+        );
     }
 
     /// Hop-by-hop headers are illegal in HTTP/2 and must be stripped before forwarding.
     #[tokio::test]
     async fn engine_strips_hop_by_hop_headers() {
-        let hop_by_hop = ["connection", "keep-alive", "proxy-connection", "transfer-encoding",
-                          "te", "trailer", "trailers", "upgrade"];
+        let hop_by_hop = [
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "transfer-encoding",
+            "te",
+            "trailer",
+            "trailers",
+            "upgrade",
+        ];
         let mut headers: HashMap<String, String> = HashMap::new();
         for h in &hop_by_hop {
             headers.insert(h.to_string(), "value".to_string());
@@ -101,9 +149,15 @@ mod tests {
         }
 
         for h in &hop_by_hop {
-            assert!(!headers.contains_key(*h), "hop-by-hop header '{h}' must be stripped");
+            assert!(
+                !headers.contains_key(*h),
+                "hop-by-hop header '{h}' must be stripped"
+            );
         }
-        assert!(headers.contains_key("content-type"), "non-hop-by-hop header must survive");
+        assert!(
+            headers.contains_key("content-type"),
+            "non-hop-by-hop header must survive"
+        );
     }
 
     // ── is_binary_content_type ───────────────────────────────────────────────
@@ -111,7 +165,13 @@ mod tests {
     #[test]
     fn binary_ct_image_types_are_binary() {
         use crate::core::engine::is_binary_content_type;
-        for ct in &["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"] {
+        for ct in &[
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/svg+xml",
+        ] {
             assert!(is_binary_content_type(ct), "{ct} must be binary");
         }
     }
@@ -154,5 +214,48 @@ mod tests {
         assert!(is_binary_content_type("image/png; charset=utf-8"));
         // "application/json; charset=utf-8" must NOT be binary
         assert!(!is_binary_content_type("application/json; charset=utf-8"));
+    }
+
+    #[tokio::test]
+    async fn forward_proxy_returns_non_empty_response_body() {
+        let upstream_app = Router::new().route(
+            "/",
+            get(|| async { "proxy-body-regression-guard" }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let engine = Arc::new(ProxyEngine::new(
+            Arc::new(RwLock::new(MiddlewareChain::new())),
+            None,
+            false,
+            30,
+            10 * 1024 * 1024,
+            10,
+            30,
+            None,
+        ));
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/", upstream_addr.port()))
+            .header("host", format!("127.0.0.1:{}", upstream_addr.port()))
+            .body(Body::empty())
+            .unwrap();
+
+        let res = engine.handle_request(req).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            !bytes.is_empty(),
+            "proxied response body must not be empty for successful upstream responses"
+        );
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("proxy-body-regression-guard"));
     }
 }

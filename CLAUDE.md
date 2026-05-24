@@ -9,23 +9,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo build
 cargo build --release
 
-# Run all tests (MUST use --lib, not cargo test alone)
-cargo test --lib
+# Build the React UI assets required by Rust include_str! routes
+npm ci --prefix src/design
+npm run build --prefix src/design
+
+# Run all Rust tests with release warning policy
+RUSTFLAGS="-D warnings" cargo test
 
 # Run a single test by name
-cargo test --lib <test_name>
+cargo test <test_name>
 
 # Run tests in a specific module
-cargo test --lib middleware::plugins::jwt_inspector
+cargo test middleware::plugins::jwt_inspector
 
 # Lint
 cargo clippy -- -D warnings
 
-# Run the proxy
+# Run the proxy. A clean checkout will build src/design/dist automatically
+# if Node/npm are available; explicit UI build is still faster in CI.
 cargo run
 ```
 
-> **Critical:** `cargo test --lib` uses `src/lib.rs` as the test root, not `main.rs`. Any new module with tests MUST be declared in **both** `src/lib.rs` (`pub mod foo;`) and `src/main.rs` (`mod foo;`). Modules only in `main.rs` are invisible to the test runner.
+> **Critical:** run the full test suite before release, not only `cargo test --lib`. Browser tests live under `tests/browser` and use Playwright.
 
 ## Architecture
 
@@ -68,7 +73,7 @@ pub trait Middleware: Send + Sync {
 `StopAndReturn` returns 403 by default. To return a custom response (mock, Lua abort), embed a JSON payload in `ctx.headers["x-oproxy-mock-response"]` before returning `StopAndReturn`. The engine reads and serves it.
 
 **Middleware chain insertion order** (main.rs):
-`CaptureFilter → DnsOverride → Routing → Throttling → Rewrite → HeaderMap → Breakpoint → Inspection → Modification → (Inspector plugins: JWT, GraphQL, gRPC, Mock, Lua)`
+`CaptureFilter → DnsOverride → Routing → Throttling → Rewrite → HeaderMap → Breakpoint → JWT Inspector → GraphQL Inspector → gRPC Inspector → Inspection → Modification → Mock → Lua`
 
 ### Internal header protocol
 
@@ -150,4 +155,6 @@ Key env vars: `OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_
 
 ## UI
 
-Static files served inline by `management.rs`: `src/index.html`, `src/app.css`, `src/js/state.js`, `src/js/traffic.js`, `src/js/compose.js`, `src/js/rules.js`. Phase 2 features (diff, webhooks, mock server, scripts, inspectors) have REST APIs but **no UI panels yet**.
+The current app shell is built from `src/design` with Vite. `management.rs` serves the built files from `src/design/dist` via `include_str!`, so clean Rust builds need those assets. `build.rs` generates them automatically when missing; Docker and GitHub workflows build the UI explicitly before compiling Rust.
+
+The legacy static files under `src/index.html`, `src/app.css`, and `src/js/` are still present for older surfaces and compatibility, but `/` serves the built design app. The design app includes Sessions, Compose, Rules, Breakpoints, Mock, Lua, Inspectors, DNS, Capture Filter, Webhooks, Root CA, and Settings surfaces.

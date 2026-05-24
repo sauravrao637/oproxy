@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
@@ -71,15 +71,16 @@ impl JwtInspectorMiddleware {
 
 #[async_trait]
 impl Middleware for JwtInspectorMiddleware {
-    fn name(&self) -> &str { "JwtInspectorMiddleware" }
+    fn name(&self) -> &str {
+        "JwtInspectorMiddleware"
+    }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
-        if let Some(token) = Self::extract_jwt(&ctx.headers) {
-            if let Some(info) = Self::decode_jwt(&token) {
-                if let Ok(json) = serde_json::to_string(&info) {
-                    ctx.headers.insert("x-oproxy-jwt".to_string(), json);
-                }
-            }
+        if let Some(token) = Self::extract_jwt(&ctx.headers)
+            && let Some(info) = Self::decode_jwt(&token)
+            && let Ok(json) = serde_json::to_string(&info)
+        {
+            ctx.headers.insert("x-oproxy-jwt".to_string(), json);
         }
         MiddlewareAction::Continue
     }
@@ -92,7 +93,7 @@ impl Middleware for JwtInspectorMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::collections::HashMap;
 
     fn make_jwt(header: &str, payload: &str) -> String {
@@ -148,7 +149,10 @@ mod tests {
 
     #[test]
     fn decode_valid_jwt_parses_header_and_claims() {
-        let token = make_jwt(r#"{"alg":"HS256","typ":"JWT"}"#, r#"{"sub":"user","iss":"test"}"#);
+        let token = make_jwt(
+            r#"{"alg":"HS256","typ":"JWT"}"#,
+            r#"{"sub":"user","iss":"test"}"#,
+        );
         let info = JwtInspectorMiddleware::decode_jwt(&token).unwrap();
         assert_eq!(info.header["alg"], "HS256");
         assert_eq!(info.claims["sub"], "user");

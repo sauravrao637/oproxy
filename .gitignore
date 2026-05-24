@@ -1,5 +1,7 @@
 # ── Rust ───────────────────────────────────────────────────────────────────────
 /target
+node_modules/
+src/design/dist/
 
 # ── CA certificates ────────────────────────────────────────────────────────────
 # Generated automatically on first run — NEVER commit the private key.
@@ -15,8 +17,13 @@ server.log
 server.log.*
 tests/browser/server.log.*
 
-# ── Browser tests ──────────────────────────────────────────────────────────────
-tests/browser/
+# ── Browser test artifacts ─────────────────────────────────────────────────────
+tests/browser/node_modules/
+tests/browser/report/
+tests/browser/test-results/
+tests/browser/certs/
+tests/browser/storage/
+tests/browser/capture.js
 
 #MCPs
 .playwright-mcp

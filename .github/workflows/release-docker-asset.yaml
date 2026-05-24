@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-and-push-ghcr:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write # Grants permission to push to the registry
@@ -15,6 +15,46 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/design/package-lock.json
+
+      - name: Build UI
+        run: |
+          npm ci --prefix src/design
+          npm run build --prefix src/design
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust tests
+        run: RUSTFLAGS="-D warnings" cargo test
+
+      - name: Runtime asset sanity
+        run: |
+          test -f src/design/dist/index.html
+          test -f src/design/dist/assets/app.js
+          test -f src/design/dist/assets/app.css
+          ! grep -R "text/babel\\|unpkg\\|cdn.jsdelivr\\|fonts.googleapis\\|fonts.gstatic" src/design/dist src/management.rs
+          ! grep -R "Trust status\\|oproxy probes the OS keychain\\|Command palette\\|command palette\\|Save session log\\|Pause / resume recording" src/design/dist
+
+      - name: Resolve image tag
+        id: image
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            {
+              echo "tags<<EOF"
+              echo "ghcr.io/${{ github.repository_owner }}/oproxy:${{ github.event.release.tag_name }}"
+              echo "ghcr.io/${{ github.repository_owner }}/oproxy:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=ghcr.io/${{ github.repository_owner }}/oproxy:manual-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
 
       # Installs the emulator needed to build Apple Silicon (arm64) code on an Ubuntu runner
       - name: Set up QEMU
@@ -39,6 +79,4 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/oproxy:${{ github.event.release.tag_name }}
-            ghcr.io/${{ github.repository_owner }}/oproxy:latest
+          tags: ${{ steps.image.outputs.tags }}

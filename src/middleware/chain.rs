@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -21,17 +20,10 @@ impl MiddlewareChain {
 
     /// Returns the names of all registered middlewares in execution order.
     pub fn list_plugins(&self) -> Vec<String> {
-        self.middlewares.iter().map(|m| m.name().to_string()).collect()
-    }
-
-    /// Removes the first middleware whose `name()` matches. Returns true if removed.
-    pub fn remove_plugin(&mut self, name: &str) -> bool {
-        if let Some(pos) = self.middlewares.iter().position(|m| m.name() == name) {
-            self.middlewares.remove(pos);
-            true
-        } else {
-            false
-        }
+        self.middlewares
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect()
     }
 
     #[instrument(skip(self, ctx))]
@@ -62,6 +54,12 @@ impl MiddlewareChain {
     }
 }
 
+impl Default for MiddlewareChain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,7 +78,9 @@ mod tests {
 
     #[async_trait]
     impl Middleware for OrderMiddleware {
-        fn name(&self) -> &str { self.label }
+        fn name(&self) -> &str {
+            self.label
+        }
         async fn on_request(&self, _ctx: &mut RequestContext) -> MiddlewareAction {
             self.order.lock().unwrap().push(self.label);
             self.req_action
@@ -92,31 +92,63 @@ mod tests {
     }
 
     fn req() -> RequestContext {
-        RequestContext { method: "GET".to_string(), uri: "/".to_string(), headers: HashMap::new(), body: "".to_string(), host: "localhost".to_string(), body_bytes: None }
+        RequestContext {
+            method: "GET".to_string(),
+            uri: "/".to_string(),
+            headers: HashMap::new(),
+            body: "".to_string(),
+            host: "localhost".to_string(),
+            body_bytes: None,
+        }
     }
 
     fn res() -> ResponseContext {
-        ResponseContext { status: 200, headers: HashMap::new(), body: "".to_string(), request_uri: "/".to_string(), session_id: None, ttfb_ms: 0, body_ms: 0, body_bytes: None }
+        ResponseContext {
+            status: 200,
+            headers: HashMap::new(),
+            body: "".to_string(),
+            request_uri: "/".to_string(),
+            session_id: None,
+            ttfb_ms: 0,
+            body_ms: 0,
+            body_bytes: None,
+        }
     }
 
     #[tokio::test]
     async fn empty_chain_returns_continue_for_request() {
         let chain = MiddlewareChain::new();
-        assert_eq!(chain.execute_request(&mut req()).await, MiddlewareAction::Continue);
+        assert_eq!(
+            chain.execute_request(&mut req()).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
     async fn empty_chain_returns_continue_for_response() {
         let chain = MiddlewareChain::new();
-        assert_eq!(chain.execute_response(&mut res()).await, MiddlewareAction::Continue);
+        assert_eq!(
+            chain.execute_response(&mut res()).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
     async fn request_middlewares_run_in_insertion_order() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut chain = MiddlewareChain::new();
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "A", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "B", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "A",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "B",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
         chain.execute_request(&mut req()).await;
         assert_eq!(*order.lock().unwrap(), vec!["A", "B"]);
     }
@@ -125,8 +157,18 @@ mod tests {
     async fn response_middlewares_run_in_reverse_order() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut chain = MiddlewareChain::new();
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "A", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "B", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "A",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "B",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
         chain.execute_response(&mut res()).await;
         assert_eq!(*order.lock().unwrap(), vec!["B", "A"]);
     }
@@ -135,11 +177,25 @@ mod tests {
     async fn stop_and_return_short_circuits_request_chain() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut chain = MiddlewareChain::new();
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "A", order: order.clone(), req_action: MiddlewareAction::StopAndReturn, res_action: MiddlewareAction::Continue }));
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "B", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "A",
+            order: order.clone(),
+            req_action: MiddlewareAction::StopAndReturn,
+            res_action: MiddlewareAction::Continue,
+        }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "B",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
         let action = chain.execute_request(&mut req()).await;
         assert_eq!(action, MiddlewareAction::StopAndReturn);
-        assert_eq!(*order.lock().unwrap(), vec!["A"], "B must not run after StopAndReturn");
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["A"],
+            "B must not run after StopAndReturn"
+        );
     }
 
     #[tokio::test]
@@ -147,19 +203,43 @@ mod tests {
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut chain = MiddlewareChain::new();
         // B is added second → runs FIRST on response (reverse order)
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "A", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "B", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::StopAndReturn }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "A",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "B",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::StopAndReturn,
+        }));
         let action = chain.execute_response(&mut res()).await;
         assert_eq!(action, MiddlewareAction::StopAndReturn);
-        assert_eq!(*order.lock().unwrap(), vec!["B"], "A must not run after B returns StopAndReturn");
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["B"],
+            "A must not run after B returns StopAndReturn"
+        );
     }
 
     #[tokio::test]
     async fn pause_action_short_circuits_and_is_propagated() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut chain = MiddlewareChain::new();
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "A", order: order.clone(), req_action: MiddlewareAction::Pause, res_action: MiddlewareAction::Continue }));
-        chain.add_middleware(Arc::new(OrderMiddleware { label: "B", order: order.clone(), req_action: MiddlewareAction::Continue, res_action: MiddlewareAction::Continue }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "A",
+            order: order.clone(),
+            req_action: MiddlewareAction::Pause,
+            res_action: MiddlewareAction::Continue,
+        }));
+        chain.add_middleware(Arc::new(OrderMiddleware {
+            label: "B",
+            order: order.clone(),
+            req_action: MiddlewareAction::Continue,
+            res_action: MiddlewareAction::Continue,
+        }));
         let action = chain.execute_request(&mut req()).await;
         assert_eq!(action, MiddlewareAction::Pause);
         assert_eq!(*order.lock().unwrap(), vec!["A"]);
