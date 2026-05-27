@@ -3,266 +3,482 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>oproxy — Mobile Setup</title>
+  <title>oproxy — Client Setup</title>
   <style>
     :root {
-      --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a;
-      --border: #2e3347; --text: #e2e8f0; --muted: #8892a4;
-      --accent: #6366f1; --success: #10b981; --warn: #f59e0b;
-      --radius: 10px; --font: 'Inter', system-ui, sans-serif;
+      --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a; --surface3: #1e2235;
+      --border: #2e3347; --text: #e2e8f0; --muted: #8892a4; --faint: #4b5568;
+      --accent: #6366f1; --success: #10b981; --warn: #f59e0b; --danger: #ef4444;
+      --radius: 10px; --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', 'Fira Code', monospace;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: var(--bg); color: var(--text); font-family: var(--font);
-      min-height: 100vh; padding: 24px 16px; }
-    .container { max-width: 640px; margin: 0 auto; }
-    header { text-align: center; padding-bottom: 32px; border-bottom: 1px solid var(--border); margin-bottom: 32px; }
-    header h1 { font-size: 24px; font-weight: 700; color: var(--accent); }
-    header p { color: var(--muted); margin-top: 6px; font-size: 14px; }
+      min-height: 100vh; padding: 24px 16px 48px; }
+    .container { max-width: 700px; margin: 0 auto; }
+
+    header { text-align: center; padding-bottom: 28px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+    .logo { display: inline-flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .logo-mark { width: 32px; height: 32px; border-radius: 8px; background: var(--accent);
+      display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 16px; color: #fff; }
+    header h1 { font-size: 20px; font-weight: 700; color: var(--text); }
+    header p { color: var(--muted); margin-top: 6px; font-size: 13px; }
+
     .step { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 20px; margin-bottom: 20px; }
+      padding: 20px; margin-bottom: 14px; }
+    .step-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
     .step-num { display: inline-flex; align-items: center; justify-content: center;
-      width: 28px; height: 28px; border-radius: 50%; background: var(--accent);
-      color: #fff; font-size: 13px; font-weight: 700; margin-right: 10px; flex-shrink: 0; }
-    .step-header { display: flex; align-items: center; margin-bottom: 14px; }
-    .step-title { font-weight: 600; font-size: 15px; }
-    .proxy-info { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 6px; }
-    .info-card { background: var(--surface2); border-radius: 8px; padding: 12px 16px; }
-    .info-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
-    .info-value { font-size: 18px; font-weight: 700; margin-top: 4px; font-family: monospace; color: var(--text); }
-    .qr-wrapper { display: flex; justify-content: center; padding: 20px 0 8px; }
-    #qr-canvas { border-radius: 8px; background: #fff; padding: 12px; }
-    .qr-label { text-align: center; font-size: 12px; color: var(--muted); margin-top: 8px; }
-    .ca-btn { display: block; width: 100%; padding: 12px; background: var(--accent);
-      color: #fff; border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
-      cursor: pointer; text-align: center; text-decoration: none; margin-top: 14px;
-      transition: opacity 0.15s; }
+      width: 26px; height: 26px; border-radius: 50%; background: var(--accent);
+      color: #fff; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+    .step-title { font-weight: 600; font-size: 14.5px; }
+    .step-sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 6px; }
+
+    /* ── Proxy address cards ── */
+    .addr-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .addr-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+    .addr-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+    .addr-value { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); word-break: break-all; }
+    .addr-sub { font-size: 11px; color: var(--faint); margin-top: 4px; }
+    .addr-card.primary { border-color: rgba(99,102,241,0.4); }
+    .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.03em; }
+    .badge-on  { background: rgba(16,185,129,0.12); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
+    .badge-off { background: rgba(75,85,104,0.2); color: var(--faint); border: 1px solid var(--border); }
+    .badge-warn { background: rgba(245,158,11,0.12); color: var(--warn); border: 1px solid rgba(245,158,11,0.3); }
+
+    .config-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 20px;
+      font-size: 11.5px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); }
+    .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .dot-on { background: var(--success); }
+    .dot-off { background: var(--faint); }
+    .dot-warn { background: var(--warn); }
+
+    /* ── Notes ── */
+    .note { background: rgba(99,102,241,0.07); border: 1px solid rgba(99,102,241,0.2);
+      border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+    .warn-note { background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.25);
+      border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+    .info-note { background: rgba(99,102,241,0.05); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+
+    /* ── URL box ── */
+    .url-row { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; font-family: var(--mono); font-size: 12.5px; color: var(--text);
+      word-break: break-all; margin: 10px 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .copy-btn { background: var(--surface3); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px 10px; white-space: nowrap; font-family: var(--font); }
+    .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+    .ca-btn { display: block; width: 100%; padding: 11px; background: var(--accent);
+      color: #fff; border: none; border-radius: 8px; font-size: 13.5px; font-weight: 600;
+      cursor: pointer; text-align: center; text-decoration: none; margin-top: 12px; transition: opacity 0.15s; }
     .ca-btn:hover { opacity: 0.85; }
-    .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
-    .tab { padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border);
-      background: transparent; color: var(--muted); font-size: 13px; cursor: pointer;
-      transition: all 0.15s; }
+
+    /* ── Platform tabs ── */
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tab { padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border);
+      background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer; transition: all 0.15s; }
     .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
     .platform { display: none; }
     .platform.active { display: block; }
+
     ol { padding-left: 20px; }
-    ol li { margin-bottom: 10px; line-height: 1.6; font-size: 14px; color: var(--text); }
-    code { background: var(--surface2); padding: 2px 7px; border-radius: 4px;
-      font-family: monospace; font-size: 13px; color: var(--warn); }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
-      font-weight: 600; margin-left: 6px; vertical-align: middle; }
-    .badge-ok { background: rgba(16,185,129,0.15); color: var(--success); }
-    .note { background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.3);
-      border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--muted);
-      margin-top: 12px; line-height: 1.6; }
-    .loader { text-align: center; padding: 20px; color: var(--muted); font-size: 14px; }
+    ol li { margin-bottom: 9px; line-height: 1.65; font-size: 13.5px; color: var(--text); }
+    ul { padding-left: 16px; margin: 6px 0; }
+    ul li { margin-bottom: 5px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+    code { background: var(--surface2); padding: 1px 6px; border-radius: 4px;
+      font-family: var(--mono); font-size: 12px; color: var(--warn); }
+    pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 14px; margin: 8px 0; overflow-x: auto; }
+    pre code { background: transparent; padding: 0; color: #a5b4fc; font-size: 12px; line-height: 1.7; }
+    pre .cm { color: var(--faint); }
+    pre .kw { color: #f472b6; }
+    pre .str { color: #86efac; }
+    pre .var { color: var(--warn); }
+    strong { color: var(--text); }
+    .loader { text-align: center; padding: 16px; color: var(--muted); font-size: 13px; }
+
+    .section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--faint); margin-bottom: 6px; margin-top: 14px; }
   </style>
 </head>
 <body>
 <div class="container">
   <header>
-    <h1>📱 Mobile Device Setup</h1>
-    <p>Proxy your mobile device's traffic through oproxy in 3 steps</p>
+    <div class="logo">
+      <div class="logo-mark">o</div>
+      <h1>oproxy — Client Setup Guide</h1>
+    </div>
+    <p>Point any device or tool at oproxy to capture and inspect its traffic</p>
+    <p style="margin-top:8px;color:var(--muted);font-size:12.5px">Mobile Device Setup</p>
   </header>
 
-  <!-- Step 1: Connect to same network -->
+  <!-- Step 1: Proxy address -->
   <div class="step">
     <div class="step-header">
       <span class="step-num">1</span>
-      <span class="step-title">Connect device to same Wi-Fi network as this computer</span>
+      <div>
+        <span class="step-title">Proxy address</span>
+      </div>
     </div>
-    <div id="info-loading" class="loader">Detecting network info…</div>
+
+    <div id="info-loading" class="loader">Detecting proxy configuration…</div>
+
     <div id="proxy-info" style="display:none">
-      <div class="proxy-info">
-        <div class="info-card">
-          <div class="info-label">Proxy Host</div>
-          <div class="info-value" id="lan-ip">—</div>
+      <!-- Current config pills -->
+      <div class="config-pills" id="config-pills"></div>
+
+      <div class="addr-grid">
+        <div class="addr-card primary">
+          <div class="addr-label">This machine</div>
+          <div class="addr-value" id="localhost-addr">127.0.0.1:8080</div>
+          <div class="addr-sub">Use for apps running on this computer</div>
         </div>
-        <div class="info-card">
-          <div class="info-label">Proxy Port</div>
-          <div class="info-value" id="proxy-port">—</div>
+        <div class="addr-card" id="lan-card">
+          <div class="addr-label">Other devices  <span id="lan-badge"></span></div>
+          <div class="addr-value" id="lan-addr">—</div>
+          <div class="addr-sub" id="lan-sub">LAN IP for phones, VMs, or remote hosts</div>
         </div>
       </div>
-      <div id="mitm-note" class="note" style="display:none">
-        ⚠️ MITM is <strong>enabled</strong> — you must also install the CA certificate (Step 2) to inspect HTTPS traffic.
+
+      <div id="socks5-row" style="display:none; margin-top:8px;">
+        <div class="addr-card">
+          <div class="addr-label">SOCKS5 proxy  <span class="badge badge-on">enabled</span></div>
+          <div class="addr-value" id="socks5-addr">—</div>
+          <div class="addr-sub">Supports TCP tunneling (non-HTTP) — SOCKS5 is protocol-agnostic</div>
+        </div>
+      </div>
+
+      <div id="container-note" class="warn-note" style="display:none">
+        ⚠️ Running inside a container. The IP shown for "Other devices" is the container bridge address — not reachable from external devices. Use the host machine's LAN IP with the published port instead.
+      </div>
+      <div id="mitm-note" class="info-note" style="display:none">
+        🔒 MITM interception is <strong>enabled</strong> — HTTPS traffic is decrypted and inspected. Install the CA certificate (Step 2) on each client to avoid TLS errors.
+      </div>
+      <div id="mitm-off-note" class="info-note" style="display:none">
+        ℹ️ MITM is <strong>disabled</strong> — HTTPS connections are tunnelled opaquely (CONNECT). Only HTTP traffic is inspected. Enable MITM in settings to decrypt HTTPS.
       </div>
     </div>
   </div>
 
-  <!-- Step 2: Install CA cert -->
+  <!-- Step 2: CA Certificate -->
   <div class="step">
     <div class="step-header">
       <span class="step-num">2</span>
-      <span class="step-title">Install the CA certificate on your device</span>
+      <div>
+        <span class="step-title">Install the CA certificate</span>
+        <span class="step-sub">required for HTTPS interception</span>
+      </div>
     </div>
-    <p style="font-size:14px;color:var(--muted);margin-bottom:16px">
-      Scan the QR code with your device's camera, or tap the download button.
-      Required for HTTPS inspection.
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
+      Open the CA URL on the device or download below. Without the certificate, clients will show TLS errors for HTTPS sites.
+      Skip if MITM is disabled or you only capture HTTP.
     </p>
-    <div class="qr-wrapper">
-      <canvas id="qr-canvas" width="200" height="200"></canvas>
+    <div class="url-row">
+      <span id="ca-url-text" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</span>
+      <button class="copy-btn" onclick="copyText(document.getElementById('ca-url-text').textContent)">Copy</button>
     </div>
-    <p class="qr-label" id="qr-label">— loading —</p>
-    <a id="ca-download" href="#" class="ca-btn" download="oproxy-ca.crt">
-      ⬇ Download CA Certificate
-    </a>
+    <a id="ca-download" href="/admin/ca" class="ca-btn" download="oproxy-ca.crt">⬇ Download CA Certificate</a>
   </div>
 
   <!-- Step 3: Platform instructions -->
   <div class="step">
     <div class="step-header">
       <span class="step-num">3</span>
-      <span class="step-title">Configure proxy on your device</span>
+      <span class="step-title">Configure your client</span>
     </div>
     <div class="tabs">
-      <button class="tab active" onclick="showPlatform('ios', this)">iOS</button>
-      <button class="tab" onclick="showPlatform('android', this)">Android</button>
+      <button class="tab" onclick="showPlatform('linux', this)">Linux</button>
       <button class="tab" onclick="showPlatform('macos', this)">macOS</button>
       <button class="tab" onclick="showPlatform('windows', this)">Windows</button>
+      <button class="tab" onclick="showPlatform('ios', this)">iOS</button>
+      <button class="tab" onclick="showPlatform('android', this)">Android</button>
+      <button class="tab" onclick="showPlatform('cli', this)">CLI / Code</button>
     </div>
 
-    <div id="p-ios" class="platform active">
+    <!-- Linux -->
+    <div id="p-linux" class="platform">
+      <div class="section-label">System-wide (GNOME)</div>
       <ol>
-        <li>Open <strong>Settings</strong> → <strong>Wi-Fi</strong></li>
-        <li>Tap the <strong>ⓘ</strong> next to your connected network</li>
-        <li>Scroll down and tap <strong>Configure Proxy</strong> → <strong>Manual</strong></li>
-        <li>Enter Server: <code id="ios-ip">…</code> and Port: <code id="ios-port">…</code></li>
-        <li>Tap <strong>Save</strong></li>
-        <li>Open Safari and navigate to the QR code URL or <code id="ios-ca">…</code></li>
-        <li>Tap <strong>Allow</strong> then go to <strong>Settings → General → VPN & Device Management</strong></li>
-        <li>Tap the oproxy profile → <strong>Install</strong></li>
-        <li>Go to <strong>Settings → General → About → Certificate Trust Settings</strong></li>
-        <li>Enable full trust for <strong>oproxy CA</strong></li>
+        <li><strong>Settings → Network → Network Proxy → Manual</strong></li>
+        <li>HTTP Proxy: <code id="lin-host">127.0.0.1</code> &nbsp; Port: <code id="lin-port">8080</code></li>
+        <li>HTTPS Proxy: same host and port.</li>
+        <li>Apply.</li>
       </ol>
+      <div class="section-label">Environment variables (terminal / CLI tools)</div>
+<pre><code><span class="kw">export</span> http_proxy=<span class="str">"http://<span class="lin-ip-i">127.0.0.1</span>:<span class="lin-port-i">8080</span>"</span>
+<span class="kw">export</span> https_proxy=<span class="str">"http://<span class="lin-ip2-i">127.0.0.1</span>:<span class="lin-port2-i">8080</span>"</span>
+<span class="kw">export</span> no_proxy=<span class="str">"localhost,127.0.0.1"</span>
+<span class="cm"># Add to ~/.bashrc or ~/.profile to persist</span></code></pre>
+      <div class="section-label">Trust the CA certificate</div>
+<pre><code><span class="cm"># Download</span>
+curl -o oproxy-ca.crt <span class="str" id="lin-ca-url">http://127.0.0.1:8080/admin/ca</span>
+
+<span class="cm"># Debian / Ubuntu / Mint</span>
+sudo cp oproxy-ca.crt /usr/local/share/ca-certificates/oproxy.crt
+sudo update-ca-certificates
+
+<span class="cm"># Fedora / RHEL / CentOS</span>
+sudo cp oproxy-ca.crt /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust extract
+
+<span class="cm"># Arch</span>
+sudo trust anchor --store oproxy-ca.crt</code></pre>
     </div>
 
-    <div id="p-android" class="platform">
-      <ol>
-        <li>Open <strong>Settings</strong> → <strong>Network &amp; Internet</strong> → <strong>Wi-Fi</strong></li>
-        <li>Long-press your network → <strong>Modify network</strong></li>
-        <li>Expand <strong>Advanced options</strong> → set <strong>Proxy</strong> to <strong>Manual</strong></li>
-        <li>Enter Proxy hostname: <code id="and-ip">…</code> and Port: <code id="and-port">…</code></li>
-        <li>Tap <strong>Save</strong></li>
-        <li>Download and install the CA cert: scan the QR code or visit <code id="and-ca">…</code></li>
-        <li>When prompted, name the certificate <code>oproxy</code> and select <strong>VPN and apps</strong> usage</li>
-      </ol>
-      <div class="note">Android 7+ may require a user-installed CA in the app's network security config.
-        For a rooted device or debug APK, this works without changes.</div>
-    </div>
-
+    <!-- macOS -->
     <div id="p-macos" class="platform">
+      <div class="section-label">System proxy</div>
       <ol>
-        <li>Open <strong>System Settings</strong> → <strong>Network</strong> → select your interface → <strong>Details</strong></li>
-        <li>Go to <strong>Proxies</strong> tab</li>
+        <li><strong>System Settings → Network</strong> → select interface → <strong>Details → Proxies</strong></li>
         <li>Enable <strong>Web Proxy (HTTP)</strong> and <strong>Secure Web Proxy (HTTPS)</strong></li>
-        <li>Set both to <code id="mac-ip">…</code> : <code id="mac-port">…</code></li>
-        <li>Click <strong>OK</strong> then <strong>Apply</strong></li>
-        <li>Download and double-click the CA cert, then open <strong>Keychain Access</strong></li>
-        <li>Find <strong>oproxy CA</strong> → double-click → expand <strong>Trust</strong> → set to <strong>Always Trust</strong></li>
+        <li>Host: <code id="mac-host">127.0.0.1</code> &nbsp; Port: <code id="mac-port">8080</code></li>
+        <li><strong>OK → Apply</strong></li>
       </ol>
-      <div class="note">Or set proxy system-wide from terminal:<br>
-        <code>networksetup -setwebproxy Wi-Fi <span class="mac-ip-inline">IP</span> <span class="mac-port-inline">PORT</span></code>
-      </div>
+      <div class="section-label">Terminal equivalent</div>
+<pre><code>networksetup -setwebproxy Wi-Fi <span class="mac-ip-i">127.0.0.1</span> <span class="mac-port-i">8080</span>
+networksetup -setsecurewebproxy Wi-Fi <span class="mac-ip2-i">127.0.0.1</span> <span class="mac-port2-i">8080</span></code></pre>
+      <div class="section-label">Trust CA certificate</div>
+      <ol>
+        <li>Download the cert above, double-click → opens <strong>Keychain Access</strong></li>
+        <li>Find <strong>oproxy CA</strong> under <em>System</em> → double-click → <strong>Trust → Always Trust</strong></li>
+      </ol>
+<pre><code><span class="cm"># Or via terminal (requires sudo)</span>
+curl -o oproxy-ca.crt <span class="str" id="mac-ca-url">http://127.0.0.1:8080/admin/ca</span>
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain oproxy-ca.crt</code></pre>
     </div>
 
+    <!-- Windows -->
     <div id="p-windows" class="platform">
+      <div class="section-label">System proxy</div>
       <ol>
-        <li>Open <strong>Settings</strong> → <strong>Network &amp; Internet</strong> → <strong>Proxy</strong></li>
-        <li>Under <strong>Manual proxy setup</strong>, toggle <strong>Use a proxy server</strong> on</li>
-        <li>Enter Address: <code id="win-ip">…</code> and Port: <code id="win-port">…</code></li>
-        <li>Click <strong>Save</strong></li>
-        <li>Download the CA cert and double-click it → <strong>Install Certificate</strong></li>
-        <li>Select <strong>Local Machine</strong> → <strong>Place all certificates in the following store</strong> → <strong>Trusted Root Certification Authorities</strong></li>
-        <li>Click <strong>Finish</strong> — restart your browser</li>
+        <li><strong>Settings → Network &amp; Internet → Proxy → Manual proxy setup</strong> → toggle on</li>
+        <li>Address: <code id="win-host">127.0.0.1</code> &nbsp; Port: <code id="win-port">8080</code></li>
+        <li><strong>Save</strong></li>
       </ol>
+      <div class="section-label">PowerShell</div>
+<pre><code>$p = <span class="str">"http://<span class="win-ip-i">127.0.0.1</span>:<span class="win-port-i">8080</span>"</span>
+[System.Net.WebRequest]::DefaultWebProxy = [System.Net.WebProxy]::new($p)</code></pre>
+      <div class="section-label">Trust CA certificate</div>
+      <ol>
+        <li>Download the cert above → double-click → <strong>Install Certificate</strong></li>
+        <li><strong>Local Machine → Trusted Root Certification Authorities → Finish</strong></li>
+        <li>Restart browser.</li>
+      </ol>
+    </div>
+
+    <!-- iOS -->
+    <div id="p-ios" class="platform">
+      <div class="note" style="margin-top:0;margin-bottom:12px">Device must be on the same Wi-Fi as this computer. Use the <strong>LAN IP</strong> (<code id="ios-lan">—</code>), not localhost.</div>
+      <div class="section-label">Configure proxy</div>
+      <ol>
+        <li><strong>Settings → Wi-Fi</strong> → tap <strong>ⓘ</strong> next to your network</li>
+        <li>Scroll to <strong>Configure Proxy → Manual</strong></li>
+        <li>Server: <code id="ios-ip">—</code> &nbsp; Port: <code id="ios-port">—</code></li>
+        <li>Tap <strong>Save</strong></li>
+      </ol>
+      <div class="section-label">Install CA certificate</div>
+      <ol>
+        <li>In Safari navigate to <code id="ios-ca">—</code> → tap <strong>Allow</strong></li>
+        <li><strong>Settings → General → VPN &amp; Device Management</strong> → tap the oproxy profile → <strong>Install</strong></li>
+        <li><strong>Settings → General → About → Certificate Trust Settings</strong> → enable full trust for <strong>oproxy CA</strong></li>
+      </ol>
+    </div>
+
+    <!-- Android -->
+    <div id="p-android" class="platform">
+      <div class="note" style="margin-top:0;margin-bottom:12px">Device must be on the same Wi-Fi as this computer. Use the <strong>LAN IP</strong> (<code id="and-lan">—</code>), not localhost.</div>
+      <div class="section-label">Configure proxy</div>
+      <ol>
+        <li><strong>Settings → Network &amp; Internet → Wi-Fi</strong> → long-press network → <strong>Modify network</strong></li>
+        <li>Expand <strong>Advanced options</strong> → Proxy → <strong>Manual</strong></li>
+        <li>Hostname: <code id="and-ip">—</code> &nbsp; Port: <code id="and-port">—</code></li>
+        <li><strong>Save</strong></li>
+      </ol>
+      <div class="section-label">Install CA certificate</div>
+      <ol>
+        <li>Visit <code id="and-ca">—</code> → download → name it <code>oproxy</code>, use: <strong>VPN and apps</strong></li>
+      </ol>
+      <div class="warn-note">Android 7+ ignores user-installed CAs in apps that certificate-pin. For full interception use a rooted device or a debug APK with a custom <code>network_security_config.xml</code>.</div>
+    </div>
+
+    <!-- CLI / Code -->
+    <div id="p-cli" class="platform">
+      <div class="section-label">curl</div>
+<pre><code>curl --proxy <span class="str">"http://<span class="cli-ip-i">127.0.0.1</span>:<span class="cli-port-i">8080</span>"</span> \
+     --cacert oproxy-ca.crt \
+     https://api.example.com/endpoint</code></pre>
+      <div class="section-label">wget</div>
+<pre><code>wget -e <span class="str">"https_proxy=http://<span class="cli-ip2-i">127.0.0.1</span>:<span class="cli-port2-i">8080</span>"</span> \
+     --ca-certificate=oproxy-ca.crt \
+     https://api.example.com/endpoint</code></pre>
+      <div class="section-label">Python (requests)</div>
+<pre><code><span class="kw">import</span> requests
+proxies = {<span class="str">"http"</span>: <span class="str">"http://<span class="cli-ip3-i">127.0.0.1</span>:<span class="cli-port3-i">8080</span>"</span>,
+           <span class="str">"https"</span>: <span class="str">"http://<span class="cli-ip4-i">127.0.0.1</span>:<span class="cli-port4-i">8080</span>"</span>}
+r = requests.get(<span class="str">"https://api.example.com/"</span>, proxies=proxies,
+                 verify=<span class="str">"oproxy-ca.crt"</span>)</code></pre>
+      <div class="section-label">Node.js (undici / fetch)</div>
+<pre><code><span class="kw">const</span> { ProxyAgent } = require(<span class="str">'undici'</span>);
+<span class="kw">const</span> agent = <span class="kw">new</span> ProxyAgent(<span class="str">'http://<span class="cli-ip5-i">127.0.0.1</span>:<span class="cli-port5-i">8080</span>'</span>);
+<span class="kw">process.env</span>.NODE_EXTRA_CA_CERTS = <span class="str">'oproxy-ca.crt'</span>;
+fetch(<span class="str">'https://api.example.com/'</span>, { dispatcher: agent });</code></pre>
+      <div class="section-label">Go (net/http)</div>
+<pre><code>proxyURL, _ := url.Parse(<span class="str">"http://<span class="cli-ip6-i">127.0.0.1</span>:<span class="cli-port6-i">8080</span>"</span>)
+caCert, _ := os.ReadFile(<span class="str">"oproxy-ca.crt"</span>)
+pool := x509.NewCertPool(); pool.AppendCertsFromPEM(caCert)
+client := &amp;http.Client{Transport: &amp;http.Transport{
+    Proxy:           http.ProxyURL(proxyURL),
+    TLSClientConfig: &amp;tls.Config{RootCAs: pool},
+}}</code></pre>
+      <div class="info-note" style="margin-top:12px">
+        Download the CA: <code id="cli-ca">—</code><br>
+        For system-trusted CA, run the Linux trust commands in the Linux tab first — then <code>--cacert</code> flags are unnecessary.
+      </div>
     </div>
   </div>
 </div>
 
 <script>
 (function() {
-  // Minimal QR code generator — no external dependency.
-  // Reed-Solomon + QR matrix encoding for alphanumeric/byte mode.
-  // This is a lightweight standalone implementation.
-  // Source: adapted from nayuki/qrcodegen (MIT license).
+  // ── Utilities ──────────────────────────────────────────────────────
+  function copyText(text) {
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text.trim()).catch(() => {});
+  }
+  window.copyText = copyText;
 
-  const QR = (function() {
-    function generateQR(text, canvas) {
-      const size = 200;
-      const url = text;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, size, size);
+  function fill(sel, val) {
+    document.querySelectorAll(sel).forEach(el => { el.textContent = val; });
+  }
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  }
+  function setHref(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.href = val;
+  }
+  function show(id) { const el = document.getElementById(id); if (el) el.style.display = ''; }
+  function hide(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
 
-      // Fallback: render URL as text if QR generation not available.
-      ctx.fillStyle = '#333';
-      ctx.font = '10px monospace';
-      ctx.textAlign = 'center';
-      const lines = url.match(/.{1,22}/g) || [url];
-      const startY = size / 2 - (lines.length * 12) / 2;
-      lines.forEach((l, i) => ctx.fillText(l, size / 2, startY + i * 14));
-    }
-    return { generate: generateQR };
+  // ── Platform tabs ──────────────────────────────────────────────────
+  function showPlatform(name, btn) {
+    document.querySelectorAll('.platform').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    const pEl = document.getElementById('p-' + name);
+    if (pEl) pEl.classList.add('active');
+    if (btn) btn.classList.add('active');
+  }
+  window.showPlatform = showPlatform;
+
+  // Default: Linux tab
+  (function() {
+    const linuxTab = document.querySelector('.tab');  // first tab
+    showPlatform('linux', linuxTab);
   })();
 
+  // ── Load config ────────────────────────────────────────────────────
   async function init() {
     try {
       const res = await fetch('/admin/setup/network-info');
       if (!res.ok) throw new Error('fetch failed');
       const d = await res.json();
 
-      document.getElementById('info-loading').style.display = 'none';
-      document.getElementById('proxy-info').style.display = '';
+      hide('info-loading');
+      show('proxy-info');
 
-      const ip = d.lan_ip || 'unknown';
-      const port = String(d.port || 8080);
-      const caUrl = d.ca_url || `http://${ip}:${port}/admin/ca`;
+      const localIp = '127.0.0.1';
+      const lanIp   = d.lan_ip || localIp;
+      const port    = String(d.port || 8080);
+      const localCa = `http://${localIp}:${port}/admin/ca`;
+      const lanCa   = d.ca_url || localCa;
 
-      document.getElementById('lan-ip').textContent = ip;
-      document.getElementById('proxy-port').textContent = port;
+      // ── Config pills ──────────────────────────────────────────────
+      const pills = document.getElementById('config-pills');
+      const mkPill = (dot, label) => {
+        const p = document.createElement('div');
+        p.className = 'pill';
+        p.innerHTML = `<span class="dot ${dot}"></span> ${label}`;
+        pills.appendChild(p);
+      };
+      mkPill('dot-on', `Port ${port}`);
+      mkPill(d.mitm_enabled ? 'dot-on' : 'dot-off',
+             `MITM ${d.mitm_enabled ? 'on' : 'off'}`);
+      if (d.socks5_port) mkPill('dot-on', `SOCKS5 :${d.socks5_port}`);
 
-      if (d.mitm_enabled) {
-        document.getElementById('mitm-note').style.display = '';
-      }
+      // ── Address cards ─────────────────────────────────────────────
+      setText('localhost-addr', `${localIp}:${port}`);
 
-      // Populate platform instructions
-      ['ios-ip','and-ip','mac-ip','win-ip'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = ip;
-      });
-      ['ios-port','and-port','mac-port','win-port'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = port;
-      });
-      ['ios-ca','and-ca'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = caUrl;
-      });
-      document.querySelectorAll('.mac-ip-inline').forEach(el => el.textContent = ip);
-      document.querySelectorAll('.mac-port-inline').forEach(el => el.textContent = port);
-
-      // QR code pointing to CA cert download URL
-      document.getElementById('qr-label').textContent = caUrl;
-      const caLink = document.getElementById('ca-download');
-      caLink.href = '/admin/ca';
-
-      // Try native QR API first, fall back to canvas text render
-      if (typeof QRCode !== 'undefined') {
-        new QRCode(document.getElementById('qr-canvas'), { text: caUrl, width: 200, height: 200 });
+      if (lanIp !== localIp) {
+        setText('lan-addr', `${lanIp}:${port}`);
+        if (!d.lan_ip_available) {
+          // Container: detected bridge IP, might not be reachable
+          document.getElementById('lan-badge').innerHTML = '<span class="badge badge-warn">container bridge</span>';
+          setText('lan-sub', 'Bridge IP — may not be reachable from external devices');
+          show('container-note');
+        } else {
+          document.getElementById('lan-badge').innerHTML = '<span class="badge badge-on">LAN</span>';
+        }
       } else {
-        QR.generate(caUrl, document.getElementById('qr-canvas'));
+        setText('lan-addr', 'not detected');
+        setText('lan-sub', 'No LAN interface found');
+        document.getElementById('lan-badge').innerHTML = '<span class="badge badge-off">unavailable</span>';
       }
+
+      // SOCKS5
+      if (d.socks5_port) {
+        show('socks5-row');
+        setText('socks5-addr', `socks5://${localIp}:${d.socks5_port}`);
+      }
+
+      // MITM note
+      if (d.mitm_enabled) show('mitm-note');
+      else show('mitm-off-note');
+
+      // ── CA URL ────────────────────────────────────────────────────
+      setText('ca-url-text', lanCa);
+      setHref('ca-download', '/admin/ca');
+
+      // ── Platform-specific fills ───────────────────────────────────
+      // Linux / macOS / Windows → use localhost
+      fill('.lin-ip-i, .lin-ip2-i', localIp);
+      fill('.lin-port-i, .lin-port2-i', port);
+      setText('lin-ca-url', localCa);
+
+      fill('.mac-ip-i, .mac-ip2-i', localIp);
+      fill('.mac-port-i, .mac-port2-i', port);
+      setText('mac-ca-url', localCa);
+
+      fill('.win-ip-i', localIp);
+      fill('.win-port-i', port);
+      setText('win-host', localIp);
+      setText('win-port', port);
+
+      setText('lin-host', localIp);
+      setText('lin-port', port);
+      setText('mac-host', localIp);
+      setText('mac-port', port);
+
+      // CLI → localhost
+      fill('.cli-ip-i, .cli-ip2-i, .cli-ip3-i, .cli-ip4-i, .cli-ip5-i, .cli-ip6-i', localIp);
+      fill('.cli-port-i, .cli-port2-i, .cli-port3-i, .cli-port4-i, .cli-port5-i, .cli-port6-i', port);
+      setText('cli-ca', localCa);
+
+      // iOS / Android → LAN IP
+      const devIp = lanIp !== localIp ? lanIp : '(see LAN IP above)';
+      setText('ios-lan', `${lanIp}:${port}`);
+      setText('and-lan', `${lanIp}:${port}`);
+      setText('ios-ip', devIp);
+      setText('ios-port', port);
+      setText('ios-ca', lanCa);
+      setText('and-ip', devIp);
+      setText('and-port', port);
+      setText('and-ca', lanCa);
+
     } catch(e) {
-      document.getElementById('info-loading').textContent = 'Could not detect network info — check proxy is running.';
+      setText('info-loading', 'Could not load proxy configuration — is oproxy running?');
     }
   }
-
-  function showPlatform(name, btn) {
-    document.querySelectorAll('.platform').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-    document.getElementById('p-' + name).classList.add('active');
-    btn.classList.add('active');
-  }
-  window.showPlatform = showPlatform;
 
   init();
 })();

@@ -1,21 +1,25 @@
-use crate::session::{Exchange, SharedSessionManager};
+use crate::session::{Exchange, SessionSource, SharedSessionManager};
 use reqwest::Client;
-use std::sync::Arc;
 use tracing::{info, warn};
 
 pub struct PlaybackEngine {
     session_manager: SharedSessionManager,
     http_client: Client,
+    egress_policy: crate::security::AdminEgressPolicy,
 }
 
 impl PlaybackEngine {
-    pub fn new(session_manager: SharedSessionManager) -> Self {
+    pub fn new(
+        session_manager: SharedSessionManager,
+        egress_policy: crate::security::AdminEgressPolicy,
+    ) -> Self {
         Self {
             session_manager,
             http_client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
+            egress_policy,
         }
     }
 
@@ -31,12 +35,30 @@ impl PlaybackEngine {
                 warn!(method=%method, uri=%uri, "Playback: unrecognised method, skipping");
                 continue;
             };
+            let Ok(parsed_url) = reqwest::Url::parse(&uri) else {
+                warn!(uri=%uri, "Playback: invalid URL, skipping");
+                continue;
+            };
+            if let Err(e) =
+                crate::security::enforce_admin_egress_policy(&parsed_url, self.egress_policy).await
+            {
+                warn!(uri=%uri, reason=%e, "Playback: blocked by admin egress policy");
+                continue;
+            }
             let mut builder = self.http_client.request(reqwest_method, &uri);
             for (name, value) in &exchange.request.headers {
                 // Skip hop-by-hop headers that shouldn't be re-sent.
-                if matches!(name.to_lowercase().as_str(),
-                    "host" | "connection" | "transfer-encoding" | "keep-alive"
-                    | "proxy-authenticate" | "proxy-authorization" | "te" | "trailer" | "upgrade"
+                if matches!(
+                    name.to_lowercase().as_str(),
+                    "host"
+                        | "connection"
+                        | "transfer-encoding"
+                        | "keep-alive"
+                        | "proxy-authenticate"
+                        | "proxy-authorization"
+                        | "te"
+                        | "trailer"
+                        | "upgrade"
                 ) {
                     continue;
                 }
@@ -58,7 +80,11 @@ impl PlaybackEngine {
                     let new_id = uuid::Uuid::new_v4().to_string();
                     let mut req_ctx = exchange.request.clone();
                     req_ctx.method = format!("[REPLAY] {}", req_ctx.method);
-                    self.session_manager.record_request(new_id.clone(), req_ctx);
+                    self.session_manager.record_request_with_source(
+                        new_id.clone(),
+                        req_ctx,
+                        SessionSource::Playback,
+                    );
                     let body = resp.text().await.unwrap_or_default();
                     self.session_manager.record_response(
                         new_id,

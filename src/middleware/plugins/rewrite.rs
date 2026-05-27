@@ -1,9 +1,10 @@
-use async_trait::async_trait;
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use async_trait::async_trait;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MatchCriteria {
@@ -15,12 +16,29 @@ pub enum MatchCriteria {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RewriteAction {
-    ReplaceBody { pattern: String, replacement: String },
-    AddHeader { name: String, value: String },
-    RemoveHeader { name: String },
-    ReplaceHeader { name: String, pattern: String, replacement: String },
-    Redirect { status: u16, location: String },
-    Block { status: u16 },
+    ReplaceBody {
+        pattern: String,
+        replacement: String,
+    },
+    AddHeader {
+        name: String,
+        value: String,
+    },
+    RemoveHeader {
+        name: String,
+    },
+    ReplaceHeader {
+        name: String,
+        pattern: String,
+        replacement: String,
+    },
+    Redirect {
+        status: u16,
+        location: String,
+    },
+    Block {
+        status: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +71,7 @@ impl RewriteMiddleware {
                 }
             }
             MatchCriteria::Header { name, value } => {
-                req.headers.get(name).map_or(false, |v| v.contains(value))
+                header_value(&req.headers, name).is_some_and(|v| v.contains(value))
             }
             MatchCriteria::Body(pattern) => {
                 if let Ok(re) = Regex::new(pattern) {
@@ -85,31 +103,71 @@ impl RewriteMiddleware {
         }
     }
 
-    fn apply_action(&self, rule: &RewriteRule, body: &mut String) {
-        if let RewriteAction::ReplaceBody { pattern, replacement } = &rule.action {
-            if let Ok(re) = Regex::new(pattern) {
-                *body = re.replace_all(body, replacement).to_string();
+    fn apply_body_action(&self, rule: &RewriteRule, body: &mut String) -> bool {
+        if let RewriteAction::ReplaceBody {
+            pattern,
+            replacement,
+        } = &rule.action
+            && let Ok(re) = Regex::new(pattern)
+        {
+            let rewritten = re.replace_all(body, replacement).to_string();
+            if rewritten != *body {
+                *body = rewritten;
+                return true;
             }
         }
+        false
     }
 
-    fn apply_action_header(&self, rule: &RewriteRule, headers: &mut std::collections::HashMap<String, String>) {
+    fn apply_action_header(
+        &self,
+        rule: &RewriteRule,
+        headers: &mut std::collections::HashMap<String, String>,
+    ) {
         match &rule.action {
             RewriteAction::AddHeader { name, value } => {
-                headers.insert(name.clone(), value.clone());
+                let key = header_key(headers, name).unwrap_or_else(|| name.clone());
+                headers.insert(key, value.clone());
             }
             RewriteAction::RemoveHeader { name } => {
-                headers.remove(name);
+                if let Some(key) = header_key(headers, name) {
+                    headers.remove(&key);
+                }
             }
-            RewriteAction::ReplaceHeader { name, pattern, replacement } => {
-                if let Some(val) = headers.get(name) {
+            RewriteAction::ReplaceHeader {
+                name,
+                pattern,
+                replacement,
+            } => {
+                if let Some(key) = header_key(headers, name) {
+                    let val = headers.get(&key).cloned().unwrap_or_default();
                     if let Ok(re) = Regex::new(pattern) {
-                        headers.insert(name.clone(), re.replace_all(val, replacement).to_string());
+                        headers.insert(key, re.replace_all(&val, replacement).to_string());
                     }
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn header_key(headers: &HashMap<String, String>, name: &str) -> Option<String> {
+    headers
+        .keys()
+        .find(|header_name| header_name.eq_ignore_ascii_case(name))
+        .cloned()
+}
+
+fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn remove_header(headers: &mut HashMap<String, String>, name: &str) {
+    if let Some(key) = header_key(headers, name) {
+        headers.remove(&key);
     }
 }
 
@@ -130,7 +188,8 @@ impl Middleware for RewriteMiddleware {
                             "headers": {"Location": location},
                             "body": ""
                         });
-                        ctx.headers.insert("x-oproxy-mock-response".to_string(), mock.to_string());
+                        ctx.headers
+                            .insert("x-oproxy-mock-response".to_string(), mock.to_string());
                         return MiddlewareAction::StopAndReturn;
                     }
                     RewriteAction::Block { status } => {
@@ -139,15 +198,15 @@ impl Middleware for RewriteMiddleware {
                             "headers": {},
                             "body": ""
                         });
-                        ctx.headers.insert("x-oproxy-mock-response".to_string(), mock.to_string());
+                        ctx.headers
+                            .insert("x-oproxy-mock-response".to_string(), mock.to_string());
                         return MiddlewareAction::StopAndReturn;
                     }
                     _ => {
                         self.apply_action_header(rule, &mut ctx.headers);
-                        let before = ctx.body.len();
-                        self.apply_action(rule, &mut ctx.body);
-                        if ctx.body.len() != before || ctx.body_bytes.is_some() {
+                        if self.apply_body_action(rule, &mut ctx.body) {
                             ctx.body_bytes = None;
+                            remove_header(&mut ctx.headers, "content-length");
                         }
                     }
                 }
@@ -161,13 +220,11 @@ impl Middleware for RewriteMiddleware {
         for rule in rules.iter().filter(|r| r.enabled) {
             if self.matches_res(rule, ctx) {
                 self.apply_action_header(rule, &mut ctx.headers);
-                let before = ctx.body.len();
-                self.apply_action(&rule, &mut ctx.body);
-                if ctx.body.len() != before || ctx.body_bytes.is_some() {
+                if self.apply_body_action(rule, &mut ctx.body) {
                     ctx.body_bytes = None;
-                    // Content-Length from upstream is now stale — remove it so hyper
+                    // Content-Length from upstream is now stale - remove it so hyper
                     // doesn't panic on a length mismatch when we serve the modified body.
-                    ctx.headers.remove("content-length");
+                    remove_header(&mut ctx.headers, "content-length");
                 }
             }
         }
@@ -179,20 +236,40 @@ impl Middleware for RewriteMiddleware {
 mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
-    use std::collections::HashMap;
-
+    use bytes::Bytes;
     fn req(host: &str, uri: &str, body: &str) -> RequestContext {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
-        RequestContext { method: "GET".to_string(), uri: uri.to_string(), headers, body: body.to_string(), host: host.to_string(), body_bytes: None }
+        RequestContext {
+            method: "GET".to_string(),
+            uri: uri.to_string(),
+            headers,
+            body: body.to_string(),
+            host: host.to_string(),
+            body_bytes: None,
+        }
     }
 
     fn res(uri: &str, body: &str) -> ResponseContext {
-        ResponseContext { status: 200, headers: HashMap::new(), body: body.to_string(), request_uri: uri.to_string(), session_id: None, ttfb_ms: 0, body_ms: 0, body_bytes: None }
+        ResponseContext {
+            status: 200,
+            headers: HashMap::new(),
+            body: body.to_string(),
+            request_uri: uri.to_string(),
+            session_id: None,
+            ttfb_ms: 0,
+            body_ms: 0,
+            body_bytes: None,
+        }
     }
 
     fn rule(criteria: MatchCriteria, action: RewriteAction, enabled: bool) -> RewriteRule {
-        RewriteRule { name: "test".to_string(), criteria, action, enabled }
+        RewriteRule {
+            name: "test".to_string(),
+            criteria,
+            action,
+            enabled,
+        }
     }
 
     // --- disabled rule ---
@@ -201,7 +278,10 @@ mod tests {
     async fn disabled_rule_is_skipped() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("example.com".to_string()),
-            RewriteAction::AddHeader { name: "x-injected".to_string(), value: "1".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-injected".to_string(),
+                value: "1".to_string(),
+            },
             false,
         )]);
         let mut ctx = req("example.com", "/", "");
@@ -215,7 +295,10 @@ mod tests {
     async fn host_criteria_substring_match() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("example".to_string()),
-            RewriteAction::AddHeader { name: "x-hit".to_string(), value: "1".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-hit".to_string(),
+                value: "1".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("api.example.com", "/", "");
@@ -227,7 +310,10 @@ mod tests {
     async fn host_criteria_no_match_leaves_headers_unchanged() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("other.com".to_string()),
-            RewriteAction::AddHeader { name: "x-should-not-appear".to_string(), value: "1".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-should-not-appear".to_string(),
+                value: "1".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("example.com", "/", "");
@@ -241,7 +327,10 @@ mod tests {
     async fn path_regex_match_adds_header() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Path(r"^/api/".to_string()),
-            RewriteAction::AddHeader { name: "x-api".to_string(), value: "true".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-api".to_string(),
+                value: "true".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("host", "/api/users", "");
@@ -253,7 +342,10 @@ mod tests {
     async fn path_regex_no_match_does_nothing() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Path(r"^/api/".to_string()),
-            RewriteAction::AddHeader { name: "x-api".to_string(), value: "true".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-api".to_string(),
+                value: "true".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("host", "/health", "");
@@ -266,13 +358,39 @@ mod tests {
     #[tokio::test]
     async fn header_criteria_value_substring_match() {
         let mw = RewriteMiddleware::new(vec![rule(
-            MatchCriteria::Header { name: "content-type".to_string(), value: "json".to_string() },
-            RewriteAction::AddHeader { name: "x-json".to_string(), value: "yes".to_string() },
+            MatchCriteria::Header {
+                name: "content-type".to_string(),
+                value: "json".to_string(),
+            },
+            RewriteAction::AddHeader {
+                name: "x-json".to_string(),
+                value: "yes".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("host", "/", "");
         mw.on_request(&mut ctx).await;
         assert_eq!(ctx.headers.get("x-json").map(|s| s.as_str()), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn header_criteria_matches_case_insensitively() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Header {
+                name: "Authorization".to_string(),
+                value: "Bearer".to_string(),
+            },
+            RewriteAction::AddHeader {
+                name: "x-auth".to_string(),
+                value: "seen".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("host", "/", "");
+        ctx.headers
+            .insert("authorization".to_string(), "Bearer secret".to_string());
+        mw.on_request(&mut ctx).await;
+        assert_eq!(ctx.headers.get("x-auth").map(|s| s.as_str()), Some("seen"));
     }
 
     // --- Body criteria ---
@@ -281,12 +399,18 @@ mod tests {
     async fn body_criteria_replace_body() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Body(r"secret".to_string()),
-            RewriteAction::ReplaceBody { pattern: "secret".to_string(), replacement: "REDACTED".to_string() },
+            RewriteAction::ReplaceBody {
+                pattern: "secret".to_string(),
+                replacement: "REDACTED".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("host", "/", "my secret data");
+        ctx.headers
+            .insert("content-length".to_string(), "14".to_string());
         mw.on_request(&mut ctx).await;
         assert_eq!(ctx.body, "my REDACTED data");
+        assert!(!ctx.headers.contains_key("content-length"));
     }
 
     // --- Actions ---
@@ -295,7 +419,10 @@ mod tests {
     async fn add_header_action() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("h".to_string()),
-            RewriteAction::AddHeader { name: "x-added".to_string(), value: "v".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-added".to_string(),
+                value: "v".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("h", "/", "");
@@ -304,16 +431,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn header_only_rewrite_preserves_request_body_bytes() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Host("h".to_string()),
+            RewriteAction::AddHeader {
+                name: "x-added".to_string(),
+                value: "v".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("h", "/", "binary-as-text");
+        ctx.body_bytes = Some(Bytes::from_static(b"\x00\xff"));
+
+        mw.on_request(&mut ctx).await;
+
+        assert_eq!(ctx.headers.get("x-added").map(|s| s.as_str()), Some("v"));
+        assert_eq!(ctx.body_bytes.as_deref(), Some(&b"\x00\xff"[..]));
+    }
+
+    #[tokio::test]
+    async fn body_rewrite_removes_content_length_case_insensitively() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Body("secret".to_string()),
+            RewriteAction::ReplaceBody {
+                pattern: "secret".to_string(),
+                replacement: "public".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("h", "/", "secret");
+        ctx.body_bytes = Some(Bytes::from_static(b"secret"));
+        ctx.headers
+            .insert("Content-Length".to_string(), "6".to_string());
+
+        mw.on_request(&mut ctx).await;
+
+        assert_eq!(ctx.body, "public");
+        assert!(ctx.body_bytes.is_none());
+        assert!(header_value(&ctx.headers, "content-length").is_none());
+    }
+
+    #[tokio::test]
     async fn remove_header_action() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("h".to_string()),
-            RewriteAction::RemoveHeader { name: "content-type".to_string() },
+            RewriteAction::RemoveHeader {
+                name: "content-type".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("h", "/", "");
         assert!(ctx.headers.contains_key("content-type"));
         mw.on_request(&mut ctx).await;
         assert!(!ctx.headers.contains_key("content-type"));
+    }
+
+    #[tokio::test]
+    async fn remove_header_action_is_case_insensitive() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Host("h".to_string()),
+            RewriteAction::RemoveHeader {
+                name: "Authorization".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("h", "/", "");
+        ctx.headers
+            .insert("authorization".to_string(), "Bearer secret".to_string());
+        mw.on_request(&mut ctx).await;
+        assert!(!ctx.headers.contains_key("authorization"));
     }
 
     #[tokio::test]
@@ -329,14 +515,41 @@ mod tests {
         )]);
         let mut ctx = req("h", "/", "");
         mw.on_request(&mut ctx).await;
-        assert_eq!(ctx.headers.get("content-type").map(|s| s.as_str()), Some("text/json"));
+        assert_eq!(
+            ctx.headers.get("content-type").map(|s| s.as_str()),
+            Some("text/json")
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_header_action_preserves_existing_header_case() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Host("h".to_string()),
+            RewriteAction::ReplaceHeader {
+                name: "Content-Type".to_string(),
+                pattern: r"application/(.+)".to_string(),
+                replacement: "text/$1".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("h", "/", "");
+        mw.on_request(&mut ctx).await;
+        assert_eq!(
+            ctx.headers.get("content-type").map(|s| s.as_str()),
+            Some("text/json")
+        );
+        assert!(!ctx.headers.contains_key("Content-Type"));
     }
 
     #[tokio::test]
     async fn replace_header_for_absent_header_is_noop() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("h".to_string()),
-            RewriteAction::ReplaceHeader { name: "x-nonexistent".to_string(), pattern: ".*".to_string(), replacement: "val".to_string() },
+            RewriteAction::ReplaceHeader {
+                name: "x-nonexistent".to_string(),
+                pattern: ".*".to_string(),
+                replacement: "val".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("h", "/", "");
@@ -350,7 +563,10 @@ mod tests {
     async fn invalid_path_regex_does_not_panic_and_skips_rule() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Path("[invalid regex".to_string()),
-            RewriteAction::AddHeader { name: "x-bad".to_string(), value: "1".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-bad".to_string(),
+                value: "1".to_string(),
+            },
             true,
         )]);
         let mut ctx = req("host", "/test", "");
@@ -365,7 +581,10 @@ mod tests {
     async fn response_path_criteria_replaces_body() {
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Path(r"^/api/".to_string()),
-            RewriteAction::ReplaceBody { pattern: "foo".to_string(), replacement: "bar".to_string() },
+            RewriteAction::ReplaceBody {
+                pattern: "foo".to_string(),
+                replacement: "bar".to_string(),
+            },
             true,
         )]);
         let mut ctx = res("/api/test", "foo baz foo");
@@ -378,19 +597,39 @@ mod tests {
         // Host and Header criteria return false for responses (no host on ResponseContext).
         let mw = RewriteMiddleware::new(vec![rule(
             MatchCriteria::Host("example.com".to_string()),
-            RewriteAction::AddHeader { name: "x-res-host".to_string(), value: "1".to_string() },
+            RewriteAction::AddHeader {
+                name: "x-res-host".to_string(),
+                value: "1".to_string(),
+            },
             true,
         )]);
         let mut ctx = res("/any", "body");
         mw.on_response(&mut ctx).await;
-        assert!(!ctx.headers.contains_key("x-res-host"), "Host criteria should not match on responses");
+        assert!(
+            !ctx.headers.contains_key("x-res-host"),
+            "Host criteria should not match on responses"
+        );
     }
 
     #[tokio::test]
     async fn multiple_rules_all_applied_when_matching() {
         let mw = RewriteMiddleware::new(vec![
-            rule(MatchCriteria::Host("h".to_string()), RewriteAction::AddHeader { name: "x-first".to_string(), value: "1".to_string() }, true),
-            rule(MatchCriteria::Host("h".to_string()), RewriteAction::AddHeader { name: "x-second".to_string(), value: "2".to_string() }, true),
+            rule(
+                MatchCriteria::Host("h".to_string()),
+                RewriteAction::AddHeader {
+                    name: "x-first".to_string(),
+                    value: "1".to_string(),
+                },
+                true,
+            ),
+            rule(
+                MatchCriteria::Host("h".to_string()),
+                RewriteAction::AddHeader {
+                    name: "x-second".to_string(),
+                    value: "2".to_string(),
+                },
+                true,
+            ),
         ]);
         let mut ctx = req("h", "/", "");
         mw.on_request(&mut ctx).await;

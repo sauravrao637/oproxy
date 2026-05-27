@@ -1,8 +1,8 @@
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
 
 pub const SKIP_RECORDING_HEADER: &str = "x-oproxy-skip-recording";
 
@@ -10,9 +10,9 @@ pub const SKIP_RECORDING_HEADER: &str = "x-oproxy-skip-recording";
 #[serde(rename_all = "lowercase")]
 pub enum FilterMode {
     #[default]
-    Disabled,   // Record all traffic
-    Allowlist,  // Only record hosts in the list
-    Denylist,   // Record everything except listed hosts
+    Disabled, // Record all traffic
+    Allowlist, // Only record hosts in the list
+    Denylist,  // Record everything except listed hosts
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -27,8 +27,14 @@ impl CaptureFilterConfig {
         let host_lc = host.to_lowercase();
         match self.mode {
             FilterMode::Disabled => false,
-            FilterMode::Allowlist => !self.hosts.iter().any(|h| host_lc.contains(h.to_lowercase().as_str())),
-            FilterMode::Denylist  =>  self.hosts.iter().any(|h| host_lc.contains(h.to_lowercase().as_str())),
+            FilterMode::Allowlist => !self
+                .hosts
+                .iter()
+                .any(|h| host_lc.contains(h.to_lowercase().as_str())),
+            FilterMode::Denylist => self
+                .hosts
+                .iter()
+                .any(|h| host_lc.contains(h.to_lowercase().as_str())),
         }
     }
 }
@@ -52,7 +58,8 @@ impl Middleware for CaptureFilterMiddleware {
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
         let cfg = self.config.read().await;
         if cfg.should_skip(&ctx.host) {
-            ctx.headers.insert(SKIP_RECORDING_HEADER.to_string(), "true".to_string());
+            ctx.headers
+                .insert(SKIP_RECORDING_HEADER.to_string(), "true".to_string());
         }
         // Always continue — we never block proxying, only toggle recording.
         MiddlewareAction::Continue
@@ -163,21 +170,30 @@ mod tests {
 
     #[test]
     fn should_skip_disabled_always_false() {
-        let cfg = CaptureFilterConfig { mode: FilterMode::Disabled, hosts: vec!["anything".to_string()] };
+        let cfg = CaptureFilterConfig {
+            mode: FilterMode::Disabled,
+            hosts: vec!["anything".to_string()],
+        };
         assert!(!cfg.should_skip("anything.com"));
     }
 
     #[test]
     fn should_skip_allowlist_match() {
-        let cfg = CaptureFilterConfig { mode: FilterMode::Allowlist, hosts: vec!["api.".to_string()] };
+        let cfg = CaptureFilterConfig {
+            mode: FilterMode::Allowlist,
+            hosts: vec!["api.".to_string()],
+        };
         assert!(!cfg.should_skip("api.example.com")); // match → don't skip
-        assert!(cfg.should_skip("cdn.example.com"));  // no match → skip
+        assert!(cfg.should_skip("cdn.example.com")); // no match → skip
     }
 
     #[test]
     fn should_skip_denylist_match() {
-        let cfg = CaptureFilterConfig { mode: FilterMode::Denylist, hosts: vec!["cdn.".to_string()] };
-        assert!(cfg.should_skip("cdn.example.com"));  // match → skip
+        let cfg = CaptureFilterConfig {
+            mode: FilterMode::Denylist,
+            hosts: vec!["cdn.".to_string()],
+        };
+        assert!(cfg.should_skip("cdn.example.com")); // match → skip
         assert!(!cfg.should_skip("api.example.com")); // no match → don't skip
     }
 }

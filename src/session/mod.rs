@@ -1,10 +1,10 @@
-use std::path::Path;
-use indexmap::IndexMap;
-use std::sync::{Arc, RwLock};
-use chrono::{DateTime, Utc};
-use tokio::sync::broadcast;
 use crate::middleware::{RequestContext, ResponseContext};
-use serde::{Serialize, Deserialize};
+use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WsDirection {
@@ -41,6 +41,16 @@ pub struct InspectionMetrics {
     /// TLS handshake time in milliseconds (None for plain HTTP connections).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSource {
+    #[default]
+    Proxy,
+    AdminForward,
+    Playback,
+    Imported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +110,8 @@ pub struct Exchange {
     pub response: Option<ResponseContext>,
     pub metrics: Option<InspectionMetrics>,
     #[serde(default)]
+    pub source: SessionSource,
+    #[serde(default)]
     pub ws_frames: Vec<WsFrame>,
     #[serde(default)]
     pub note: Option<String>,
@@ -109,30 +121,53 @@ pub struct Exchange {
     pub inspector_data: Option<InspectorData>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionChangeKind {
+    RequestCaptured,
+    ResponseCaptured,
+    SessionUpdated,
+    SessionsImported,
+    SessionsCleared,
+    WsFrameCaptured,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionChange {
+    pub session_id: Option<String>,
+    pub kind: SessionChangeKind,
+}
+
 pub struct SessionManager {
     exchanges: RwLock<IndexMap<String, Exchange>>,
     max_sessions: usize,
+    max_retained_body_bytes: usize,
     // Fired whenever sessions change; SSE subscribers receive notifications.
-    change_tx: broadcast::Sender<()>,
+    change_tx: broadcast::Sender<SessionChange>,
 }
 
 impl SessionManager {
+    #[allow(dead_code)]
     pub fn new(max_sessions: usize) -> Self {
+        Self::with_body_budget(max_sessions, usize::MAX)
+    }
+
+    pub fn with_body_budget(max_sessions: usize, max_retained_body_bytes: usize) -> Self {
         let (change_tx, _) = broadcast::channel(64);
         Self {
             exchanges: RwLock::new(IndexMap::new()),
             max_sessions,
+            max_retained_body_bytes,
             change_tx,
         }
     }
 
     /// Returns a broadcast receiver that fires on every session change.
-    pub fn subscribe(&self) -> broadcast::Receiver<()> {
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionChange> {
         self.change_tx.subscribe()
     }
 
-    fn notify(&self) {
-        let _ = self.change_tx.send(());
+    fn notify(&self, kind: SessionChangeKind, session_id: Option<String>) {
+        let _ = self.change_tx.send(SessionChange { session_id, kind });
     }
 
     pub async fn save_to_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<(), std::io::Error> {
@@ -144,39 +179,57 @@ impl SessionManager {
         tokio::fs::write(path, json).await
     }
 
-    pub async fn load_from_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<(), std::io::Error> {
+    pub async fn load_from_file<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+    ) -> Result<(), std::io::Error> {
         let data = tokio::fs::read(path).await?;
         let exchanges: IndexMap<String, Exchange> = serde_json::from_slice(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         {
             let mut guard = self.exchanges.write().unwrap();
             *guard = exchanges;
+            self.enforce_body_budget(&mut guard);
         }
-        self.notify();
+        self.notify(SessionChangeKind::SessionsImported, None);
         Ok(())
     }
 
     pub fn record_request(&self, id: String, request: RequestContext) {
+        self.record_request_with_source(id, request, SessionSource::Proxy);
+    }
+
+    pub fn record_request_with_source(
+        &self,
+        id: String,
+        request: RequestContext,
+        source: SessionSource,
+    ) {
         {
             let mut exchanges = self.exchanges.write().unwrap();
             if exchanges.len() >= self.max_sessions && !exchanges.contains_key(&id) {
                 // Evict the oldest entry (insertion order ≈ arrival order).
                 exchanges.shift_remove_index(0);
             }
-            exchanges.insert(id.clone(), Exchange {
-                id,
-                timestamp: Utc::now(),
-                updated_at: None,
-                request,
-                response: None,
-                metrics: None,
-                ws_frames: Vec::new(),
-                note: None,
-                tags: Vec::new(),
-                inspector_data: None,
-            });
+            exchanges.insert(
+                id.clone(),
+                Exchange {
+                    id: id.clone(),
+                    timestamp: Utc::now(),
+                    updated_at: None,
+                    request,
+                    response: None,
+                    metrics: None,
+                    source,
+                    ws_frames: Vec::new(),
+                    note: None,
+                    tags: Vec::new(),
+                    inspector_data: None,
+                },
+            );
+            self.enforce_body_budget(&mut exchanges);
         }
-        self.notify();
+        self.notify(SessionChangeKind::RequestCaptured, Some(id));
     }
 
     pub fn record_response(&self, id: String, response: ResponseContext) {
@@ -186,11 +239,17 @@ impl SessionManager {
                 exchange.response = Some(response);
                 exchange.updated_at = Some(Utc::now());
             }
+            self.enforce_body_budget(&mut exchanges);
         }
-        self.notify();
+        self.notify(SessionChangeKind::ResponseCaptured, Some(id));
     }
 
-    pub fn record_response_with_metrics(&self, id: String, response: ResponseContext, metrics: InspectionMetrics) {
+    pub fn record_response_with_metrics(
+        &self,
+        id: String,
+        response: ResponseContext,
+        metrics: InspectionMetrics,
+    ) {
         {
             let mut exchanges = self.exchanges.write().unwrap();
             if let Some(exchange) = exchanges.get_mut(&id) {
@@ -198,8 +257,9 @@ impl SessionManager {
                 exchange.metrics = Some(metrics);
                 exchange.updated_at = Some(Utc::now());
             }
+            self.enforce_body_budget(&mut exchanges);
         }
-        self.notify();
+        self.notify(SessionChangeKind::ResponseCaptured, Some(id));
     }
 
     pub fn import_sessions(&self, exchanges: Vec<Exchange>) {
@@ -211,8 +271,9 @@ impl SessionManager {
                 }
                 store.insert(e.id.clone(), e);
             }
+            self.enforce_body_budget(&mut store);
         }
-        self.notify();
+        self.notify(SessionChangeKind::SessionsImported, None);
     }
 
     pub fn append_ws_frame(&self, id: &str, frame: WsFrame) {
@@ -221,8 +282,9 @@ impl SessionManager {
             if let Some(exchange) = exchanges.get_mut(id) {
                 exchange.ws_frames.push(frame);
             }
+            self.enforce_body_budget(&mut exchanges);
         }
-        self.notify();
+        self.notify(SessionChangeKind::WsFrameCaptured, Some(id.to_string()));
     }
 
     /// Update the note and/or tags on an existing session.
@@ -235,13 +297,17 @@ impl SessionManager {
             match exchanges.get_mut(id) {
                 None => return false,
                 Some(ex) => {
-                    if let Some(n) = note { ex.note = if n.is_empty() { None } else { Some(n) }; }
-                    if let Some(t) = tags { ex.tags = t; }
+                    if let Some(n) = note {
+                        ex.note = if n.is_empty() { None } else { Some(n) };
+                    }
+                    if let Some(t) = tags {
+                        ex.tags = t;
+                    }
                     ex.updated_at = Some(Utc::now());
                 }
             }
         }
-        self.notify();
+        self.notify(SessionChangeKind::SessionUpdated, Some(id.to_string()));
         true
     }
 
@@ -259,7 +325,8 @@ impl SessionManager {
         }
         let terms = parse_search_query(query);
         let exchanges = self.exchanges.read().unwrap();
-        exchanges.values()
+        exchanges
+            .values()
             .filter(|ex| terms.iter().all(|t| t.matches(ex)))
             .cloned()
             .collect()
@@ -275,7 +342,7 @@ impl SessionManager {
             let mut exchanges = self.exchanges.write().unwrap();
             exchanges.clear();
         }
-        self.notify();
+        self.notify(SessionChangeKind::SessionsCleared, None);
     }
 
     pub fn update_inspector_data(&self, id: &str, data: InspectorData) -> bool {
@@ -285,6 +352,67 @@ impl SessionManager {
             true
         } else {
             false
+        }
+    }
+
+    fn enforce_body_budget(&self, exchanges: &mut IndexMap<String, Exchange>) {
+        if self.max_retained_body_bytes == usize::MAX {
+            return;
+        }
+
+        let mut retained = exchanges
+            .values()
+            .map(Self::exchange_body_size)
+            .sum::<usize>();
+        if retained <= self.max_retained_body_bytes {
+            return;
+        }
+
+        for exchange in exchanges.values_mut() {
+            if retained <= self.max_retained_body_bytes {
+                break;
+            }
+            let before = Self::exchange_body_size(exchange);
+            if before == 0 {
+                continue;
+            }
+            Self::clear_exchange_bodies(exchange);
+            retained = retained.saturating_sub(before);
+        }
+    }
+
+    fn exchange_body_size(exchange: &Exchange) -> usize {
+        let request_bytes = exchange.request.body.len()
+            + exchange
+                .request
+                .body_bytes
+                .as_ref()
+                .map_or(0, |bytes| bytes.len());
+        let response_bytes = exchange.response.as_ref().map_or(0, |response| {
+            response.body.len() + response.body_bytes.as_ref().map_or(0, |bytes| bytes.len())
+        });
+        let ws_bytes = exchange
+            .ws_frames
+            .iter()
+            .map(|frame| {
+                frame.payload_text.as_ref().map_or(0, String::len)
+                    + frame.payload_hex.as_ref().map_or(0, String::len)
+            })
+            .sum::<usize>();
+
+        request_bytes + response_bytes + ws_bytes
+    }
+
+    fn clear_exchange_bodies(exchange: &mut Exchange) {
+        exchange.request.body.clear();
+        exchange.request.body_bytes = None;
+        if let Some(response) = &mut exchange.response {
+            response.body.clear();
+            response.body_bytes = None;
+        }
+        for frame in &mut exchange.ws_frames {
+            frame.payload_text = None;
+            frame.payload_hex = None;
         }
     }
 }
@@ -304,31 +432,49 @@ pub enum SearchTerm {
 impl SearchTerm {
     pub fn matches(&self, ex: &Exchange) -> bool {
         match self {
-            SearchTerm::Tag(t) => ex.tags.iter().any(|tag| tag.to_lowercase().contains(t.as_str())),
+            SearchTerm::Tag(t) => ex
+                .tags
+                .iter()
+                .any(|tag| tag.to_lowercase().contains(t.as_str())),
             SearchTerm::Host(h) => ex.request.host.to_lowercase().contains(h.as_str()),
             SearchTerm::Method(m) => ex.request.method.to_lowercase() == m.as_str(),
-            SearchTerm::Status(s) => ex.response.as_ref().map(|r| r.status == *s).unwrap_or(false),
+            SearchTerm::Status(s) => ex
+                .response
+                .as_ref()
+                .map(|r| r.status == *s)
+                .unwrap_or(false),
             SearchTerm::Text(t) => {
                 let t = t.as_str();
                 ex.request.uri.to_lowercase().contains(t)
                     || ex.request.body.to_lowercase().contains(t)
-                    || ex.request.headers.iter().any(|(k, v)| {
-                        k.to_lowercase().contains(t) || v.to_lowercase().contains(t)
-                    })
-                    || ex.response.as_ref().map(|r| {
-                        r.body.to_lowercase().contains(t)
-                            || r.headers.iter().any(|(k, v)| {
-                                k.to_lowercase().contains(t) || v.to_lowercase().contains(t)
-                            })
-                    }).unwrap_or(false)
-                    || ex.note.as_deref().map(|n| n.to_lowercase().contains(t)).unwrap_or(false)
+                    || ex
+                        .request
+                        .headers
+                        .iter()
+                        .any(|(k, v)| k.to_lowercase().contains(t) || v.to_lowercase().contains(t))
+                    || ex
+                        .response
+                        .as_ref()
+                        .map(|r| {
+                            r.body.to_lowercase().contains(t)
+                                || r.headers.iter().any(|(k, v)| {
+                                    k.to_lowercase().contains(t) || v.to_lowercase().contains(t)
+                                })
+                        })
+                        .unwrap_or(false)
+                    || ex
+                        .note
+                        .as_deref()
+                        .map(|n| n.to_lowercase().contains(t))
+                        .unwrap_or(false)
             }
         }
     }
 }
 
 pub fn parse_search_query(query: &str) -> Vec<SearchTerm> {
-    query.split_whitespace()
+    query
+        .split_whitespace()
         .filter(|s| !s.is_empty())
         .map(|token| {
             if let Some(t) = token.strip_prefix("tag:") {
@@ -490,7 +636,43 @@ mod tests {
         sm.record_request("id-new".to_string(), req("/new"));
         let all = sm.get_all_sessions();
         assert_eq!(all.len(), cap, "must not grow past cap");
-        assert!(all.iter().any(|e| e.id == "id-new"), "new session must be present");
+        assert!(
+            all.iter().any(|e| e.id == "id-new"),
+            "new session must be present"
+        );
+    }
+
+    #[test]
+    fn body_budget_drops_oldest_bodies_but_keeps_metadata() {
+        let sm = SessionManager::with_body_budget(10, 24);
+        sm.record_request(
+            "old".to_string(),
+            RequestContext {
+                body: "old-request-body".to_string(),
+                body_bytes: Some(bytes::Bytes::from_static(b"old-request-body")),
+                ..req("/old")
+            },
+        );
+        sm.record_response(
+            "old".to_string(),
+            ResponseContext {
+                body: "old-response-body".to_string(),
+                body_bytes: Some(bytes::Bytes::from_static(b"old-response-body")),
+                ..res("/old", 200)
+            },
+        );
+        sm.record_request("new".to_string(), req("/new"));
+
+        let old = sm.get_session("old").unwrap();
+        let new = sm.get_session("new").unwrap();
+
+        assert_eq!(old.request.uri, "/old");
+        assert_eq!(old.response.as_ref().unwrap().status, 200);
+        assert!(old.request.body.is_empty());
+        assert!(old.request.body_bytes.is_none());
+        assert!(old.response.as_ref().unwrap().body.is_empty());
+        assert!(old.response.as_ref().unwrap().body_bytes.is_none());
+        assert_eq!(new.request.body, "body");
     }
 
     #[test]
@@ -498,7 +680,11 @@ mod tests {
         let sm = SessionManager::new(10_000);
         let mut rx = sm.subscribe();
         sm.record_request("id1".to_string(), req("/ping"));
-        assert!(rx.try_recv().is_ok(), "subscriber should receive notification");
+        let change = rx
+            .try_recv()
+            .expect("subscriber should receive notification");
+        assert_eq!(change.kind, SessionChangeKind::RequestCaptured);
+        assert_eq!(change.session_id.as_deref(), Some("id1"));
     }
 
     #[test]
@@ -518,7 +704,10 @@ mod tests {
         let sm = SessionManager::new(10_000);
         sm.record_request("id1".to_string(), req("/test"));
         let session = sm.get_session("id1").unwrap();
-        assert!(session.updated_at.is_none(), "updated_at must be None until a response arrives");
+        assert!(
+            session.updated_at.is_none(),
+            "updated_at must be None until a response arrives"
+        );
     }
 
     #[test]
@@ -529,20 +718,35 @@ mod tests {
         sm.record_response("id1".to_string(), res("/test", 200));
         let after = Utc::now();
         let session = sm.get_session("id1").unwrap();
-        let updated_at = session.updated_at.expect("updated_at must be set after record_response");
-        assert!(updated_at >= before && updated_at <= after, "updated_at must be recent");
+        let updated_at = session
+            .updated_at
+            .expect("updated_at must be set after record_response");
+        assert!(
+            updated_at >= before && updated_at <= after,
+            "updated_at must be recent"
+        );
     }
 
     #[test]
     fn record_response_with_metrics_sets_updated_at() {
         let sm = SessionManager::new(10_000);
         sm.record_request("id1".to_string(), req("/test"));
-        let metrics = InspectionMetrics { latency_ms: 10, request_size_bytes: 0, response_size_bytes: 0, status_code: 200, ttfb_ms: 0, body_ms: 0, ..Default::default() };
+        let metrics = InspectionMetrics {
+            latency_ms: 10,
+            request_size_bytes: 0,
+            response_size_bytes: 0,
+            status_code: 200,
+            ttfb_ms: 0,
+            body_ms: 0,
+            ..Default::default()
+        };
         let before = Utc::now();
         sm.record_response_with_metrics("id1".to_string(), res("/test", 200), metrics);
         let after = Utc::now();
         let session = sm.get_session("id1").unwrap();
-        let updated_at = session.updated_at.expect("updated_at must be set after record_response_with_metrics");
+        let updated_at = session
+            .updated_at
+            .expect("updated_at must be set after record_response_with_metrics");
         assert!(updated_at >= before && updated_at <= after);
     }
 
@@ -552,7 +756,11 @@ mod tests {
     fn annotate_stores_note_and_tags() {
         let sm = SessionManager::new(10_000);
         sm.record_request("id1".to_string(), req("/test"));
-        let ok = sm.annotate("id1", Some("auth bug".to_string()), Some(vec!["auth".to_string(), "bug".to_string()]));
+        let ok = sm.annotate(
+            "id1",
+            Some("auth bug".to_string()),
+            Some(vec!["auth".to_string(), "bug".to_string()]),
+        );
         assert!(ok);
         let ex = sm.get_session("id1").unwrap();
         assert_eq!(ex.note.as_deref(), Some("auth bug"));
@@ -628,14 +836,20 @@ mod tests {
         // Drain the record_request notification.
         let _ = rx.try_recv();
         sm.annotate("id1", Some("note".to_string()), None);
-        assert!(rx.try_recv().is_ok(), "annotate must fire SSE notification");
+        let change = rx.try_recv().expect("annotate must fire SSE notification");
+        assert_eq!(change.kind, SessionChangeKind::SessionUpdated);
+        assert_eq!(change.session_id.as_deref(), Some("id1"));
     }
 
     #[tokio::test]
     async fn annotation_roundtrip_through_save_load() {
         let sm = SessionManager::new(10_000);
         sm.record_request("id1".to_string(), req("/save-annot-test"));
-        sm.annotate("id1", Some("important".to_string()), Some(vec!["prod".to_string()]));
+        sm.annotate(
+            "id1",
+            Some("important".to_string()),
+            Some(vec!["prod".to_string()]),
+        );
 
         let path = std::env::temp_dir().join("oproxy_annot_roundtrip_test.json");
         sm.save_to_file(&path).await.expect("save failed");
@@ -681,9 +895,15 @@ mod tests {
 
     #[test]
     fn inspection_metrics_absent_timing_fields_omitted_from_json() {
-        let m = InspectionMetrics { latency_ms: 10, ..Default::default() };
+        let m = InspectionMetrics {
+            latency_ms: 10,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&m).unwrap();
-        assert!(!json.contains("dns_ms"), "absent optional fields must not appear in JSON");
+        assert!(
+            !json.contains("dns_ms"),
+            "absent optional fields must not appear in JSON"
+        );
         assert!(!json.contains("tcp_connect_ms"));
         assert!(!json.contains("tls_ms"));
     }
@@ -812,9 +1032,17 @@ mod tests {
         let terms = parse_search_query("tag:auth");
         assert_eq!(terms.len(), 1);
         let mut ex = Exchange {
-            id: "x".to_string(), timestamp: Utc::now(), updated_at: None,
-            request: req("/x"), response: None, metrics: None, ws_frames: vec![],
-            note: None, tags: vec!["auth".to_string()], inspector_data: None,
+            id: "x".to_string(),
+            timestamp: Utc::now(),
+            updated_at: None,
+            request: req("/x"),
+            response: None,
+            metrics: None,
+            source: SessionSource::Proxy,
+            ws_frames: vec![],
+            note: None,
+            tags: vec!["auth".to_string()],
+            inspector_data: None,
         };
         assert!(terms[0].matches(&ex));
         ex.tags = vec![];
@@ -832,6 +1060,7 @@ mod tests {
             request: req("/imported"),
             response: None,
             metrics: None,
+            source: SessionSource::Proxy,
             ws_frames: vec![],
             note: None,
             tags: vec![],

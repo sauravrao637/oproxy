@@ -1,15 +1,14 @@
+use crate::middleware::{RequestContext, ResponseContext};
 /// HAR 1.2 (HTTP Archive) serialisation/deserialisation.
 /// Spec: http://www.softwareishard.com/blog/har-12-spec/
 ///
 /// oproxy-specific extension fields are prefixed with `_oproxy_` and are
 /// preserved on import so sessions roundtrip without data loss.
-
-use crate::session::{Exchange, InspectionMetrics};
-use crate::middleware::{RequestContext, ResponseContext};
+use crate::session::{Exchange, InspectionMetrics, SessionSource};
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use indexmap::IndexMap;
 
 // ── HAR types ─────────────────────────────────────────────────────────────────
 
@@ -41,18 +40,38 @@ pub struct HarEntry {
     pub request: HarRequest,
     pub response: HarResponse,
     pub timings: HarTimings,
-    #[serde(rename = "serverIPAddress", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "serverIPAddress",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub server_ip_address: Option<String>,
     #[serde(rename = "cache")]
     pub cache: HarCache,
     // oproxy extensions ──────────────────────────────────────────────────────
-    #[serde(rename = "_oproxy_id", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_oproxy_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub oproxy_id: Option<String>,
-    #[serde(rename = "_oproxy_note", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_oproxy_note",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub oproxy_note: Option<String>,
-    #[serde(rename = "_oproxy_tags", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "_oproxy_tags",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub oproxy_tags: Vec<String>,
-    #[serde(rename = "_oproxy_updated_at", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_oproxy_updated_at",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub oproxy_updated_at: Option<String>,
 }
 
@@ -148,8 +167,14 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
     let req = &ex.request;
 
     // Headers → HAR list
-    let har_req_headers: Vec<HarNameValue> = req.headers.iter()
-        .map(|(k, v)| HarNameValue { name: k.clone(), value: v.clone() })
+    let har_req_headers: Vec<HarNameValue> = req
+        .headers
+        .iter()
+        .filter(|(k, _)| !should_skip_har_header(k))
+        .map(|(k, v)| HarNameValue {
+            name: k.clone(),
+            value: v.clone(),
+        })
         .collect();
 
     // Extract query string from URI
@@ -159,10 +184,15 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
     let post_data = if req.body.is_empty() {
         None
     } else {
-        let mime_type = req.headers.get("content-type")
+        let mime_type = req
+            .headers
+            .get("content-type")
             .cloned()
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        Some(HarPostData { mime_type, text: req.body.clone() })
+        Some(HarPostData {
+            mime_type,
+            text: req.body.clone(),
+        })
     };
 
     let har_request = HarRequest {
@@ -178,10 +208,18 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
     };
 
     let (har_response, total_ms, timings) = if let Some(res) = &ex.response {
-        let har_res_headers: Vec<HarNameValue> = res.headers.iter()
-            .map(|(k, v)| HarNameValue { name: k.clone(), value: v.clone() })
+        let har_res_headers: Vec<HarNameValue> = res
+            .headers
+            .iter()
+            .filter(|(k, _)| !should_skip_har_header(k))
+            .map(|(k, v)| HarNameValue {
+                name: k.clone(),
+                value: v.clone(),
+            })
             .collect();
-        let mime_type = res.headers.get("content-type")
+        let mime_type = res
+            .headers
+            .get("content-type")
             .cloned()
             .unwrap_or_else(|| "text/plain".to_string());
         let status_text = http_status_text(res.status);
@@ -195,7 +233,11 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
             content: HarContent {
                 size: res.body.len() as i64,
                 mime_type,
-                text: if res.body.is_empty() { None } else { Some(res.body.clone()) },
+                text: if res.body.is_empty() {
+                    None
+                } else {
+                    Some(res.body.clone())
+                },
             },
             redirect_url: res.headers.get("location").cloned().unwrap_or_default(),
             headers_size: -1,
@@ -203,33 +245,45 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
         };
 
         let (total_ms, timings) = if let Some(m) = &ex.metrics {
-            let known = m.dns_ms.unwrap_or(0) + m.tcp_connect_ms.unwrap_or(0) + m.tls_ms.unwrap_or(0);
+            let known =
+                m.dns_ms.unwrap_or(0) + m.tcp_connect_ms.unwrap_or(0) + m.tls_ms.unwrap_or(0);
             let wait = m.ttfb_ms.saturating_sub(known) as f64;
-            (m.latency_ms as f64, HarTimings {
-                dns: m.dns_ms.map(|v| v as f64),
-                connect: m.tcp_connect_ms.map(|v| v as f64),
-                ssl: m.tls_ms.map(|v| v as f64),
-                wait,
-                receive: m.body_ms as f64,
-                send: 0.0,
-            })
+            (
+                m.latency_ms as f64,
+                HarTimings {
+                    dns: m.dns_ms.map(|v| v as f64),
+                    connect: m.tcp_connect_ms.map(|v| v as f64),
+                    ssl: m.tls_ms.map(|v| v as f64),
+                    wait,
+                    receive: m.body_ms as f64,
+                    send: 0.0,
+                },
+            )
         } else {
             (0.0, HarTimings::default())
         };
 
         (resp, total_ms, timings)
     } else {
-        (HarResponse {
-            status: 0,
-            status_text: String::new(),
-            http_version: "HTTP/1.1".to_string(),
-            cookies: vec![],
-            headers: vec![],
-            content: HarContent { size: 0, mime_type: "application/octet-stream".to_string(), text: None },
-            redirect_url: String::new(),
-            headers_size: -1,
-            body_size: -1,
-        }, 0.0, HarTimings::default())
+        (
+            HarResponse {
+                status: 0,
+                status_text: String::new(),
+                http_version: "HTTP/1.1".to_string(),
+                cookies: vec![],
+                headers: vec![],
+                content: HarContent {
+                    size: 0,
+                    mime_type: "application/octet-stream".to_string(),
+                    text: None,
+                },
+                redirect_url: String::new(),
+                headers_size: -1,
+                body_size: -1,
+            },
+            0.0,
+            HarTimings::default(),
+        )
     };
 
     HarEntry {
@@ -250,27 +304,44 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
 // ── Conversion: HarEntry → Exchange ──────────────────────────────────────────
 
 pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
-    let mut headers: HashMap<String, String> = entry.request.headers.iter()
+    let headers: HashMap<String, String> = entry
+        .request
+        .headers
+        .iter()
         .map(|nv| (nv.name.clone(), nv.value.clone()))
         .collect();
 
-    let body = entry.request.post_data.as_ref()
+    let body = entry
+        .request
+        .post_data
+        .as_ref()
         .map(|p| p.text.clone())
         .unwrap_or_default();
 
     let host = extract_host(&entry.request.url);
 
-    let id = entry.oproxy_id.clone()
+    let id = entry
+        .oproxy_id
+        .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let timestamp = entry.started_date_time.parse::<DateTime<Utc>>()
+    let timestamp = entry
+        .started_date_time
+        .parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| Utc::now());
 
-    let updated_at = entry.oproxy_updated_at.as_deref()
+    let updated_at = entry
+        .oproxy_updated_at
+        .as_deref()
         .and_then(|s| s.parse::<DateTime<Utc>>().ok());
 
+    let ttfb_ms = full_ttfb_ms(&entry.timings);
+
     let response = if entry.response.status > 0 {
-        let res_headers: HashMap<String, String> = entry.response.headers.iter()
+        let res_headers: HashMap<String, String> = entry
+            .response
+            .headers
+            .iter()
             .map(|nv| (nv.name.clone(), nv.value.clone()))
             .collect();
         let body = entry.response.content.text.clone().unwrap_or_default();
@@ -280,7 +351,7 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
             body,
             request_uri: entry.request.url.clone(),
             session_id: Some(id.clone()),
-            ttfb_ms: entry.timings.wait as u64,
+            ttfb_ms,
             body_ms: entry.timings.receive as u64,
             body_bytes: None,
         })
@@ -295,7 +366,7 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
             request_size_bytes: entry.request.body_size.max(0) as usize,
             response_size_bytes: entry.response.body_size.max(0) as usize,
             status_code: entry.response.status,
-            ttfb_ms: entry.timings.wait as u64,
+            ttfb_ms,
             body_ms: entry.timings.receive as u64,
             dns_ms: entry.timings.dns.map(|v| v as u64),
             tcp_connect_ms: entry.timings.connect.map(|v| v as u64),
@@ -319,6 +390,7 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
         },
         response,
         metrics,
+        source: SessionSource::Imported,
         ws_frames: vec![],
         note: entry.oproxy_note.clone(),
         tags: entry.oproxy_tags.clone(),
@@ -341,26 +413,90 @@ pub fn exchanges_to_har(exchanges: &IndexMap<String, Exchange>) -> Har {
     }
 }
 
+pub fn exchanges_to_har_redacted(exchanges: &IndexMap<String, Exchange>) -> Har {
+    let redacted = exchanges
+        .values()
+        .cloned()
+        .map(redact_exchange_for_export)
+        .map(|ex| exchange_to_har_entry(&ex))
+        .collect();
+
+    Har {
+        log: HarLog {
+            version: "1.2".to_string(),
+            creator: HarCreator {
+                name: "oproxy".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            entries: redacted,
+        },
+    }
+}
+
 pub fn har_to_exchanges(har: &Har) -> Vec<Exchange> {
     har.log.entries.iter().map(har_entry_to_exchange).collect()
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+fn redact_exchange_for_export(mut ex: Exchange) -> Exchange {
+    let sensitive_values =
+        crate::redaction::sensitive_values(&ex.request.headers, &ex.request.body);
+    ex.request.headers = crate::redaction::redact_headers(&ex.request.headers);
+    strip_har_headers(&mut ex.request.headers);
+    ex.request.body = crate::redaction::redact_body_text(&ex.request.body);
+    if let Some(response) = &mut ex.response {
+        response.headers = crate::redaction::redact_headers(&response.headers);
+        strip_har_headers(&mut response.headers);
+        response.body = crate::redaction::redact_body_text(&response.body);
+        response.body = crate::redaction::redact_known_values(&response.body, &sensitive_values);
+    }
+    ex
+}
+
+fn strip_har_headers(headers: &mut HashMap<String, String>) {
+    headers.retain(|name, _| !should_skip_har_header(name));
+}
+
+fn full_ttfb_ms(timings: &HarTimings) -> u64 {
+    let setup_ms =
+        timings.dns.unwrap_or(0.0) + timings.connect.unwrap_or(0.0) + timings.ssl.unwrap_or(0.0);
+    (setup_ms + timings.wait).max(0.0) as u64
+}
+
+fn should_skip_har_header(header: &str) -> bool {
+    let header = header.trim().to_ascii_lowercase();
+    matches!(
+        header.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    ) || header.starts_with("x-oproxy-")
+}
+
 fn parse_query_string(uri: &str) -> Vec<HarNameValue> {
     let query = uri.find('?').map(|i| &uri[i + 1..]).unwrap_or("");
     if query.is_empty() {
         return vec![];
     }
-    query.split('&').filter_map(|pair| {
-        let mut parts = pair.splitn(2, '=');
-        let name = parts.next()?;
-        let value = parts.next().unwrap_or("");
-        Some(HarNameValue {
-            name: url_decode(name),
-            value: url_decode(value),
+    query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let name = parts.next()?;
+            let value = parts.next().unwrap_or("");
+            Some(HarNameValue {
+                name: url_decode(name),
+                value: url_decode(value),
+            })
         })
-    }).collect()
+        .collect()
 }
 
 fn url_decode(s: &str) -> String {
@@ -368,44 +504,68 @@ fn url_decode(s: &str) -> String {
 }
 
 fn extract_host(url: &str) -> String {
-    let rest = if let Some(i) = url.find("://") { &url[i + 3..] } else { url };
-    rest.split('/').next().unwrap_or("").split('?').next().unwrap_or("").to_string()
+    let rest = if let Some(i) = url.find("://") {
+        &url[i + 3..]
+    } else {
+        url
+    };
+    rest.split('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn extract_request_cookies(req: &RequestContext) -> Vec<HarCookie> {
-    req.headers.get("cookie")
+    req.headers
+        .get("cookie")
         .map(|v| parse_cookies(v))
         .unwrap_or_default()
 }
 
 fn extract_response_cookies(res: &ResponseContext) -> Vec<HarCookie> {
-    res.headers.get("set-cookie")
-        .map(|v| {
-            v.split(';').next()
-                .map(|pair| parse_cookies(pair))
-                .unwrap_or_default()
-        })
+    res.headers
+        .get("set-cookie")
+        .map(|v| v.split(';').next().map(parse_cookies).unwrap_or_default())
         .unwrap_or_default()
 }
 
 fn parse_cookies(s: &str) -> Vec<HarCookie> {
-    s.split(';').filter_map(|pair| {
-        let mut parts = pair.trim().splitn(2, '=');
-        let name = parts.next()?.trim().to_string();
-        let value = parts.next().unwrap_or("").trim().to_string();
-        if name.is_empty() { None } else { Some(HarCookie { name, value }) }
-    }).collect()
+    s.split(';')
+        .filter_map(|pair| {
+            let mut parts = pair.trim().splitn(2, '=');
+            let name = parts.next()?.trim().to_string();
+            let value = parts.next().unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some(HarCookie { name, value })
+            }
+        })
+        .collect()
 }
 
 fn http_status_text(status: u16) -> String {
     match status {
-        200 => "OK", 201 => "Created", 204 => "No Content",
-        301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
-        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-        404 => "Not Found", 405 => "Method Not Allowed",
-        500 => "Internal Server Error", 502 => "Bad Gateway", 503 => "Service Unavailable",
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
         _ => "",
-    }.to_string()
+    }
+    .to_string()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -413,8 +573,8 @@ fn http_status_text(status: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::InspectionMetrics;
     use crate::middleware::{RequestContext, ResponseContext};
+    use crate::session::InspectionMetrics;
     use chrono::Utc;
 
     fn make_exchange(method: &str, uri: &str, status: u16, body: &str, req_body: &str) -> Exchange {
@@ -449,7 +609,9 @@ mod tests {
                 body_ms: 20,
                 ..Default::default()
             })
-        } else { None };
+        } else {
+            None
+        };
         Exchange {
             id: "test-id".to_string(),
             timestamp: Utc::now(),
@@ -464,6 +626,7 @@ mod tests {
             },
             response,
             metrics,
+            source: SessionSource::Proxy,
             ws_frames: vec![],
             note: None,
             tags: vec![],
@@ -483,7 +646,13 @@ mod tests {
 
     #[test]
     fn har_entry_response_status_and_body() {
-        let ex = make_exchange("POST", "https://example.com/submit", 201, r#"{"id":1}"#, "{}");
+        let ex = make_exchange(
+            "POST",
+            "https://example.com/submit",
+            201,
+            r#"{"id":1}"#,
+            "{}",
+        );
         let entry = exchange_to_har_entry(&ex);
         assert_eq!(entry.response.status, 201);
         assert_eq!(entry.response.content.text.as_deref(), Some(r#"{"id":1}"#));
@@ -491,10 +660,89 @@ mod tests {
 
     #[test]
     fn har_entry_post_data_populated_for_request_body() {
-        let ex = make_exchange("POST", "https://api.example.com/", 200, "", r#"{"data":"x"}"#);
+        let ex = make_exchange(
+            "POST",
+            "https://api.example.com/",
+            200,
+            "",
+            r#"{"data":"x"}"#,
+        );
         let entry = exchange_to_har_entry(&ex);
         assert!(entry.request.post_data.is_some());
         assert!(entry.request.post_data.unwrap().text.contains("data"));
+    }
+
+    #[test]
+    fn redacted_har_masks_sensitive_headers_and_body() {
+        let mut ex = make_exchange(
+            "POST",
+            "https://api.example.com/",
+            200,
+            r#"{"access_token":"response-token"}"#,
+            r#"{"password":"request-password"}"#,
+        );
+        ex.request.headers.insert(
+            "authorization".to_string(),
+            "Bearer request-token".to_string(),
+        );
+        let mut map = IndexMap::new();
+        map.insert(ex.id.clone(), ex);
+
+        let har = exchanges_to_har_redacted(&map);
+        let json = serde_json::to_string(&har).unwrap();
+
+        assert!(json.contains(crate::redaction::REDACTED));
+        assert!(!json.contains("request-token"));
+        assert!(!json.contains("request-password"));
+        assert!(!json.contains("response-token"));
+    }
+
+    #[test]
+    fn har_export_omits_internal_proxy_headers_even_when_raw() {
+        let mut ex = make_exchange("GET", "https://example.com/", 200, "ok", "");
+        ex.request
+            .headers
+            .insert("x-oproxy-session-id".to_string(), "sid".to_string());
+        ex.request.headers.insert(
+            "x-oproxy-destination".to_string(),
+            "https://example.com".to_string(),
+        );
+        ex.request
+            .headers
+            .insert("proxy-connection".to_string(), "Keep-Alive".to_string());
+        ex.request
+            .headers
+            .insert("x-custom".to_string(), "yes".to_string());
+        let mut map = IndexMap::new();
+        map.insert(ex.id.clone(), ex);
+
+        let har = exchanges_to_har(&map);
+        let json = serde_json::to_string(&har).unwrap();
+
+        assert!(!json.contains("x-oproxy-session-id"));
+        assert!(!json.contains("x-oproxy-destination"));
+        assert!(!json.contains("proxy-connection"));
+        assert!(json.contains("x-custom"));
+    }
+
+    #[test]
+    fn redacted_har_masks_request_secret_reflected_in_response_text() {
+        let ex = make_exchange(
+            "POST",
+            "https://api.example.com/login",
+            200,
+            r#"hello {"token":"secret-value"}"#,
+            r#"{"token":"secret-value","name":"dev"}"#,
+        );
+        let mut map = IndexMap::new();
+        map.insert(ex.id.clone(), ex);
+
+        let har = exchanges_to_har_redacted(&map);
+        let json = serde_json::to_string(&har).unwrap();
+
+        assert!(json.contains(crate::redaction::REDACTED));
+        assert!(!json.contains("secret-value"));
+        assert!(json.contains("dev"));
     }
 
     #[test]
@@ -556,7 +804,13 @@ mod tests {
 
     #[test]
     fn har_roundtrip_preserves_method_url_status() {
-        let ex = make_exchange("PUT", "https://api.example.com/item/1", 200, "updated", r#"{"name":"x"}"#);
+        let ex = make_exchange(
+            "PUT",
+            "https://api.example.com/item/1",
+            200,
+            "updated",
+            r#"{"name":"x"}"#,
+        );
         let entry = exchange_to_har_entry(&ex);
         let ex2 = har_entry_to_exchange(&entry);
         assert_eq!(ex2.request.method, "PUT");
@@ -597,6 +851,25 @@ mod tests {
         assert_eq!(m.dns_ms, Some(5));
         assert_eq!(m.tcp_connect_ms, Some(10));
         assert_eq!(m.tls_ms, Some(20));
+    }
+
+    #[test]
+    fn har_roundtrip_preserves_full_ttfb_with_setup_timing() {
+        let mut ex = make_exchange("GET", "https://example.com/", 200, "ok", "");
+        if let Some(m) = &mut ex.metrics {
+            m.ttfb_ms = 95;
+            m.dns_ms = Some(5);
+            m.tcp_connect_ms = Some(10);
+            m.tls_ms = Some(20);
+        }
+        let entry = exchange_to_har_entry(&ex);
+        assert_eq!(entry.timings.wait, 60.0);
+
+        let ex2 = har_entry_to_exchange(&entry);
+        let response = ex2.response.unwrap();
+        let metrics = ex2.metrics.unwrap();
+        assert_eq!(response.ttfb_ms, 95);
+        assert_eq!(metrics.ttfb_ms, 95);
     }
 
     #[test]

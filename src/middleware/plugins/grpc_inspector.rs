@@ -15,7 +15,8 @@ impl GrpcInspectorMiddleware {
 
     /// Parse service and method from URI pattern `/package.ServiceName/MethodName`.
     pub fn parse_uri(uri: &str) -> (Option<String>, Option<String>) {
-        let path = uri.trim_start_matches("http://")
+        let path = uri
+            .trim_start_matches("http://")
             .trim_start_matches("https://");
         let path = if let Some(slash) = path.find('/') {
             &path[slash..]
@@ -74,10 +75,15 @@ impl GrpcInspectorMiddleware {
                 }
                 1 => {
                     // 64-bit
-                    if pos + 8 > data.len() { break; }
+                    if pos + 8 > data.len() {
+                        break;
+                    }
                     let bytes = &data[pos..pos + 8];
                     pos += 8;
-                    let hex = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                    let hex = bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>();
                     serde_json::Value::String(hex)
                 }
                 2 => {
@@ -86,14 +92,19 @@ impl GrpcInspectorMiddleware {
                         Some((len, n)) => {
                             pos += n;
                             let len = len as usize;
-                            if pos + len > data.len() { break; }
+                            if pos + len > data.len() {
+                                break;
+                            }
                             let bytes = &data[pos..pos + len];
                             pos += len;
                             // Try to decode as UTF-8 string, else hex
                             match std::str::from_utf8(bytes) {
                                 Ok(s) => serde_json::Value::String(s.to_string()),
                                 Err(_) => {
-                                    let hex = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                                    let hex = bytes
+                                        .iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect::<String>();
                                     serde_json::Value::String(hex)
                                 }
                             }
@@ -103,10 +114,15 @@ impl GrpcInspectorMiddleware {
                 }
                 5 => {
                     // 32-bit
-                    if pos + 4 > data.len() { break; }
+                    if pos + 4 > data.len() {
+                        break;
+                    }
                     let bytes = &data[pos..pos + 4];
                     pos += 4;
-                    let hex = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                    let hex = bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>();
                     serde_json::Value::String(hex)
                 }
                 _ => {
@@ -146,7 +162,9 @@ fn read_varint(data: &[u8], mut pos: usize) -> Option<(u64, usize)> {
 
 #[async_trait]
 impl Middleware for GrpcInspectorMiddleware {
-    fn name(&self) -> &str { "GrpcInspectorMiddleware" }
+    fn name(&self) -> &str {
+        "GrpcInspectorMiddleware"
+    }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
         if !Self::is_grpc(ctx) {
@@ -154,11 +172,14 @@ impl Middleware for GrpcInspectorMiddleware {
         }
 
         let (service, method) = Self::parse_uri(&ctx.uri);
-        let body_bytes = ctx.body_bytes.as_ref()
+        let body_bytes = ctx
+            .body_bytes
+            .as_ref()
             .map(|b| b.as_ref())
             .unwrap_or(ctx.body.as_bytes());
 
-        let messages = if let Some((compressed, proto_bytes)) = Self::decode_grpc_frame(body_bytes) {
+        let messages = if let Some((compressed, proto_bytes)) = Self::decode_grpc_frame(body_bytes)
+        {
             let fields = Self::decode_wire_format(&proto_bytes);
             vec![GrpcMessage {
                 direction: "request".to_string(),
@@ -170,7 +191,11 @@ impl Middleware for GrpcInspectorMiddleware {
             vec![]
         };
 
-        let info = GrpcInfo { service, method, messages };
+        let info = GrpcInfo {
+            service,
+            method,
+            messages,
+        };
         if let Ok(json) = serde_json::to_string(&info) {
             ctx.headers.insert("x-oproxy-grpc".to_string(), json);
         }
@@ -227,7 +252,8 @@ mod tests {
 
     #[test]
     fn uri_with_host_prefix_parsed() {
-        let (svc, method) = GrpcInspectorMiddleware::parse_uri("http://api.example.com/pkg.Service/Method");
+        let (svc, method) =
+            GrpcInspectorMiddleware::parse_uri("http://api.example.com/pkg.Service/Method");
         assert_eq!(svc.as_deref(), Some("pkg.Service"));
         assert_eq!(method.as_deref(), Some("Method"));
     }

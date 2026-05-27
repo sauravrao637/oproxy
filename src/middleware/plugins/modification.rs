@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,7 +20,9 @@ pub struct ModificationMiddleware {
 
 impl ModificationMiddleware {
     pub fn new(rules: Vec<ModificationRule>) -> Self {
-        Self { rules: Arc::new(RwLock::new(rules)) }
+        Self {
+            rules: Arc::new(RwLock::new(rules)),
+        }
     }
 }
 
@@ -40,6 +42,7 @@ impl Middleware for ModificationMiddleware {
                 if let Some(ref body) = rule.body_replacement {
                     ctx.body = body.clone();
                     ctx.body_bytes = None;
+                    ctx.headers.remove("content-length");
                 }
             }
         }
@@ -59,13 +62,23 @@ mod tests {
     use std::collections::HashMap;
 
     fn req(uri: &str) -> RequestContext {
-        RequestContext { method: "GET".to_string(), uri: uri.to_string(), headers: HashMap::new(), body: "original".to_string(), host: "localhost".to_string(), body_bytes: None }
+        RequestContext {
+            method: "GET".to_string(),
+            uri: uri.to_string(),
+            headers: HashMap::new(),
+            body: "original".to_string(),
+            host: "localhost".to_string(),
+            body_bytes: None,
+        }
     }
 
     fn rule(pattern: &str, hdrs: Vec<(&str, &str)>, body: Option<&str>) -> ModificationRule {
         ModificationRule {
             request_uri_pattern: pattern.to_string(),
-            header_replacements: hdrs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            header_replacements: hdrs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             body_replacement: body.map(|s| s.to_string()),
         }
     }
@@ -75,7 +88,10 @@ mod tests {
         let mw = ModificationMiddleware::new(vec![rule("/api", vec![("x-modified", "yes")], None)]);
         let mut ctx = req("/api/resource");
         mw.on_request(&mut ctx).await;
-        assert_eq!(ctx.headers.get("x-modified").map(|s| s.as_str()), Some("yes"));
+        assert_eq!(
+            ctx.headers.get("x-modified").map(|s| s.as_str()),
+            Some("yes")
+        );
         assert_eq!(ctx.body, "original");
     }
 
@@ -83,13 +99,20 @@ mod tests {
     async fn matching_rule_replaces_body() {
         let mw = ModificationMiddleware::new(vec![rule("/api", vec![], Some("replaced"))]);
         let mut ctx = req("/api/resource");
+        ctx.headers
+            .insert("content-length".to_string(), "8".to_string());
         mw.on_request(&mut ctx).await;
         assert_eq!(ctx.body, "replaced");
+        assert!(!ctx.headers.contains_key("content-length"));
     }
 
     #[tokio::test]
     async fn non_matching_uri_leaves_context_unchanged() {
-        let mw = ModificationMiddleware::new(vec![rule("/admin", vec![("x-admin", "1")], Some("admin-body"))]);
+        let mw = ModificationMiddleware::new(vec![rule(
+            "/admin",
+            vec![("x-admin", "1")],
+            Some("admin-body"),
+        )]);
         let mut ctx = req("/api/resource");
         mw.on_request(&mut ctx).await;
         assert!(!ctx.headers.contains_key("x-admin"));
@@ -121,9 +144,21 @@ mod tests {
     #[tokio::test]
     async fn on_response_always_continues_unchanged() {
         let mw = ModificationMiddleware::new(vec![rule("/any", vec![("x-h", "v")], Some("body"))]);
-        let mut ctx = ResponseContext { status: 200, headers: HashMap::new(), body: "resp".to_string(), request_uri: "/any".to_string(), session_id: None, ttfb_ms: 0, body_ms: 0, body_bytes: None };
+        let mut ctx = ResponseContext {
+            status: 200,
+            headers: HashMap::new(),
+            body: "resp".to_string(),
+            request_uri: "/any".to_string(),
+            session_id: None,
+            ttfb_ms: 0,
+            body_ms: 0,
+            body_bytes: None,
+        };
         let action = mw.on_response(&mut ctx).await;
         assert_eq!(action, MiddlewareAction::Continue);
-        assert_eq!(ctx.body, "resp", "response body must not be touched by ModificationMiddleware");
+        assert_eq!(
+            ctx.body, "resp",
+            "response body must not be touched by ModificationMiddleware"
+        );
     }
 }

@@ -8,7 +8,11 @@ pub struct GraphQLInspectorMiddleware;
 
 impl GraphQLInspectorMiddleware {
     fn is_graphql(ctx: &RequestContext) -> bool {
-        let ct = ctx.headers.get("content-type").map(|v| v.as_str()).unwrap_or("");
+        let ct = ctx
+            .headers
+            .get("content-type")
+            .map(|v| v.as_str())
+            .unwrap_or("");
         (ct.contains("application/json") || ct.contains("application/graphql"))
             && ctx.body.contains("\"query\"")
     }
@@ -36,15 +40,15 @@ impl GraphQLInspectorMiddleware {
                             OperationDefinition::Query(q) => {
                                 ("query".to_string(), q.name.as_ref().map(|n| n.to_string()))
                             }
-                            OperationDefinition::Mutation(m) => {
-                                ("mutation".to_string(), m.name.as_ref().map(|n| n.to_string()))
-                            }
-                            OperationDefinition::Subscription(s) => {
-                                ("subscription".to_string(), s.name.as_ref().map(|n| n.to_string()))
-                            }
-                            OperationDefinition::SelectionSet(_) => {
-                                ("query".to_string(), None)
-                            }
+                            OperationDefinition::Mutation(m) => (
+                                "mutation".to_string(),
+                                m.name.as_ref().map(|n| n.to_string()),
+                            ),
+                            OperationDefinition::Subscription(s) => (
+                                "subscription".to_string(),
+                                s.name.as_ref().map(|n| n.to_string()),
+                            ),
+                            OperationDefinition::SelectionSet(_) => ("query".to_string(), None),
                         };
                         return (op_type, op_name);
                     }
@@ -66,15 +70,16 @@ impl GraphQLInspectorMiddleware {
 
 #[async_trait]
 impl Middleware for GraphQLInspectorMiddleware {
-    fn name(&self) -> &str { "GraphQLInspectorMiddleware" }
+    fn name(&self) -> &str {
+        "GraphQLInspectorMiddleware"
+    }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
-        if Self::is_graphql(ctx) {
-            if let Some(info) = Self::parse(&ctx.body) {
-                if let Ok(json) = serde_json::to_string(&info) {
-                    ctx.headers.insert("x-oproxy-graphql".to_string(), json);
-                }
-            }
+        if Self::is_graphql(ctx)
+            && let Some(info) = Self::parse(&ctx.body)
+            && let Ok(json) = serde_json::to_string(&info)
+        {
+            ctx.headers.insert("x-oproxy-graphql".to_string(), json);
         }
         MiddlewareAction::Continue
     }
@@ -120,7 +125,8 @@ mod tests {
 
     #[test]
     fn mutation_detected() {
-        let body = r#"{"query":"mutation CreateUser($name: String!) { createUser(name: $name) { id } }"}"#;
+        let body =
+            r#"{"query":"mutation CreateUser($name: String!) { createUser(name: $name) { id } }"}"#;
         let info = GraphQLInspectorMiddleware::parse(body).unwrap();
         assert_eq!(info.operation_type, "mutation");
         assert_eq!(info.operation_name.as_deref(), Some("CreateUser"));

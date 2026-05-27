@@ -1,6 +1,6 @@
 # oproxy — Architecture
 
-_Last updated: 2026-04-26. Reflects the current `dev` branch._
+_Last updated: 2026-05-26. Reflects the current `dev` branch._
 
 ---
 
@@ -8,9 +8,9 @@ _Last updated: 2026-04-26. Reflects the current `dev` branch._
 
 oproxy is a programmable HTTP/HTTPS proxy. Its design follows a strict separation between three concerns:
 
-1. **Transport** — accept connections, handle CONNECT tunnels, forward bytes (`main.rs`, `engine.rs`)
+1. **Runtime/transport** — assemble services, accept connections, handle CONNECT/SOCKS5/WebSocket tunnels, forward bytes (`runtime/`, `transport/`, `engine.rs`)
 2. **Traffic manipulation** — inspect, rewrite, throttle, pause (`middleware/`)
-3. **Control plane** — management UI, REST API, persistence (`management.rs`, `api/`, `storage.rs`)
+3. **Control plane** — management UI, REST API, persistence (`control_plane.rs`, `control_plane/`, `api/`, `storage.rs`)
 
 New traffic features are added by implementing the `Middleware` trait, without touching the engine.
 
@@ -20,12 +20,39 @@ New traffic features are added by implementing the `Middleware` trait, without t
 
 ```
 src/
-├── main.rs           — startup, component wiring, raw HTTP/1.1 accept loop
-├── management.rs     — axum router: UI, admin API, proxy dispatch middleware
+├── main.rs           — thin Tokio entry point
+├── control_plane.rs  — axum router: UI, admin API, proxy dispatch middleware
 ├── storage.rs        — JSON read/write helpers for persistent state
 │
+├── runtime/
+│   ├── app.rs        — startup orchestration, service assembly, listener loops
+│   ├── error.rs      — startup error model
+│   ├── listeners.rs  — HTTP/HTTPS listener binding
+│   ├── logging.rs    — tracing/log file setup
+│   └── shutdown.rs   — ctrl-c/SIGTERM signal handling
+│
+├── control_plane/
+│   ├── auth.rs       — admin auth, CSRF/origin checks, proxy dispatch
+│   ├── sessions.rs   — session listing/export/import handlers
+│   ├── policy.rs     — routes, throttling, rewrites, capture filter, DNS, map-local
+│   ├── breakpoints.rs
+│   ├── extensions.rs — plugins, playback, mocks, Lua scripts
+│   ├── webhooks.rs
+│   ├── settings.rs
+│   ├── forward.rs
+│   └── metrics.rs
+│
 ├── core/
-│   └── engine.rs     — ProxyEngine: request lifecycle, CONNECT/MITM, reqwest forwarding
+│   └── engine.rs     — ProxyEngine: HTTP request lifecycle and reqwest forwarding
+│
+├── transport/
+│   ├── connect.rs    — HTTP CONNECT tunnel recording, DNS override, upstream dial
+│   ├── http.rs       — shared HTTP/HTTPS connection service and upgrade dispatch
+│   ├── lifecycle.rs  — connection limiting, shutdown watchers, graceful drain
+│   ├── socks5.rs     — SOCKS5 handshake and TCP tunnel forwarding
+│   ├── socks5_server.rs — SOCKS5 listener orchestration and MITM handoff
+│   ├── tls.rs        — MITM TLS accept and per-host certificate serving
+│   └── websocket.rs  — ws:// upgrade proxying and optional frame capture
 │
 ├── middleware/
 │   ├── mod.rs        — Middleware trait, MiddlewareAction enum, RequestContext/ResponseContext
@@ -40,7 +67,7 @@ src/
 ├── session/mod.rs    — SessionManager: in-memory HashMap, cap-based eviction, save/load
 ├── certs/mod.rs      — CertificateAuthority: root CA management, per-domain cert generation
 ├── config/mod.rs     — Config struct, YAML loading, env var overrides
-└── api/mod.rs        — ApiHandler: session/rewrite/breakpoint CRUD used by management.rs
+└── api/mod.rs        — ApiHandler: session/rewrite/breakpoint CRUD used by the control plane
 ```
 
 ---
@@ -52,7 +79,7 @@ Client
   │
   │  Plain HTTP or HTTPS CONNECT
   ▼
-main.rs — hyper accept loop
+runtime::app — listener wiring and hyper accept loop
   │
   ├─ CONNECT? ──────────────────────────────────────────────────────────────────┐
   │                                                                             │
@@ -60,10 +87,10 @@ main.rs — hyper accept loop
   ▼                                                                    │       │
 proxy_dispatch_layer (axum middleware)                               yes      no
   │                                                                    │       │
-  │  Host == localhost?                                       mitm_intercept  TCP tunnel
+  │  Host == localhost?                                       transport::tls  transport::connect
   ├─ no ──→ ProxyEngine::handle_request()                    (TLS accept,     (copy_bidirectional)
   │                                                           serve as HTTP)
-  │  yes ──→ axum router (management UI / API)
+  │  yes ──→ axum router (control-plane UI / API)
   │
   ▼
 ProxyEngine::handle_request()
@@ -155,7 +182,7 @@ All files are written synchronously on mutation. The session log is in-memory on
 
 Highest priority wins:
 
-1. Environment variables (`OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_STORAGE_PATH`, `OPROXY_LOG_LEVEL`, `OPROXY_LOG_DIR`, `RUST_LOG`)
+1. Environment variables (`OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_STORAGE_PATH`, `OPROXY_LOG_LEVEL`, `OPROXY_LOG_DIR`, `OPROXY_MAX_CONNECTIONS`, `OPROXY_CONNECT_TIMEOUT_SECS`, `OPROXY_HANDSHAKE_TIMEOUT_SECS`, `OPROXY_SHUTDOWN_GRACE_SECS`, `OPROXY_ALLOW_REMOTE_ADMIN`, `OPROXY_ADMIN_TOKEN`, `OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS`, `RUST_LOG`)
 2. YAML config file (`OPROXY_CONFIG` env var → `./configs/default.yaml` → built-in defaults)
 3. Built-in defaults
 
@@ -163,19 +190,24 @@ Highest priority wins:
 
 ## Key design decisions
 
-**Host-based proxy dispatch, not path-based**  
+**Host-based proxy dispatch, not path-based**
 A forward proxy receives absolute-URI requests (`GET http://api.example.com/ HTTP/1.1`). Axum's router would match `/` and serve the management UI for every proxied request. An axum middleware layer (`proxy_dispatch_layer`) inspects the `Host` header before route matching and short-circuits non-localhost requests directly to `ProxyEngine::handle_request`.
+When the listener binds to `0.0.0.0`, remote management UI/API access is still disabled unless `allow_remote_admin` is enabled. This keeps LAN proxy exposure separate from LAN control-plane exposure.
+Because this remains a single-port design and Host headers are client-controlled, remote management also requires `admin_token`. Localhost-style management hosts are accepted only for loopback downstream peers.
 
-**Raw hyper accept loop**  
-CONNECT handling requires access to the raw TCP socket via `hyper::upgrade::on`. Axum's `with_upgrades()` severs the link between the 200-response task and the upgraded socket when routed through middleware. The solution is to bypass axum for CONNECT entirely: a `hyper::service_fn` at the accept loop handles CONNECT directly, forwarding everything else to the axum app via `.oneshot()`.
+**Admin egress policy**
+When remote management is enabled, admin-initiated outbound requests from `/admin/forward`, replay, and webhooks are blocked from private, loopback, link-local, multicast, and unspecified IP ranges unless `allow_private_admin_egress` is explicitly enabled. This keeps remote admin convenience from becoming a default SSRF primitive.
 
-**CA always initialised regardless of `mitm_enabled`**  
+**Raw hyper accept loop**
+CONNECT handling requires access to the raw TCP socket via `hyper::upgrade::on`. Axum's `with_upgrades()` severs the link between the 200-response task and the upgraded socket when routed through middleware. The solution is to bypass axum for upgrade traffic at the connection-service layer: `transport::http::ProxyHttpService` routes CONNECT to `transport::connect::handle_connect`, WebSocket upgrades to `transport::websocket::handle_websocket`, and ordinary requests to the axum app via `.oneshot()`.
+
+**CA always initialised regardless of `mitm_enabled`**
 `mitm_enabled` controls only whether CONNECT requests are intercepted. The CA is always started so `GET /admin/ca` works for certificate download even when MITM is off. Users can trust the cert in advance and flip the flag later without restarting.
 
-**Session ID header for response correlation**  
+**Session ID header for response correlation**
 `InspectionMiddleware::on_request` injects `x-oproxy-session-id` into the request headers. The engine reads this value before forwarding and strips it from the upstream request. `on_response` uses the session ID for exact session lookup, avoiding correlation bugs under concurrent requests to the same URI.
 
-**Binary body forwarding**  
+**Binary body forwarding**
 The middleware chain operates on a lossy UTF-8 string copy of the body. The engine keeps the original bytes separately. At forwarding time it compares the string copy against the original; if no middleware modified it, the original bytes are forwarded intact, preventing corruption of images, protobuf, zip, etc.
 
 ---
@@ -184,14 +216,14 @@ The middleware chain operates on a lossy UTF-8 string copy of the body. The engi
 
 | Area | Status |
 |---|---|
-| WebSocket proxying | **Implemented** — plain `ws://` proxied via TCP tunnel in `handle_websocket()`; `wss://` works via CONNECT tunnel |
+| WebSocket proxying | **Implemented** — plain `ws://` proxied via TCP tunnel in `transport::websocket::handle_websocket()`; `wss://` works via CONNECT tunnel |
 | Brotli decompression | **Implemented** — `Content-Encoding: br` decoded using `brotli` crate alongside gzip/deflate |
 | Non-SSE response streaming | **Implemented** — responses with `Content-Length > 512 KB` use streaming path; smaller responses still buffered |
 | Binary body in middleware | Partial — original bytes forwarded intact when no middleware modifies the body; if a rewrite rule edits the body, the binary is lossy-decoded then re-encoded as UTF-8, silently corrupting it |
 | Async file I/O | **Implemented** — `save_to_file` / `load_from_file` use `tokio::fs` |
 | Session pagination | **Implemented** — `GET /api/sessions?limit=N&offset=M&since=<timestamp>` |
 | HTTPS listener | **Implemented** — `https_port` config field (or `OPROXY_HTTPS_PORT` env var); when set, a second TLS listener accepts HTTPS proxy connections; client must trust the CA |
-| HTTP/2 downstream | Accept loop uses `http1::Builder`; HTTP/2 client connections are not served (Low priority) |
+| HTTP/2 downstream | Partial — listener uses hyper's auto builder, but HTTP/2 CONNECT, gRPC, and extended CONNECT behavior still need protocol compliance tests |
 | Config hot reload | Config is read once at startup; changing the YAML file requires a restart (Low priority) |
 | Metrics endpoint | **Implemented** — `GET /admin/metrics` returns aggregate latency/size stats |
 | SSE polling | **Implemented** — `GET /api/sessions/stream` (SSE); UI subscribes once and refreshes on each event |

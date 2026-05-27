@@ -1,0 +1,66 @@
+name: Manual Release Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  constrained-docker-smoke:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/design/package-lock.json
+
+      - name: Install browser test dependencies
+        working-directory: tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Build and smoke Docker image
+        run: |
+          set -euxo pipefail
+          docker build -t oproxy:release-smoke .
+          docker rm -f oproxy-release-smoke >/dev/null 2>&1 || true
+          trap 'docker logs oproxy-release-smoke || true; docker rm -f oproxy-release-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d \
+            --name oproxy-release-smoke \
+            --memory=256m \
+            --cpus=1 \
+            --pids-limit=128 \
+            --tmpfs /app/storage:rw,noexec,nosuid,size=16m \
+            --tmpfs /app/certs:rw,nosuid,size=16m \
+            -p 127.0.0.1:18081:8080 \
+            -p 127.0.0.1:11081:1080 \
+            -e OPROXY_BIND_HOST=0.0.0.0 \
+            -e OPROXY_MITM_ENABLED=true \
+            oproxy:release-smoke
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18081/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18081/health
+          for i in $(seq 1 40); do
+            curl -fsS --max-time 8 \
+              -H 'content-type: application/json' \
+              -d "{\"method\":\"GET\",\"url\":\"http://example.com/release-smoke-$i\",\"headers\":{},\"body\":null}" \
+              http://127.0.0.1:18081/admin/forward >/dev/null || true
+          done
+          curl -fsS 'http://127.0.0.1:18081/api/sessions?limit=5' >/tmp/oproxy-release-sessions.json
+          curl -fsS 'http://127.0.0.1:18081/admin/metrics' >/tmp/oproxy-release-metrics.json
+          node -e 'const fs=require("fs"); const sessions=JSON.parse(fs.readFileSync("/tmp/oproxy-release-sessions.json","utf8")); const metrics=JSON.parse(fs.readFileSync("/tmp/oproxy-release-metrics.json","utf8")); if (!Array.isArray(sessions.sessions)) throw new Error("missing sessions array"); if (!metrics.captured_session_count) throw new Error("no captured sessions"); if (!metrics.endpoint_timings?.summaries?.["/api/sessions"]) throw new Error("missing endpoint timings");'
+          docker stats --no-stream oproxy-release-smoke
+          docker exec oproxy-release-smoke sh -lc 'du -sh /app/storage /app/certs'
+          pushd tests/browser
+          OPROXY_BASE_URL=http://127.0.0.1:18081 OPROXY_SKIP_GLOBAL_SETUP=1 \
+            npx playwright test --config=playwright.config.js \
+              specs/00-beta-smoke.spec.js \
+              specs/10-ssl.spec.js
+          popd

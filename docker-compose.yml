@@ -3,14 +3,22 @@ services:
     image: oproxy:latest
     build: .
     ports:
-      - "8080:8080"
+      # Published to host loopback only. Change the host side to 0.0.0.0 only
+      # when you explicitly want LAN clients to use the proxy.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:1080:1080"
     environment:
+      # The process must bind to all interfaces inside the container so Docker
+      # port publishing can reach it. Host-side publishing above is loopback-only.
+      OPROXY_BIND_HOST: "0.0.0.0"
       OPROXY_MITM_ENABLED: "true"
+      OPROXY_ALLOW_REMOTE_ADMIN: "false"
     volumes:
       # Persist root CA key/cert across container replacements.
       # Trust /app/certs/root.crt once; it never changes between restarts.
       - oproxy-certs:/app/certs
-      # Persist rules, sessions, and other state.
+      # Persist rules, hot config, and manually saved session files.
+      # The live session log is in memory unless you save it under /app/storage.
       - oproxy-storage:/app/storage
     restart: unless-stopped
 

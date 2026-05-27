@@ -1,10 +1,13 @@
 use async_trait::async_trait;
-use mlua::Lua;
+use mlua::{Lua, VmState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+
+const LUA_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuaScript {
@@ -31,12 +34,61 @@ fn make_sandbox() -> mlua::Result<Lua> {
     let lua = Lua::new();
     {
         let globals = lua.globals();
-        // Remove dangerous modules
-        for name in &["io", "os", "package", "require", "load", "loadfile", "dofile", "debug"] {
+        for name in &[
+            "io",
+            "os",
+            "package",
+            "require",
+            "load",
+            "loadfile",
+            "dofile",
+            "debug",
+            "coroutine",
+        ] {
             globals.raw_remove(*name)?;
         }
+        // Limit string.rep to prevent memory exhaustion (e.g. string.rep("x", 2^30)).
+        let string_table: mlua::Table = globals.get("string")?;
+        string_table.set(
+            "rep",
+            lua.create_function(|_, (s, n, sep): (String, usize, Option<String>)| {
+                let sep = sep.unwrap_or_default();
+                let out = s.len() * n + sep.len().saturating_mul(n.saturating_sub(1));
+                if out > 1_048_576 {
+                    return Err(mlua::Error::RuntimeError(
+                        "string.rep: output exceeds 1 MiB limit".into(),
+                    ));
+                }
+                let mut result = String::with_capacity(out);
+                for i in 0..n {
+                    if i > 0 {
+                        result.push_str(&sep);
+                    }
+                    result.push_str(&s);
+                }
+                Ok(result)
+            })?,
+        )?;
     }
     Ok(lua)
+}
+
+/// Execute Lua code with a timeout enforced via the debug hook.
+fn exec_with_timeout(lua: &Lua, code: &str) -> mlua::Result<()> {
+    let deadline = Instant::now() + LUA_TIMEOUT;
+    let _ = lua.set_hook(
+        mlua::HookTriggers::new().every_nth_instruction(1000),
+        move |_lua, _debug| {
+            if Instant::now() >= deadline {
+                Err(mlua::Error::RuntimeError("script timeout".into()))
+            } else {
+                Ok(VmState::Continue)
+            }
+        },
+    );
+    let res = lua.load(code).exec();
+    lua.remove_hook();
+    res
 }
 
 /// Inject request context into Lua globals.
@@ -59,15 +111,13 @@ fn inject_request(lua: &Lua, ctx: &RequestContext) -> mlua::Result<()> {
 fn extract_request(lua: &Lua, ctx: &mut RequestContext) -> mlua::Result<()> {
     let request: mlua::Table = lua.globals().get("request")?;
 
-    if let Ok(body) = request.get::<_, String>("body") {
+    if let Ok(body) = request.get::<String>("body") {
         ctx.body = body;
         ctx.body_bytes = None; // body was modified
     }
     let headers: mlua::Table = request.get("headers")?;
-    for pair in headers.pairs::<String, String>() {
-        if let Ok((k, v)) = pair {
-            ctx.headers.insert(k, v);
-        }
+    for (k, v) in headers.pairs::<String, String>().flatten() {
+        ctx.headers.insert(k, v);
     }
     Ok(())
 }
@@ -90,18 +140,16 @@ fn inject_response(lua: &Lua, ctx: &ResponseContext) -> mlua::Result<()> {
 /// Extract modified response context from Lua globals.
 fn extract_response(lua: &Lua, ctx: &mut ResponseContext) -> mlua::Result<()> {
     let response: mlua::Table = lua.globals().get("response")?;
-    if let Ok(status) = response.get::<_, u16>("status") {
+    if let Ok(status) = response.get::<u16>("status") {
         ctx.status = status;
     }
-    if let Ok(body) = response.get::<_, String>("body") {
+    if let Ok(body) = response.get::<String>("body") {
         ctx.body = body;
         ctx.body_bytes = None;
     }
     let headers: mlua::Table = response.get("headers")?;
-    for pair in headers.pairs::<String, String>() {
-        if let Ok((k, v)) = pair {
-            ctx.headers.insert(k, v);
-        }
+    for (k, v) in headers.pairs::<String, String>().flatten() {
+        ctx.headers.insert(k, v);
     }
     Ok(())
 }
@@ -137,25 +185,33 @@ fn check_abort(lua: &Lua) -> Option<(u16, String)> {
 
 #[async_trait]
 impl Middleware for LuaEngineMiddleware {
-    fn name(&self) -> &str { "LuaEngineMiddleware" }
+    fn name(&self) -> &str {
+        "LuaEngineMiddleware"
+    }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
         let scripts = self.scripts.read().await;
         for script in scripts.iter().filter(|s| s.enabled) {
             let lua = match make_sandbox() {
                 Ok(l) => l,
-                Err(e) => { tracing::warn!("Lua sandbox init failed: {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("Lua sandbox init failed: {e}");
+                    continue;
+                }
             };
             if let Err(e) = setup_log(&lua) {
-                tracing::warn!("Lua log setup failed: {e}"); continue;
+                tracing::warn!("Lua log setup failed: {e}");
+                continue;
             }
             if let Err(e) = setup_abort(&lua) {
-                tracing::warn!("Lua abort setup failed: {e}"); continue;
+                tracing::warn!("Lua abort setup failed: {e}");
+                continue;
             }
             if let Err(e) = inject_request(&lua, ctx) {
-                tracing::warn!("Lua inject failed: {e}"); continue;
+                tracing::warn!("Lua inject failed: {e}");
+                continue;
             }
-            if let Err(e) = lua.load(&script.code).exec() {
+            if let Err(e) = exec_with_timeout(&lua, &script.code) {
                 tracing::warn!(script=%script.name, "Lua exec error: {e}");
                 continue;
             }
@@ -167,10 +223,8 @@ impl Middleware for LuaEngineMiddleware {
                     "headers": {"content-type": "text/plain"},
                     "body": body,
                 });
-                ctx.headers.insert(
-                    "x-oproxy-mock-response".to_string(),
-                    payload.to_string(),
-                );
+                ctx.headers
+                    .insert("x-oproxy-mock-response".to_string(), payload.to_string());
                 return MiddlewareAction::StopAndReturn;
             }
             if let Err(e) = extract_request(&lua, ctx) {
@@ -185,15 +239,20 @@ impl Middleware for LuaEngineMiddleware {
         for script in scripts.iter().filter(|s| s.enabled) {
             let lua = match make_sandbox() {
                 Ok(l) => l,
-                Err(e) => { tracing::warn!("Lua sandbox init failed: {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("Lua sandbox init failed: {e}");
+                    continue;
+                }
             };
             if let Err(e) = setup_log(&lua) {
-                tracing::warn!("{e}"); continue;
+                tracing::warn!("{e}");
+                continue;
             }
             if let Err(e) = inject_response(&lua, ctx) {
-                tracing::warn!("Lua inject resp failed: {e}"); continue;
+                tracing::warn!("Lua inject resp failed: {e}");
+                continue;
             }
-            if let Err(e) = lua.load(&script.code).exec() {
+            if let Err(e) = exec_with_timeout(&lua, &script.code) {
                 tracing::warn!(script=%script.name, "Lua exec error: {e}");
                 continue;
             }

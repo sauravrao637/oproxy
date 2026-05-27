@@ -1,8 +1,8 @@
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use async_trait::async_trait;
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
 
 pub struct DnsOverrideMiddleware {
     pub overrides: Arc<RwLock<HashMap<String, String>>>,
@@ -10,7 +10,9 @@ pub struct DnsOverrideMiddleware {
 
 #[async_trait]
 impl Middleware for DnsOverrideMiddleware {
-    fn name(&self) -> &str { "dns_override" }
+    fn name(&self) -> &str {
+        "dns_override"
+    }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
         let ovr = self.overrides.read().await;

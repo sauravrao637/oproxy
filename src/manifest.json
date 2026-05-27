@@ -1,14 +1,16 @@
 {
   "name": "oproxy",
   "short_name": "oproxy",
-  "description": "Programmable HTTP proxy for inspection and debugging",
+  "description": "Local developer proxy for inspecting, replaying, and modifying HTTP and HTTPS traffic",
+  "id": "/",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#F2F2F7",
-  "theme_color": "#0A7AFF",
+  "background_color": "#0C0F12",
+  "theme_color": "#2CCCEB",
   "icons": [
     {
-      "src": "/icons/icon.svg",
+      "src": "/icons/icon.svg?v=2",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

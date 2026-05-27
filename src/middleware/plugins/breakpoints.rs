@@ -1,10 +1,10 @@
-use async_trait::async_trait;
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, oneshot};
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
 // Breakpoints auto-drop after this long so no request handler leaks if the UI is closed.
@@ -66,7 +66,11 @@ impl BreakpointManager {
         self.rules.write().await.push(rule);
     }
 
-    pub async fn resolve_breakpoint(&self, id: &str, resolution: BreakpointResolution) -> Result<(), String> {
+    pub async fn resolve_breakpoint(
+        &self,
+        id: &str,
+        resolution: BreakpointResolution,
+    ) -> Result<(), String> {
         let mut pending = self.pending.write().await;
         if let Some(bp) = pending.remove(id) {
             let _ = bp.tx.send(resolution);
@@ -83,6 +87,28 @@ impl BreakpointManager {
     pub async fn delete_rule(&self, id: &str) {
         self.regex_cache.write().await.remove(id);
         self.rules.write().await.retain(|r| r.id != id);
+    }
+
+    pub async fn update_rule(&self, id: &str, updated: BreakpointRule) -> bool {
+        let mut rules = self.rules.write().await;
+        let Some(rule) = rules.iter_mut().find(|rule| rule.id == id) else {
+            return false;
+        };
+        let mut updated = updated;
+        updated.id = id.to_string();
+        if let Ok(re) = regex::Regex::new(&updated.pattern) {
+            self.regex_cache.write().await.insert(id.to_string(), re);
+        } else {
+            self.regex_cache.write().await.remove(id);
+        }
+        *rule = updated;
+        true
+    }
+}
+
+impl Default for BreakpointManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -118,6 +144,7 @@ impl BreakpointMiddleware {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
@@ -125,19 +152,45 @@ mod tests {
     use std::sync::Arc;
 
     fn req(uri: &str, body: &str) -> RequestContext {
-        RequestContext { method: "GET".to_string(), uri: uri.to_string(), headers: HashMap::new(), body: body.to_string(), host: "localhost".to_string(), body_bytes: None }
+        RequestContext {
+            method: "GET".to_string(),
+            uri: uri.to_string(),
+            headers: HashMap::new(),
+            body: body.to_string(),
+            host: "localhost".to_string(),
+            body_bytes: None,
+        }
     }
 
     fn res(uri: &str, body: &str) -> ResponseContext {
-        ResponseContext { status: 200, headers: HashMap::new(), body: body.to_string(), request_uri: uri.to_string(), session_id: None, ttfb_ms: 0, body_ms: 0, body_bytes: None }
+        ResponseContext {
+            status: 200,
+            headers: HashMap::new(),
+            body: body.to_string(),
+            request_uri: uri.to_string(),
+            session_id: None,
+            ttfb_ms: 0,
+            body_ms: 0,
+            body_bytes: None,
+        }
     }
 
     fn req_rule(pattern: &str, enabled: bool) -> BreakpointRule {
-        BreakpointRule { id: uuid::Uuid::new_v4().to_string(), pattern: pattern.to_string(), bp_type: BreakpointType::Request, enabled }
+        BreakpointRule {
+            id: uuid::Uuid::new_v4().to_string(),
+            pattern: pattern.to_string(),
+            bp_type: BreakpointType::Request,
+            enabled,
+        }
     }
 
     fn res_rule(pattern: &str, enabled: bool) -> BreakpointRule {
-        BreakpointRule { id: uuid::Uuid::new_v4().to_string(), pattern: pattern.to_string(), bp_type: BreakpointType::Response, enabled }
+        BreakpointRule {
+            id: uuid::Uuid::new_v4().to_string(),
+            pattern: pattern.to_string(),
+            bp_type: BreakpointType::Response,
+            enabled,
+        }
     }
 
     /// Spawns a task that polls for the first pending breakpoint and resolves it.
@@ -160,7 +213,10 @@ mod tests {
     #[tokio::test]
     async fn no_rules_returns_continue() {
         let mw = BreakpointMiddleware::new(Arc::new(BreakpointManager::new()));
-        assert_eq!(mw.on_request(&mut req("/", "")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_request(&mut req("/", "")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
@@ -168,7 +224,10 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"/secret", false)).await;
         let mw = BreakpointMiddleware::new(manager);
-        assert_eq!(mw.on_request(&mut req("/secret", "")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_request(&mut req("/secret", "")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
@@ -176,7 +235,10 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"^/admin", true)).await;
         let mw = BreakpointMiddleware::new(manager);
-        assert_eq!(mw.on_request(&mut req("/api/users", "")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_request(&mut req("/api/users", "")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
@@ -185,7 +247,10 @@ mod tests {
         manager.add_rule(req_rule(r"/secret", true)).await;
         auto_resolve(manager.clone(), BreakpointResolution::Continue).await;
         let mw = BreakpointMiddleware::new(manager);
-        assert_eq!(mw.on_request(&mut req("/secret", "")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_request(&mut req("/secret", "")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
@@ -194,7 +259,10 @@ mod tests {
         manager.add_rule(req_rule(r"/drop-me", true)).await;
         auto_resolve(manager.clone(), BreakpointResolution::Drop).await;
         let mw = BreakpointMiddleware::new(manager);
-        assert_eq!(mw.on_request(&mut req("/drop-me", "")).await, MiddlewareAction::StopAndReturn);
+        assert_eq!(
+            mw.on_request(&mut req("/drop-me", "")).await,
+            MiddlewareAction::StopAndReturn
+        );
     }
 
     #[tokio::test]
@@ -210,7 +278,12 @@ mod tests {
                     drop(pending);
                     if let BreakpointContext::Request(mut rq) = ctx {
                         rq.body = "modified-body".to_string();
-                        let _ = m.resolve_breakpoint(&id, BreakpointResolution::Modify(BreakpointContext::Request(rq))).await;
+                        let _ = m
+                            .resolve_breakpoint(
+                                &id,
+                                BreakpointResolution::Modify(BreakpointContext::Request(rq)),
+                            )
+                            .await;
                     }
                     return;
                 }
@@ -230,7 +303,10 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(res_rule(r"/res-only", true)).await;
         let mw = BreakpointMiddleware::new(manager);
-        assert_eq!(mw.on_request(&mut req("/res-only", "")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_request(&mut req("/res-only", "")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
@@ -239,7 +315,10 @@ mod tests {
         manager.add_rule(res_rule(r"/watch", true)).await;
         auto_resolve(manager.clone(), BreakpointResolution::Continue).await;
         let mw = BreakpointMiddleware::new(manager);
-        assert_eq!(mw.on_response(&mut res("/watch", "body")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_response(&mut res("/watch", "body")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
@@ -248,13 +327,21 @@ mod tests {
         manager.add_rule(req_rule("[invalid", true)).await;
         let mw = BreakpointMiddleware::new(manager);
         // Invalid regex → check_match returns false → Continue without blocking
-        assert_eq!(mw.on_request(&mut req("/anything", "body")).await, MiddlewareAction::Continue);
+        assert_eq!(
+            mw.on_request(&mut req("/anything", "body")).await,
+            MiddlewareAction::Continue
+        );
     }
 
     #[tokio::test]
     async fn resolve_nonexistent_breakpoint_returns_err() {
         let manager = BreakpointManager::new();
-        assert!(manager.resolve_breakpoint("no-such-id", BreakpointResolution::Continue).await.is_err());
+        assert!(
+            manager
+                .resolve_breakpoint("no-such-id", BreakpointResolution::Continue)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -270,6 +357,43 @@ mod tests {
         assert_eq!(action, MiddlewareAction::Continue);
         // Verify a pending breakpoint was created (it was resolved, so pending should be empty now)
     }
+
+    #[tokio::test]
+    async fn pending_queue_contains_context_until_resolved() {
+        let manager = Arc::new(BreakpointManager::new());
+        manager.add_rule(req_rule(r"/hold", true)).await;
+        let mw = BreakpointMiddleware::new(manager.clone());
+        let mut ctx = req("/hold", "payload");
+
+        let task = tokio::spawn(async move { mw.on_request(&mut ctx).await });
+
+        let pending_id = loop {
+            let pending = manager.pending.read().await;
+            if let Some((id, bp)) = pending.iter().next() {
+                assert!(matches!(bp.bp_type, BreakpointType::Request));
+                match &bp.context {
+                    BreakpointContext::Request(req) => {
+                        assert_eq!(req.uri, "/hold");
+                        assert_eq!(req.body, "payload");
+                    }
+                    _ => panic!("expected request breakpoint context"),
+                }
+                break id.clone();
+            }
+            drop(pending);
+            tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        };
+
+        manager
+            .resolve_breakpoint(&pending_id, BreakpointResolution::Continue)
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap(), MiddlewareAction::Continue);
+        assert!(
+            manager.pending.read().await.is_empty(),
+            "resolved breakpoints must leave the pending queue"
+        );
+    }
 }
 
 #[async_trait]
@@ -280,18 +404,29 @@ impl Middleware for BreakpointMiddleware {
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
         // Locks released before the async wait so writers are never blocked during a pause.
-        if self.first_match(|t| matches!(t, BreakpointType::Request), &ctx.uri, &ctx.body).await.is_none() {
+        if self
+            .first_match(
+                |t| matches!(t, BreakpointType::Request),
+                &ctx.uri,
+                &ctx.body,
+            )
+            .await
+            .is_none()
+        {
             return MiddlewareAction::Continue;
         }
 
         let (tx, rx) = oneshot::channel();
         let bp_id = Uuid::new_v4().to_string();
-        self.manager.pending.write().await.insert(bp_id.clone(), PendingBreakpoint {
-            id: bp_id.clone(),
-            bp_type: BreakpointType::Request,
-            context: BreakpointContext::Request(ctx.clone()),
-            tx,
-        });
+        self.manager.pending.write().await.insert(
+            bp_id.clone(),
+            PendingBreakpoint {
+                id: bp_id.clone(),
+                bp_type: BreakpointType::Request,
+                context: BreakpointContext::Request(ctx.clone()),
+                tx,
+            },
+        );
 
         match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
             Ok(Ok(BreakpointResolution::Continue)) => MiddlewareAction::Continue,
@@ -304,24 +439,42 @@ impl Middleware for BreakpointMiddleware {
             Err(_) => {
                 self.manager.pending.write().await.remove(&bp_id);
                 tracing::warn!(id = %bp_id, "Breakpoint request timed out, dropping");
+                let payload = serde_json::json!({
+                    "status": 504,
+                    "headers": {"content-type": "text/plain"},
+                    "body": "Breakpoint timed out",
+                });
+                ctx.headers
+                    .insert("x-oproxy-mock-response".to_string(), payload.to_string());
                 MiddlewareAction::StopAndReturn
             }
         }
     }
 
     async fn on_response(&self, ctx: &mut ResponseContext) -> MiddlewareAction {
-        if self.first_match(|t| matches!(t, BreakpointType::Response), &ctx.request_uri, &ctx.body).await.is_none() {
+        if self
+            .first_match(
+                |t| matches!(t, BreakpointType::Response),
+                &ctx.request_uri,
+                &ctx.body,
+            )
+            .await
+            .is_none()
+        {
             return MiddlewareAction::Continue;
         }
 
         let (tx, rx) = oneshot::channel();
         let bp_id = Uuid::new_v4().to_string();
-        self.manager.pending.write().await.insert(bp_id.clone(), PendingBreakpoint {
-            id: bp_id.clone(),
-            bp_type: BreakpointType::Response,
-            context: BreakpointContext::Response(ctx.clone()),
-            tx,
-        });
+        self.manager.pending.write().await.insert(
+            bp_id.clone(),
+            PendingBreakpoint {
+                id: bp_id.clone(),
+                bp_type: BreakpointType::Response,
+                context: BreakpointContext::Response(ctx.clone()),
+                tx,
+            },
+        );
 
         match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
             Ok(Ok(BreakpointResolution::Continue)) => MiddlewareAction::Continue,
@@ -334,6 +487,15 @@ impl Middleware for BreakpointMiddleware {
             Err(_) => {
                 self.manager.pending.write().await.remove(&bp_id);
                 tracing::warn!(id = %bp_id, "Breakpoint response timed out, dropping");
+                ctx.headers.insert(
+                    "x-oproxy-mock-response".to_string(),
+                    serde_json::json!({
+                        "status": 504,
+                        "headers": {"content-type": "text/plain"},
+                        "body": "Breakpoint timed out",
+                    })
+                    .to_string(),
+                );
                 MiddlewareAction::StopAndReturn
             }
         }

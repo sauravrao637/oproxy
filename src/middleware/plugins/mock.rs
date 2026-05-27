@@ -32,19 +32,21 @@ pub struct MockRule {
 }
 
 impl MockRule {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn matches(&self, ctx: &RequestContext) -> bool {
         if !self.enabled {
             return false;
         }
-        if let Some(ref m) = self.method {
-            if !m.eq_ignore_ascii_case(&ctx.method) {
-                return false;
-            }
+        if let Some(ref m) = self.method
+            && !m.eq_ignore_ascii_case(&ctx.method)
+        {
+            return false;
         }
-        if let Some(ref h) = self.host {
-            if !h.is_empty() && !ctx.host.to_lowercase().contains(&h.to_lowercase()) {
-                return false;
-            }
+        if let Some(ref h) = self.host
+            && !h.is_empty()
+            && !ctx.host.to_lowercase().contains(&h.to_lowercase())
+        {
+            return false;
         }
         if let Ok(re) = Regex::new(&self.path_pattern) {
             let path = extract_path(&ctx.uri);
@@ -95,70 +97,115 @@ pub type SharedMockRules = Arc<RwLock<Vec<MockRule>>>;
 
 pub struct MockMiddleware {
     pub rules: SharedMockRules,
+    regex_cache: Arc<RwLock<HashMap<String, Regex>>>,
 }
 
 impl MockMiddleware {
     pub fn new(rules: SharedMockRules) -> Self {
-        Self { rules }
+        Self {
+            rules,
+            regex_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn compiled(&self, pattern: &str) -> Option<Regex> {
+        if let Some(re) = self.regex_cache.read().await.get(pattern) {
+            return Some(re.clone());
+        }
+        let re = Regex::new(pattern).ok()?;
+        self.regex_cache
+            .write()
+            .await
+            .insert(pattern.to_string(), re.clone());
+        Some(re)
     }
 }
 
 #[async_trait]
 impl Middleware for MockMiddleware {
-    fn name(&self) -> &str { "MockMiddleware" }
+    fn name(&self) -> &str {
+        "MockMiddleware"
+    }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
-        let mut rules = self.rules.write().await;
         let path = extract_path(&ctx.uri).to_string();
 
-        for rule in rules.iter_mut() {
-            if !rule.enabled {
+        // Snapshot patterns + metadata without holding the write lock during regex work.
+        let rule_snapshots: Vec<(usize, String, Option<String>, Option<String>, bool)> = {
+            let rules = self.rules.read().await;
+            rules
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.enabled)
+                .map(|(i, r)| {
+                    (
+                        i,
+                        r.path_pattern.clone(),
+                        r.method.clone(),
+                        r.host.clone(),
+                        true,
+                    )
+                })
+                .collect()
+        };
+
+        for (idx, pattern, method_filter, host_filter, _) in rule_snapshots {
+            if let Some(ref m) = method_filter
+                && !m.eq_ignore_ascii_case(&ctx.method)
+            {
                 continue;
             }
-            if let Some(ref m) = rule.method {
-                if !m.eq_ignore_ascii_case(&ctx.method) {
-                    continue;
-                }
+            if let Some(ref h) = host_filter
+                && !h.is_empty()
+                && !ctx.host.to_lowercase().contains(&h.to_lowercase())
+            {
+                continue;
             }
-            if let Ok(re) = Regex::new(&rule.path_pattern) {
-                if !re.is_match(&path) {
-                    continue;
-                }
+            let re = match self.compiled(&pattern).await {
+                Some(r) => r,
+                None => continue,
+            };
+            if !re.is_match(&path) {
+                continue;
+            }
+
+            let (resp, body, delay_ms) = {
+                let mut rules = self.rules.write().await;
+                let rule = &mut rules[idx];
                 let resp = match rule.current_response() {
                     Some(r) => r.clone(),
                     None => continue,
                 };
                 rule.call_count += 1;
-
-                // Apply template substitution
+                let delay_ms = resp.delay_ms;
                 let body = if let Some(caps) = re.captures(&path) {
                     apply_template(&resp.body, &caps)
                 } else {
                     resp.body.clone()
                 };
+                (resp, body, delay_ms)
+            };
 
-                if resp.delay_ms > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(resp.delay_ms)).await;
-                }
-
-                let mut resp_headers = resp.headers.clone();
-                if !resp_headers.contains_key("content-length") {
-                    resp_headers.insert("content-length".to_string(), body.len().to_string());
-                }
-
-                // Encode mock response into the request context so the engine can
-                // reconstruct the response from it after StopAndReturn fires.
-                let mock_payload = serde_json::json!({
-                    "status": resp.status,
-                    "headers": resp_headers,
-                    "body": body,
-                });
-                ctx.headers.insert(
-                    "x-oproxy-mock-response".to_string(),
-                    mock_payload.to_string(),
-                );
-                return MiddlewareAction::StopAndReturn;
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
+
+            let mut resp_headers = resp.headers.clone();
+            if !resp_headers.contains_key("content-length") {
+                resp_headers.insert("content-length".to_string(), body.len().to_string());
+            }
+            resp_headers.insert("x-oproxy-tags".to_string(), "mock".to_string());
+
+            let mock_payload = serde_json::json!({
+                "status": resp.status,
+                "headers": resp_headers,
+                "body": body,
+            });
+            ctx.headers.insert(
+                "x-oproxy-mock-response".to_string(),
+                mock_payload.to_string(),
+            );
+            return MiddlewareAction::StopAndReturn;
         }
         MiddlewareAction::Continue
     }
@@ -184,7 +231,13 @@ mod tests {
         }
     }
 
-    fn simple_rule(id: &str, method: Option<&str>, path_pattern: &str, status: u16, body: &str) -> MockRule {
+    fn simple_rule(
+        id: &str,
+        method: Option<&str>,
+        path_pattern: &str,
+        status: u16,
+        body: &str,
+    ) -> MockRule {
         MockRule {
             id: id.to_string(),
             name: id.to_string(),
@@ -243,8 +296,18 @@ mod tests {
             host: None,
             path_pattern: "^/api$".to_string(),
             responses: vec![
-                MockResponse { status: 200, headers: HashMap::new(), body: "first".to_string(), delay_ms: 0 },
-                MockResponse { status: 201, headers: HashMap::new(), body: "second".to_string(), delay_ms: 0 },
+                MockResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: "first".to_string(),
+                    delay_ms: 0,
+                },
+                MockResponse {
+                    status: 201,
+                    headers: HashMap::new(),
+                    body: "second".to_string(),
+                    delay_ms: 0,
+                },
             ],
             call_count: 0,
         };
@@ -297,6 +360,43 @@ mod tests {
         mw.on_request(&mut ctx).await;
         let count = rules.read().await[0].call_count;
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn middleware_respects_host_filter() {
+        let mut rule = simple_rule("r1", None, "^/api$", 200, "ok");
+        rule.host = Some("api.example.com".to_string());
+        let rules = Arc::new(RwLock::new(vec![rule]));
+        let mw = MockMiddleware::new(rules);
+
+        let mut other = make_ctx("GET", "http://static.example.com/api");
+        other.host = "static.example.com".to_string();
+        assert_eq!(mw.on_request(&mut other).await, MiddlewareAction::Continue);
+
+        let mut matched = make_ctx("GET", "http://api.example.com/api");
+        matched.host = "api.example.com".to_string();
+        assert_eq!(
+            mw.on_request(&mut matched).await,
+            MiddlewareAction::StopAndReturn
+        );
+    }
+
+    #[tokio::test]
+    async fn first_matching_rule_wins_before_later_rules() {
+        let first = simple_rule("first", None, "^/api$", 201, "first");
+        let second = simple_rule("second", None, "^/api$", 202, "second");
+        let rules = Arc::new(RwLock::new(vec![first, second]));
+        let mw = MockMiddleware::new(rules);
+        let mut ctx = make_ctx("GET", "http://example.com/api");
+
+        assert_eq!(
+            mw.on_request(&mut ctx).await,
+            MiddlewareAction::StopAndReturn
+        );
+        let mock_resp = ctx.headers.get("x-oproxy-mock-response").unwrap();
+        let v: serde_json::Value = serde_json::from_str(mock_resp).unwrap();
+        assert_eq!(v["status"], 201);
+        assert_eq!(v["body"], "first");
     }
 
     #[test]
