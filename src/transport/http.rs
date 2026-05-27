@@ -82,8 +82,6 @@ pub async fn serve_http_connection<IO>(
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
