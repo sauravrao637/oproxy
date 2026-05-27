@@ -103,15 +103,20 @@ impl RewriteMiddleware {
         }
     }
 
-    fn apply_action(&self, rule: &RewriteRule, body: &mut String) {
+    fn apply_body_action(&self, rule: &RewriteRule, body: &mut String) -> bool {
         if let RewriteAction::ReplaceBody {
             pattern,
             replacement,
         } = &rule.action
             && let Ok(re) = Regex::new(pattern)
         {
-            *body = re.replace_all(body, replacement).to_string();
+            let rewritten = re.replace_all(body, replacement).to_string();
+            if rewritten != *body {
+                *body = rewritten;
+                return true;
+            }
         }
+        false
     }
 
     fn apply_action_header(
@@ -160,6 +165,12 @@ fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<
         .map(|(_, value)| value.as_str())
 }
 
+fn remove_header(headers: &mut HashMap<String, String>, name: &str) {
+    if let Some(key) = header_key(headers, name) {
+        headers.remove(&key);
+    }
+}
+
 #[async_trait]
 impl Middleware for RewriteMiddleware {
     fn name(&self) -> &str {
@@ -193,11 +204,9 @@ impl Middleware for RewriteMiddleware {
                     }
                     _ => {
                         self.apply_action_header(rule, &mut ctx.headers);
-                        let before = ctx.body.len();
-                        self.apply_action(rule, &mut ctx.body);
-                        if ctx.body.len() != before || ctx.body_bytes.is_some() {
+                        if self.apply_body_action(rule, &mut ctx.body) {
                             ctx.body_bytes = None;
-                            ctx.headers.remove("content-length");
+                            remove_header(&mut ctx.headers, "content-length");
                         }
                     }
                 }
@@ -211,13 +220,11 @@ impl Middleware for RewriteMiddleware {
         for rule in rules.iter().filter(|r| r.enabled) {
             if self.matches_res(rule, ctx) {
                 self.apply_action_header(rule, &mut ctx.headers);
-                let before = ctx.body.len();
-                self.apply_action(rule, &mut ctx.body);
-                if ctx.body.len() != before || ctx.body_bytes.is_some() {
+                if self.apply_body_action(rule, &mut ctx.body) {
                     ctx.body_bytes = None;
-                    // Content-Length from upstream is now stale — remove it so hyper
+                    // Content-Length from upstream is now stale - remove it so hyper
                     // doesn't panic on a length mismatch when we serve the modified body.
-                    ctx.headers.remove("content-length");
+                    remove_header(&mut ctx.headers, "content-length");
                 }
             }
         }
@@ -229,6 +236,7 @@ impl Middleware for RewriteMiddleware {
 mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+    use bytes::Bytes;
     fn req(host: &str, uri: &str, body: &str) -> RequestContext {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
@@ -420,6 +428,47 @@ mod tests {
         let mut ctx = req("h", "/", "");
         mw.on_request(&mut ctx).await;
         assert_eq!(ctx.headers.get("x-added").map(|s| s.as_str()), Some("v"));
+    }
+
+    #[tokio::test]
+    async fn header_only_rewrite_preserves_request_body_bytes() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Host("h".to_string()),
+            RewriteAction::AddHeader {
+                name: "x-added".to_string(),
+                value: "v".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("h", "/", "binary-as-text");
+        ctx.body_bytes = Some(Bytes::from_static(b"\x00\xff"));
+
+        mw.on_request(&mut ctx).await;
+
+        assert_eq!(ctx.headers.get("x-added").map(|s| s.as_str()), Some("v"));
+        assert_eq!(ctx.body_bytes.as_deref(), Some(&b"\x00\xff"[..]));
+    }
+
+    #[tokio::test]
+    async fn body_rewrite_removes_content_length_case_insensitively() {
+        let mw = RewriteMiddleware::new(vec![rule(
+            MatchCriteria::Body("secret".to_string()),
+            RewriteAction::ReplaceBody {
+                pattern: "secret".to_string(),
+                replacement: "public".to_string(),
+            },
+            true,
+        )]);
+        let mut ctx = req("h", "/", "secret");
+        ctx.body_bytes = Some(Bytes::from_static(b"secret"));
+        ctx.headers
+            .insert("Content-Length".to_string(), "6".to_string());
+
+        mw.on_request(&mut ctx).await;
+
+        assert_eq!(ctx.body, "public");
+        assert!(ctx.body_bytes.is_none());
+        assert!(header_value(&ctx.headers, "content-length").is_none());
     }
 
     #[tokio::test]

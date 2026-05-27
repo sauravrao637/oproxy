@@ -9,9 +9,101 @@
 ///   - TLS + MITM: calls `mitm_intercept()` (if `mitm_enabled`)
 ///   - Plain TCP: `tokio::io::copy_bidirectional`
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tracing::debug;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tokio::sync::{RwLock, watch};
+
+use crate::core::engine::ProxyEngine;
+use crate::transport::lifecycle::wait_for_shutdown;
+use crate::transport::tls::{is_tls_port, mitm_intercept};
+
+#[derive(Clone)]
+pub struct ProxySocks5Service {
+    pub engine: Arc<ProxyEngine>,
+    pub dns: Arc<RwLock<HashMap<String, String>>>,
+    pub connect_timeout: Duration,
+    pub handshake_timeout: Duration,
+}
+
+impl ProxySocks5Service {
+    pub async fn serve_connection(
+        self,
+        mut stream: tokio::net::TcpStream,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let target = match timeout(self.handshake_timeout, handshake(&mut stream)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                tracing::debug!(error=%e, "SOCKS5 handshake failed");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!("SOCKS5 handshake timed out");
+                return;
+            }
+        };
+
+        let resolved = resolve_target(target, self.dns.clone()).await;
+        if self.engine.mitm_enabled
+            && is_tls_port(resolved.port)
+            && let Some(ca) = self.engine.ca.clone()
+        {
+            if let Err(e) = timeout(self.handshake_timeout, send_success_reply(&mut stream))
+                .await
+                .unwrap_or(Err(Socks5Error::Io))
+            {
+                tracing::debug!(error=%e, "SOCKS5 success reply failed");
+                return;
+            }
+            mitm_intercept(
+                stream,
+                resolved.host.clone(),
+                self.engine.clone(),
+                ca,
+                self.handshake_timeout,
+            )
+            .await;
+            return;
+        }
+
+        let connection = tunnel_with_connect_timeout(stream, &resolved, self.connect_timeout);
+        tokio::pin!(connection);
+        tokio::select! {
+            res = &mut connection => {
+                if let Err(e) = res {
+                    tracing::debug!(error=%e, "SOCKS5 tunnel error");
+                }
+            }
+            _ = wait_for_shutdown(&mut shutdown) => {
+                tracing::debug!("SOCKS5 connection stopped by shutdown");
+            }
+        }
+    }
+}
+
+async fn resolve_target(
+    target: Socks5Target,
+    dns: Arc<RwLock<HashMap<String, String>>>,
+) -> Socks5Target {
+    let resolved_host = {
+        let overrides = dns.read().await;
+        overrides
+            .get(&target.host)
+            .cloned()
+            .unwrap_or_else(|| target.host.clone())
+    };
+    Socks5Target {
+        host: resolved_host,
+        port: target.port,
+    }
+}
 
 /// SOCKS5 handshake + connect result.
 #[derive(Debug)]
@@ -134,6 +226,8 @@ pub enum Socks5Error {
     InvalidAddress,
     #[error("upstream connect failed: {0}")]
     ConnectFailed(String),
+    #[error("upstream connect timed out")]
+    ConnectTimeout,
 }
 
 fn connect_addr(target: &Socks5Target) -> String {
@@ -159,15 +253,22 @@ async fn send_failure_reply(stream: &mut TcpStream, code: u8) -> Result<(), Sock
         .map_err(|_| Socks5Error::Io)
 }
 
-/// Forward a SOCKS5 stream (after successful handshake) as a plain TCP tunnel.
-/// Used when MITM is disabled or the target is not TLS.
-pub async fn tunnel(mut client: TcpStream, target: &Socks5Target) -> Result<(), Socks5Error> {
+/// Forward a SOCKS5 stream with an explicit timeout for the upstream TCP dial.
+pub async fn tunnel_with_connect_timeout(
+    mut client: TcpStream,
+    target: &Socks5Target,
+    connect_timeout: Duration,
+) -> Result<(), Socks5Error> {
     let addr = connect_addr(target);
-    let mut upstream = match TcpStream::connect(&addr).await {
-        Ok(upstream) => upstream,
-        Err(e) => {
+    let mut upstream = match timeout(connect_timeout, TcpStream::connect(&addr)).await {
+        Ok(Ok(upstream)) => upstream,
+        Ok(Err(e)) => {
             let _ = send_failure_reply(&mut client, 0x05).await;
             return Err(Socks5Error::ConnectFailed(e.to_string()));
+        }
+        Err(_) => {
+            let _ = send_failure_reply(&mut client, 0x06).await;
+            return Err(Socks5Error::ConnectTimeout);
         }
     };
     send_success_reply(&mut client).await?;
@@ -182,6 +283,40 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
+
+    use crate::middleware::chain::MiddlewareChain;
+
+    fn test_engine() -> Arc<ProxyEngine> {
+        Arc::new(ProxyEngine::new(
+            Arc::new(RwLock::new(MiddlewareChain::new())),
+            None,
+            false,
+            30,
+            10 * 1024 * 1024,
+            10,
+            30,
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn resolve_target_applies_dns_override_without_changing_port() {
+        let dns = Arc::new(RwLock::new(HashMap::from([(
+            "example.test".to_string(),
+            "127.0.0.1".to_string(),
+        )])));
+        let resolved = resolve_target(
+            Socks5Target {
+                host: "example.test".to_string(),
+                port: 8443,
+            },
+            dns,
+        )
+        .await;
+
+        assert_eq!(resolved.host, "127.0.0.1");
+        assert_eq!(resolved.port, 8443);
+    }
 
     /// Build a raw SOCKS5 no-auth greeting + IPv4 CONNECT request.
     fn build_connect_packet(ip: [u8; 4], port: u16) -> Vec<u8> {
@@ -383,7 +518,8 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: unused_port,
             };
-            let result = tunnel(stream, &target).await;
+            let result =
+                tunnel_with_connect_timeout(stream, &target, Duration::from_secs(30)).await;
             assert!(matches!(result, Err(Socks5Error::ConnectFailed(_))));
         });
 

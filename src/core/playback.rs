@@ -5,16 +5,21 @@ use tracing::{info, warn};
 pub struct PlaybackEngine {
     session_manager: SharedSessionManager,
     http_client: Client,
+    egress_policy: crate::security::AdminEgressPolicy,
 }
 
 impl PlaybackEngine {
-    pub fn new(session_manager: SharedSessionManager) -> Self {
+    pub fn new(
+        session_manager: SharedSessionManager,
+        egress_policy: crate::security::AdminEgressPolicy,
+    ) -> Self {
         Self {
             session_manager,
             http_client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
+            egress_policy,
         }
     }
 
@@ -30,6 +35,16 @@ impl PlaybackEngine {
                 warn!(method=%method, uri=%uri, "Playback: unrecognised method, skipping");
                 continue;
             };
+            let Ok(parsed_url) = reqwest::Url::parse(&uri) else {
+                warn!(uri=%uri, "Playback: invalid URL, skipping");
+                continue;
+            };
+            if let Err(e) =
+                crate::security::enforce_admin_egress_policy(&parsed_url, self.egress_policy).await
+            {
+                warn!(uri=%uri, reason=%e, "Playback: blocked by admin egress policy");
+                continue;
+            }
             let mut builder = self.http_client.request(reqwest_method, &uri);
             for (name, value) in &exchange.request.headers {
                 // Skip hop-by-hop headers that shouldn't be re-sent.

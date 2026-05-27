@@ -251,7 +251,7 @@ impl ProxyEngine {
         // Execute Request Middleware Chain
         {
             debug!("Executing request middleware chain");
-            let chain = self.middleware_chain.read().await;
+            let chain = self.middleware_chain.read().await.clone();
             let action = chain.execute_request(&mut req_ctx).await;
             match action {
                 MiddlewareAction::Continue => {}
@@ -295,7 +295,7 @@ impl ProxyEngine {
                             body_bytes: Some(Bytes::from(raw_body)),
                         };
                         {
-                            let chain = self.middleware_chain.read().await;
+                            let chain = self.middleware_chain.read().await.clone();
                             let action = chain.execute_response(&mut res_ctx).await;
                             if action != MiddlewareAction::Continue {
                                 return (StatusCode::FORBIDDEN, "Response stopped by middleware")
@@ -343,10 +343,19 @@ impl ProxyEngine {
         ] {
             req_ctx.headers.remove(*hdr);
         }
-        // Remove Accept-Encoding so upstream always returns an uncompressed body that we
-        // can store as readable UTF-8.  If the upstream ignores this and still sends a
-        // compressed response we decompress it below before forwarding.
-        req_ctx.headers.remove("accept-encoding");
+        // Instead of completely removing Accept-Encoding (which triggers WAF bot protection
+        // on strict CDNs by creating a User-Agent / Accept-Encoding mismatch), we preserve it
+        // but strip `zstd` since we don't have a manual zstd decoder. We rely on our manual
+        // decompression block below for gzip/deflate/br.
+        if let Some(mut ae) = req_ctx.headers.remove("accept-encoding") {
+            ae = ae
+                .replace(", zstd", "")
+                .replace("zstd, ", "")
+                .replace("zstd", "");
+            if !ae.trim().is_empty() {
+                req_ctx.headers.insert("accept-encoding".to_string(), ae);
+            }
+        }
         // Strip hop-by-hop headers — illegal in HTTP/2 and must not be forwarded.
         for hdr in &[
             "connection",
@@ -419,20 +428,16 @@ impl ProxyEngine {
 
         let mut target_headers = reqwest::header::HeaderMap::new();
         for (name, value) in &req_ctx.headers {
+            // reqwest computes Content-Length automatically. Sending a mismatched length
+            // (e.g. after a middleware modified the body) causes HTTP protocol errors.
             if name != "host"
+                && name != "content-length"
                 && let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                 && let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
             {
                 target_headers.insert(n, v);
             }
         }
-
-        // If body_bytes is still Some, no middleware cleared it → forward original bytes intact.
-        // If a middleware modified body and cleared body_bytes, forward the modified string.
-        let forward_req_body = match req_ctx.body_bytes {
-            Some(b) => reqwest::Body::from(b),
-            None => reqwest::Body::from(req_ctx.body),
-        };
 
         // SSE and other event-stream requests need no timeout — they stream indefinitely.
         let is_sse = req_ctx
@@ -450,16 +455,30 @@ impl ProxyEngine {
             }
         };
 
-        let net_start = Instant::now();
-        let response = client
+        let mut request_builder = client
             .request(
                 reqwest::Method::from_bytes(req_method.as_bytes()).unwrap(),
                 &target_url,
             )
-            .headers(target_headers)
-            .body(forward_req_body)
-            .send()
-            .await;
+            .headers(target_headers);
+
+        let body_is_empty = match &req_ctx.body_bytes {
+            Some(b) => b.is_empty(),
+            None => req_ctx.body.is_empty(),
+        };
+
+        // Avoid attaching an empty body to methods like GET if the original request didn't specify one.
+        // reqwest automatically adds `Content-Length: 0` if we call `.body()`, which strict servers reject.
+        if !body_is_empty || req_ctx.headers.contains_key("content-length") {
+            let forward_req_body = match req_ctx.body_bytes {
+                Some(b) => reqwest::Body::from(b),
+                None => reqwest::Body::from(req_ctx.body),
+            };
+            request_builder = request_builder.body(forward_req_body);
+        }
+
+        let net_start = Instant::now();
+        let response = request_builder.send().await;
 
         match response {
             Ok(res) => {
@@ -501,7 +520,7 @@ impl ProxyEngine {
                         body_bytes: None,
                     };
                     {
-                        let chain = self.middleware_chain.read().await;
+                        let chain = self.middleware_chain.read().await.clone();
                         chain.execute_response(&mut res_ctx).await;
                     }
                     let status_code = StatusCode::from_u16(res_ctx.status)
@@ -554,7 +573,7 @@ impl ProxyEngine {
                 // Execute Response Middleware Chain
                 {
                     debug!("Executing response middleware chain");
-                    let chain = self.middleware_chain.read().await;
+                    let chain = self.middleware_chain.read().await.clone();
                     let action = chain.execute_response(&mut res_ctx).await;
                     match action {
                         MiddlewareAction::Continue => {}
@@ -613,7 +632,7 @@ impl ProxyEngine {
                     body_bytes: None,
                 };
                 {
-                    let chain = self.middleware_chain.read().await;
+                    let chain = self.middleware_chain.read().await.clone();
                     chain.execute_response(&mut err_ctx).await;
                 }
                 (StatusCode::BAD_GATEWAY, "Error forwarding request").into_response()

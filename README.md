@@ -33,7 +33,7 @@ docker run --rm \
 
 Open `http://127.0.0.1:8080`.
 
-Inside Docker, oproxy binds to `0.0.0.0` so Docker can forward traffic into the container. The command above publishes ports only on host loopback, so other machines cannot reach the admin UI/API unless you intentionally change the port mapping.
+Inside Docker, oproxy binds to `0.0.0.0` so Docker can forward traffic into the container. The command above publishes ports only on host loopback, so other machines cannot reach the proxy or admin UI/API unless you intentionally change the port mapping.
 
 ### Docker Compose
 
@@ -126,7 +126,8 @@ This is intentionally not the default. To allow LAN clients:
 OPROXY_BIND_HOST=0.0.0.0 cargo run --release
 ```
 
-Use this only on a trusted network. The admin UI and management API are exposed wherever the proxy listener is exposed.
+Use this only on a trusted network. This exposes the proxy listener to the network.
+By default, ordinary LAN Host headers are treated as proxy traffic rather than management traffic, and localhost-style management hosts are accepted only from loopback peers. Set `OPROXY_ALLOW_REMOTE_ADMIN=true` and `OPROXY_ADMIN_TOKEN` only if you intentionally want the UI/API reachable from other devices.
 
 ## Using The UI
 
@@ -215,6 +216,13 @@ Common settings:
 | Max body bytes per message | `OPROXY_MAX_BODY_BYTES` or hot reload | `10485760` | `10485760` |
 | Max sessions | `OPROXY_MAX_SESSIONS` | `10000` | `10000` |
 | Retained body budget | `OPROXY_MAX_RETAINED_BODY_BYTES` | `67108864` | `67108864` |
+| Max downstream connections | `OPROXY_MAX_CONNECTIONS` | `1024` | `1024` |
+| TCP connect timeout | `OPROXY_CONNECT_TIMEOUT_SECS` | `10` | `10` |
+| Protocol handshake timeout | `OPROXY_HANDSHAKE_TIMEOUT_SECS` | `10` | `10` |
+| Shutdown drain grace | `OPROXY_SHUTDOWN_GRACE_SECS` | `10` | `10` |
+| Remote management UI/API | `OPROXY_ALLOW_REMOTE_ADMIN` | `false` | `false` |
+| Management token | `OPROXY_ADMIN_TOKEN` | unset | unset |
+| Private admin egress | `OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS` | `false` | `false` |
 
 The checked-in `configs/default.yaml` is developer-friendly and enables MITM and SOCKS5. If you want the most conservative local posture, set `OPROXY_MITM_ENABLED=false` and remove or comment `socks5_port`.
 
@@ -233,11 +241,15 @@ ports:
   - "127.0.0.1:8080:8080"
 ```
 
-Publishing `0.0.0.0:8080:8080` exposes the proxy and admin API to your network.
+Publishing `0.0.0.0:8080:8080` exposes the proxy listener to your network.
+With the default `OPROXY_ALLOW_REMOTE_ADMIN=false`, LAN clients can use the proxy but ordinary LAN Host headers do not route to the management UI/API. If you enable remote admin, set `OPROXY_ADMIN_TOKEN`; remote admin routes are not accepted without a configured token.
+
+When remote admin is enabled, admin-initiated outbound requests from Compose/replay/webhooks are blocked from targeting private, loopback, link-local, multicast, and unspecified IP ranges unless `OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS=true` is set. Keep that override off unless you explicitly trust all remote admin users and need local-network egress.
 
 ## Management API
 
 The management API is served by the same listener as the UI.
+Set `OPROXY_ADMIN_TOKEN` to require a shared secret for control-plane routes. Send it as `x-oproxy-admin-token`, `Authorization: Bearer <token>`, the `oproxy_admin_token` cookie, or visit `/?token=<token>` to set the cookie for the browser UI.
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
@@ -388,7 +400,7 @@ Confirm:
 
 ### Docker starts but the UI is unreachable
 
-Inside the container, oproxy must bind to `0.0.0.0`. The Dockerfile and compose file set `OPROXY_BIND_HOST=0.0.0.0`. The host port mapping should still usually be loopback-only: `127.0.0.1:8080:8080`.
+Inside the container, oproxy must bind to `0.0.0.0` for Docker port publishing to reach it. The Dockerfile defaults to loopback for safe standalone runs; the compose file overrides `OPROXY_BIND_HOST=0.0.0.0` and publishes host ports on loopback only.
 
 ### SOCKS5 is not listening
 

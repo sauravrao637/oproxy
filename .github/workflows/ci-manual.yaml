@@ -1,6 +1,8 @@
-name: Manual CI Checks
+name: CI Checks
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -26,8 +28,20 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Rust format
+        run: cargo fmt -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Rust tests
-        run: RUSTFLAGS="-D warnings" cargo test
+        run: RUSTFLAGS="-D warnings" cargo test --all-targets
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Dependency audit
+        run: cargo audit
 
       - name: Browser smoke tests
         working-directory: tests/browser

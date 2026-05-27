@@ -35,7 +35,14 @@ fn make_sandbox() -> mlua::Result<Lua> {
     {
         let globals = lua.globals();
         for name in &[
-            "io", "os", "package", "require", "load", "loadfile", "dofile", "debug",
+            "io",
+            "os",
+            "package",
+            "require",
+            "load",
+            "loadfile",
+            "dofile",
+            "debug",
             "coroutine",
         ] {
             globals.raw_remove(*name)?;

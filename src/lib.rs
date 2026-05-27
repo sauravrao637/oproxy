@@ -7,6 +7,7 @@ pub mod export;
 pub mod har;
 pub mod middleware;
 pub mod redaction;
+pub mod security;
 pub mod session;
 pub mod setup;
 pub mod storage;

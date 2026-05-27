@@ -3,6 +3,7 @@ use tracing::{debug, instrument};
 
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
 
+#[derive(Clone)]
 pub struct MiddlewareChain {
     middlewares: Vec<Arc<dyn Middleware>>,
 }

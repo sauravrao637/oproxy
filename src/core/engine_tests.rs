@@ -218,10 +218,8 @@ mod tests {
 
     #[tokio::test]
     async fn forward_proxy_returns_non_empty_response_body() {
-        let upstream_app = Router::new().route(
-            "/",
-            get(|| async { "proxy-body-regression-guard" }),
-        );
+        let upstream_app =
+            Router::new().route("/", get(|| async { "proxy-body-regression-guard" }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = listener.local_addr().unwrap();
         tokio::spawn(async move {

@@ -59,20 +59,26 @@ fn hmac_sha256_hex(key: &str, data: &str) -> String {
 pub struct WebhookDispatcher {
     configs: SharedWebhooks,
     client: reqwest::Client,
+    egress_policy: crate::security::AdminEgressPolicy,
 }
 
 impl WebhookDispatcher {
-    pub fn new(configs: SharedWebhooks) -> Self {
+    pub fn new(configs: SharedWebhooks, egress_policy: crate::security::AdminEgressPolicy) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("webhook reqwest client");
-        Self { configs, client }
+        Self {
+            configs,
+            client,
+            egress_policy,
+        }
     }
 
     pub fn spawn(self, mut change_rx: broadcast::Receiver<SessionChange>, sm: Arc<SessionManager>) {
         let configs = self.configs.clone();
         let client = self.client.clone();
+        let egress_policy = self.egress_policy;
         tokio::spawn(async move {
             loop {
                 match change_rx.recv().await {
@@ -112,7 +118,8 @@ impl WebhookDispatcher {
                                 .map(|s| hmac_sha256_hex(s, &payload_str));
                             let c = client.clone();
                             tokio::spawn(async move {
-                                fire_webhook(&c, &url, &payload_str, sig.as_deref()).await;
+                                fire_webhook(&c, egress_policy, &url, &payload_str, sig.as_deref())
+                                    .await;
                             });
                         }
                     }
@@ -124,7 +131,25 @@ impl WebhookDispatcher {
     }
 }
 
-async fn fire_webhook(client: &reqwest::Client, url: &str, payload: &str, signature: Option<&str>) {
+async fn fire_webhook(
+    client: &reqwest::Client,
+    policy: crate::security::AdminEgressPolicy,
+    url: &str,
+    payload: &str,
+    signature: Option<&str>,
+) {
+    let parsed_url = match reqwest::Url::parse(url) {
+        Ok(url) => url,
+        Err(e) => {
+            warn!("webhook {} skipped: invalid URL: {e}", url);
+            return;
+        }
+    };
+    if let Err(e) = crate::security::enforce_admin_egress_policy(&parsed_url, policy).await {
+        warn!("webhook {} skipped: {e}", url);
+        return;
+    }
+
     let mut attempts = 0u32;
     loop {
         let mut req = client.post(url).header("content-type", "application/json");

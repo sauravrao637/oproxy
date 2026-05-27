@@ -4,12 +4,14 @@ use rcgen::{
 };
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 type CertCache = Arc<RwLock<HashMap<String, (Vec<u8>, Vec<u8>)>>>;
+const MAX_CERT_CACHE_ENTRIES: usize = 1024;
 
 pub struct CertificateAuthority {
     root_params: CertificateParams,
@@ -33,17 +35,19 @@ impl CertificateAuthority {
         // Bug fix: previously both branches called generate_root_ca, which ignored the loaded
         // key pair and wrote new files on every restart. Now we reconstruct the Certificate
         // from the stored key so domain certs remain valid across restarts.
-        let (root_params, root_cert, root_key) = if root_key_path.exists() && root_cert_path.exists() {
-            debug!("Loading existing root CA from disk");
-            let key_pem = fs::read_to_string(&root_key_path)?;
-            let key_pair = KeyPair::from_pem(&key_pem)?;
-            let params = Self::root_params();
-            let cert = params.self_signed(&key_pair)?;
-            (params, cert, key_pair)
-        } else {
-            info!("Generating new root CA");
-            Self::generate_root_ca(&storage_path)?
-        };
+        let (root_params, root_cert, root_key) =
+            if root_key_path.exists() && root_cert_path.exists() {
+                debug!("Loading existing root CA from disk");
+                harden_private_key_permissions(&root_key_path);
+                let key_pem = fs::read_to_string(&root_key_path)?;
+                let key_pair = KeyPair::from_pem(&key_pem)?;
+                let params = Self::root_params();
+                let cert = params.self_signed(&key_pair)?;
+                (params, cert, key_pair)
+            } else {
+                info!("Generating new root CA");
+                Self::generate_root_ca(&storage_path)?
+            };
 
         Ok(Self {
             root_params,
@@ -73,7 +77,7 @@ impl CertificateAuthority {
         let key_pair = KeyPair::generate()?;
         let cert = params.self_signed(&key_pair)?;
 
-        fs::write(storage_path.join("root.key"), key_pair.serialize_pem())?;
+        write_private_key(&storage_path.join("root.key"), &key_pair.serialize_pem())?;
         fs::write(storage_path.join("root.crt"), cert.pem())?;
 
         Ok((params, cert, key_pair))
@@ -108,6 +112,12 @@ impl CertificateAuthority {
 
         {
             let mut cache = self.cert_cache.write().await;
+            if cache.len() >= MAX_CERT_CACHE_ENTRIES
+                && let Some(evicted) = cache.keys().next().cloned()
+            {
+                cache.remove(&evicted);
+                debug!(domain = %evicted, "Evicted certificate cache entry");
+            }
             cache.insert(domain.to_string(), (cert_der.clone(), key_der.clone()));
         }
 
@@ -116,6 +126,34 @@ impl CertificateAuthority {
 
     pub fn get_root_cert_pem(&self) -> String {
         self.root_cert.pem()
+    }
+}
+
+fn write_private_key(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    harden_private_key_permissions(path);
+    Ok(())
+}
+
+fn harden_private_key_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+            warn!(path = %path.display(), error = %e, "Failed to harden CA private key permissions");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -136,6 +174,24 @@ mod tests {
             .expect("CA creation failed");
         assert!(dir.join("root.key").exists(), "root.key must be written");
         assert!(dir.join("root.crt").exists(), "root.crt must be written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_ca_writes_private_key_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_ca_dir();
+        CertificateAuthority::new(&dir)
+            .await
+            .expect("CA creation failed");
+        let mode = std::fs::metadata(dir.join("root.key"))
+            .expect("root.key metadata missing")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -215,7 +271,7 @@ mod tests {
     async fn loading_existing_ca_does_not_overwrite_key_or_cert_files() {
         let dir = temp_ca_dir();
 
-        // First construction – creates the files
+        // First construction creates the files.
         CertificateAuthority::new(&dir)
             .await
             .expect("first CA failed");
@@ -224,7 +280,7 @@ mod tests {
         let crt_after_first =
             std::fs::read_to_string(dir.join("root.crt")).expect("root.crt missing");
 
-        // Second construction with existing files present – must NOT overwrite anything
+        // Second construction with existing files present must not overwrite anything.
         CertificateAuthority::new(&dir)
             .await
             .expect("second CA failed");

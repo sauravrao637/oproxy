@@ -45,7 +45,10 @@ COPY configs ./configs
 
 # Directories created at runtime; declaring them makes intent explicit and
 # allows volume mounts to overlay them cleanly.
-RUN mkdir -p certs storage
+RUN groupadd --system oproxy && \
+    useradd --system --gid oproxy --home-dir /app --no-create-home oproxy && \
+    mkdir -p certs storage && \
+    chown -R oproxy:oproxy /app
 
 # Declare volumes so the CA key/cert, rule storage, hot config, and manually
 # saved session files survive container restarts.
@@ -53,13 +56,16 @@ RUN mkdir -p certs storage
 # container replacements (docker rm + docker run).
 VOLUME ["/app/certs", "/app/storage"]
 
-# Default ports — override with OPROXY_PORT / config if needed.
+# Default ports - override with OPROXY_PORT / config if needed.
 EXPOSE 8080 1080
 
-# OPROXY_CONFIG   — path to the JSON config file
-# OPROXY_PORT     — port override (takes precedence over the config file)
-# OPROXY_MITM_ENABLED — set to "true" to enable HTTPS interception
+# OPROXY_CONFIG   - path to the YAML config file
+# OPROXY_PORT     - port override (takes precedence over the config file)
+# OPROXY_MITM_ENABLED - set to "true" to enable HTTPS interception
+# OPROXY_BIND_HOST - defaults to loopback; set 0.0.0.0 only with explicit port publishing
 ENV OPROXY_CONFIG=/app/configs/default.yaml
-ENV OPROXY_BIND_HOST=0.0.0.0
+ENV OPROXY_BIND_HOST=127.0.0.1
+
+USER oproxy
 
 CMD ["./oproxy"]

@@ -487,12 +487,15 @@ impl Middleware for BreakpointMiddleware {
             Err(_) => {
                 self.manager.pending.write().await.remove(&bp_id);
                 tracing::warn!(id = %bp_id, "Breakpoint response timed out, dropping");
-                ctx.headers
-                    .insert("x-oproxy-mock-response".to_string(), serde_json::json!({
+                ctx.headers.insert(
+                    "x-oproxy-mock-response".to_string(),
+                    serde_json::json!({
                         "status": 504,
                         "headers": {"content-type": "text/plain"},
                         "body": "Breakpoint timed out",
-                    }).to_string());
+                    })
+                    .to_string(),
+                );
                 MiddlewareAction::StopAndReturn
             }
         }

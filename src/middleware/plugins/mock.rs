@@ -150,15 +150,16 @@ impl Middleware for MockMiddleware {
         };
 
         for (idx, pattern, method_filter, host_filter, _) in rule_snapshots {
-            if let Some(ref m) = method_filter {
-                if !m.eq_ignore_ascii_case(&ctx.method) {
-                    continue;
-                }
+            if let Some(ref m) = method_filter
+                && !m.eq_ignore_ascii_case(&ctx.method)
+            {
+                continue;
             }
-            if let Some(ref h) = host_filter {
-                if !h.is_empty() && !ctx.host.to_lowercase().contains(&h.to_lowercase()) {
-                    continue;
-                }
+            if let Some(ref h) = host_filter
+                && !h.is_empty()
+                && !ctx.host.to_lowercase().contains(&h.to_lowercase())
+            {
+                continue;
             }
             let re = match self.compiled(&pattern).await {
                 Some(r) => r,

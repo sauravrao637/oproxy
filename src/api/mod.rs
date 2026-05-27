@@ -51,8 +51,9 @@ impl ApiHandler {
         breakpoint_manager: Arc<BreakpointManager>,
         header_map_middleware: Arc<HeaderMapMiddleware>,
         modification_middleware: Arc<ModificationMiddleware>,
+        egress_policy: crate::security::AdminEgressPolicy,
     ) -> Self {
-        let playback_engine = PlaybackEngine::new(session_manager.clone());
+        let playback_engine = PlaybackEngine::new(session_manager.clone(), egress_policy);
         Self {
             session_manager,
             rewrite_middleware,
@@ -297,6 +298,7 @@ mod tests {
             Arc::new(BreakpointManager::new()),
             Arc::new(HeaderMapMiddleware::new(vec![])),
             Arc::new(ModificationMiddleware::new(vec![])),
+            crate::security::AdminEgressPolicy::default(),
         )
     }
 

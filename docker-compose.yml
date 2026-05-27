@@ -2,12 +2,17 @@ services:
   oproxy:
     image: oproxy:latest
     build: .
-    network_mode: host
+    ports:
+      # Published to host loopback only. Change the host side to 0.0.0.0 only
+      # when you explicitly want LAN clients to use the proxy.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:1080:1080"
     environment:
-      # The process must bind inside the container, but host publishing above
-      # keeps the admin UI/API and proxy reachable only from this machine.
+      # The process must bind to all interfaces inside the container so Docker
+      # port publishing can reach it. Host-side publishing above is loopback-only.
       OPROXY_BIND_HOST: "0.0.0.0"
       OPROXY_MITM_ENABLED: "true"
+      OPROXY_ALLOW_REMOTE_ADMIN: "false"
     volumes:
       # Persist root CA key/cert across container replacements.
       # Trust /app/certs/root.crt once; it never changes between restarts.
