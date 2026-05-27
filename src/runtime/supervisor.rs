@@ -23,10 +23,6 @@ impl RuntimeSupervisor {
         self.connections.clone()
     }
 
-    pub(super) fn listener_tasks_mut(&mut self) -> &mut JoinSet<()> {
-        &mut self.listener_tasks
-    }
-
     pub(super) fn spawn_listener<F>(&mut self, name: &'static str, future: F)
     where
         F: Future<Output = ()> + Send + 'static,

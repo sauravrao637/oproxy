@@ -284,21 +284,6 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
-    use crate::middleware::chain::MiddlewareChain;
-
-    fn test_engine() -> Arc<ProxyEngine> {
-        Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            false,
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ))
-    }
-
     #[tokio::test]
     async fn resolve_target_applies_dns_override_without_changing_port() {
         let dns = Arc::new(RwLock::new(HashMap::from([(
