@@ -26,6 +26,35 @@ test.describe('Compose', () => {
     await expect(page.locator('.cmp-url')).toHaveValue('https://httpbin.org/get');
   });
 
+  test('pasting cURL into the URL field imports request fields', async ({ page }) => {
+    await page.locator('.cmp-tab-new').click();
+
+    const curl = `curl -X POST https://api.example.com/users -H 'content-type: application/json' -H 'x-token: abc' --data '{"name":"Ada"}'`;
+    await page.locator('.cmp-url').evaluate((input, text) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: { getData: type => type === 'text/plain' ? text : '' },
+      });
+      input.dispatchEvent(event);
+    }, curl);
+
+    await expect(page.locator('.cmp-method')).toHaveValue('POST');
+    await expect(page.locator('.cmp-url')).toHaveValue('https://api.example.com/users');
+    await expect(page.locator('.cmp-body-tabs .tab', { hasText: 'Body' })).toHaveClass(/on/);
+    await expect(page.locator('.cmp-body-ta')).toHaveValue('{"name":"Ada"}');
+
+    await page.locator('.cmp-body-tabs .tab', { hasText: 'Headers' }).click();
+    await expect.poll(async () => {
+      return page.locator('.kvedit-row').evaluateAll(rows => rows.map(row => {
+        const [key, value] = Array.from(row.querySelectorAll('input'));
+        return [key?.value, value?.value];
+      }));
+    }).toEqual(expect.arrayContaining([
+      ['content-type', 'application/json'],
+      ['x-token', 'abc'],
+    ]));
+  });
+
   test('New Request button in empty state creates tab', async ({ page }) => {
     await page.getByRole('button', { name: '+ New request' }).click();
     await expect(page.locator('.cmp-method')).toBeVisible();

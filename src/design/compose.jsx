@@ -103,6 +103,37 @@ function buildComposeCurl(tab, resolveVars) {
   return parts.join(' ');
 }
 
+function isCurlCommand(text) {
+  return String(text || '').trim().split(/\s+/, 1)[0]?.split('/').pop() === 'curl';
+}
+
+function headerRowsFromObject(headers) {
+  return Object.entries(headers || {}).map(([key, value], idx) => ({
+    id: `h${Date.now()}_${idx}`,
+    on: true,
+    key,
+    value: String(value),
+  }));
+}
+
+function contentTypeFromHeaders(headers) {
+  const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === 'content-type');
+  return entry?.[1] || 'application/json';
+}
+
+async function importCurlCommand(curl) {
+  const res = await fetch('/api/import/curl', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ curl }),
+  });
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+  if (!res.ok) throw new Error(data.error || 'Unable to import cURL command.');
+  return data;
+}
+
 function authHeaderValue(tab, resolveVars) {
   if (tab.authType === 'bearer' && tab.authToken) return `Bearer ${resolveVars(tab.authToken)}`;
   if (tab.authType === 'basic' && tab.authUser) {
@@ -502,6 +533,30 @@ function ComposeEditor({ tab, updateActive, send, openSaveBar, resolveVars }) {
   const showResolved = resolved !== tab.url && tab.url.includes('{{');
   const validationError = validateComposeTarget(resolved);
 
+  const handleUrlPaste = async (event) => {
+    const text = event.clipboardData?.getData('text/plain') || '';
+    if (!isCurlCommand(text)) return;
+    event.preventDefault();
+    try {
+      const parsed = await importCurlCommand(text);
+      updateActive({
+        name: `${parsed.method || 'GET'} ${parsed.url || ''}`.trim(),
+        method: parsed.method || 'GET',
+        url: parsed.url || '',
+        headers: headerRowsFromObject(parsed.headers),
+        params: [],
+        body: parsed.body || '',
+        bodyMode: parsed.body ? 'raw' : 'none',
+        contentType: contentTypeFromHeaders(parsed.headers),
+        response: null,
+        dirty: true,
+      });
+      setBodyTab(parsed.body ? 'body' : 'headers');
+    } catch (err) {
+      notifyError(err.message || String(err));
+    }
+  };
+
   return (
     <>
       <div className="cmp-req-line">
@@ -516,7 +571,8 @@ function ComposeEditor({ tab, updateActive, send, openSaveBar, resolveVars }) {
                aria-label="Request URL"
                placeholder="https://{{base}}/api/resource"
                value={tab.url}
-               onChange={e => updateActive({ url: e.target.value })} />
+               onChange={e => updateActive({ url: e.target.value })}
+               onPaste={handleUrlPaste} />
         <button className="btn primary" onClick={send} disabled={!!validationError}>
           <Icon name="resume" size={10} /> Send
         </button>
