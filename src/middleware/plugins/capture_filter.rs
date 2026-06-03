@@ -1,4 +1,4 @@
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -61,16 +61,12 @@ impl Middleware for CaptureFilterMiddleware {
         // Always continue — we never block proxying, only toggle recording.
         MiddlewareAction::Continue
     }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
-        MiddlewareAction::Continue
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::{Middleware, RequestContext};
+    use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
     use std::collections::HashMap;
 
     fn cfg(mode: FilterMode, hosts: &[&str]) -> Arc<RwLock<CaptureFilterConfig>> {

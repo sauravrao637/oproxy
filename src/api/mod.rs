@@ -105,14 +105,14 @@ impl ApiHandler {
 
     pub async fn save_session(&self, path: String) -> Result<(), String> {
         self.session_manager
-            .save_to_file(path)
+            .save_to_file(std::path::Path::new(&path))
             .await
             .map_err(|e| e.to_string())
     }
 
     pub async fn load_session(&self, path: String) -> Result<(), String> {
         self.session_manager
-            .load_from_file(path)
+            .load_from_file(std::path::Path::new(&path))
             .await
             .map_err(|e| e.to_string())
     }

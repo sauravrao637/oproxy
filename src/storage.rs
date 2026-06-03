@@ -24,57 +24,47 @@ async fn write_pretty<T: serde::Serialize>(path: &Path, value: &T) -> io::Result
     write_atomic(path, json).await
 }
 
-async fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    let json = serde_json::to_string(value).map_err(to_io_error)?;
-    write_atomic(path, json).await
+fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path, file_name: &str) -> T {
+    std::fs::read_to_string(path.join(file_name))
+        .ok()
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or_default()
+}
+
+async fn save_json<T: serde::Serialize>(path: &Path, file_name: &str, value: &T) -> io::Result<()> {
+    write_pretty(&path.join(file_name), value).await
 }
 
 pub fn load_rule_sets(path: &Path) -> Vec<RewriteRuleSet> {
-    std::fs::read_to_string(path.join("rule_sets.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "rule_sets.json")
 }
 
 pub async fn save_rule_sets(path: &Path, rules: &[RewriteRuleSet]) -> io::Result<()> {
-    write_pretty(&path.join("rule_sets.json"), &rules).await
+    save_json(path, "rule_sets.json", &rules).await
 }
 
 pub fn load_throttle(path: &Path) -> ThrottlingConfig {
-    std::fs::read_to_string(path.join("throttle.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or(ThrottlingConfig {
-            latency_ms: 0,
-            bandwidth_limit_kbps: 0,
-            enabled: false,
-        })
+    load_json(path, "throttle.json")
 }
 
 pub async fn save_throttle(path: &Path, config: &ThrottlingConfig) -> io::Result<()> {
-    write_pretty(&path.join("throttle.json"), config).await
+    save_json(path, "throttle.json", config).await
 }
 
 pub fn load_dns_overrides(path: &Path) -> HashMap<String, String> {
-    std::fs::read_to_string(path.join("dns_overrides.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "dns_overrides.json")
 }
 
 pub async fn save_dns_overrides(path: &Path, map: &HashMap<String, String>) -> io::Result<()> {
-    write_pretty(&path.join("dns_overrides.json"), map).await
+    save_json(path, "dns_overrides.json", map).await
 }
 
 pub fn load_breakpoints(path: &Path) -> Vec<BreakpointRule> {
-    std::fs::read_to_string(path.join("breakpoints.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "breakpoints.json")
 }
 
 pub async fn save_breakpoints(path: &Path, rules: &[BreakpointRule]) -> io::Result<()> {
-    write_pretty(&path.join("breakpoints.json"), &rules).await
+    save_json(path, "breakpoints.json", &rules).await
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -83,72 +73,53 @@ pub struct HotConfig {
 }
 
 pub fn load_hot_config(path: &Path) -> HotConfig {
-    std::fs::read_to_string(path.join("hot_config.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "hot_config.json")
 }
 
 pub async fn save_hot_config(path: &Path, cfg: &HotConfig) -> io::Result<()> {
-    write_pretty(&path.join("hot_config.json"), cfg).await
+    save_json(path, "hot_config.json", cfg).await
 }
 
 pub fn load_capture_filter(path: &Path) -> CaptureFilterConfig {
-    std::fs::read_to_string(path.join("capture_filter.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "capture_filter.json")
 }
 
 pub async fn save_capture_filter(path: &Path, cfg: &CaptureFilterConfig) -> io::Result<()> {
-    write_pretty(&path.join("capture_filter.json"), cfg).await
+    save_json(path, "capture_filter.json", cfg).await
 }
 
 pub fn load_upstream_proxy(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path.join("upstream_proxy.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str::<Option<String>>(&d).ok())
-        .flatten()
+    load_json(path, "upstream_proxy.json")
 }
 
 pub async fn save_upstream_proxy(path: &Path, url: &Option<String>) -> io::Result<()> {
-    write_json(&path.join("upstream_proxy.json"), url).await
+    save_json(path, "upstream_proxy.json", url).await
 }
 
 pub fn load_lua_scripts(path: &Path) -> Vec<crate::middleware::plugins::lua_engine::LuaScript> {
-    std::fs::read_to_string(path.join("lua_scripts.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "lua_scripts.json")
 }
 
 pub async fn save_lua_scripts(
     path: &Path,
     scripts: &[crate::middleware::plugins::lua_engine::LuaScript],
 ) -> io::Result<()> {
-    write_pretty(&path.join("lua_scripts.json"), &scripts).await
+    save_json(path, "lua_scripts.json", &scripts).await
 }
 
 pub fn load_mock_rules(path: &Path) -> Vec<crate::middleware::plugins::mock::MockRule> {
-    std::fs::read_to_string(path.join("mock_rules.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "mock_rules.json")
 }
 
 pub async fn save_mock_rules(
     path: &Path,
     rules: &[crate::middleware::plugins::mock::MockRule],
 ) -> io::Result<()> {
-    write_pretty(&path.join("mock_rules.json"), &rules).await
+    save_json(path, "mock_rules.json", &rules).await
 }
 
 pub fn load_webhooks(path: &Path) -> Vec<crate::webhooks::WebhookConfig> {
-    let mut hooks: Vec<crate::webhooks::WebhookConfig> =
-        std::fs::read_to_string(path.join("webhooks.json"))
-            .ok()
-            .and_then(|d| serde_json::from_str(&d).ok())
-            .unwrap_or_default();
+    let mut hooks: Vec<crate::webhooks::WebhookConfig> = load_json(path, "webhooks.json");
     hooks.iter_mut().for_each(|hook| {
         crate::webhooks::sanitize_webhook_events(&mut hook.events);
     });
@@ -160,40 +131,31 @@ pub async fn save_webhooks(
     path: &Path,
     hooks: &[crate::webhooks::WebhookConfig],
 ) -> io::Result<()> {
-    write_pretty(&path.join("webhooks.json"), &hooks).await
+    save_json(path, "webhooks.json", &hooks).await
 }
 
 pub fn load_map_local_rules(path: &Path) -> Vec<MapLocalRule> {
-    std::fs::read_to_string(path.join("map_local_rules.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "map_local_rules.json")
 }
 
 pub async fn save_map_local_rules(path: &Path, rules: &[MapLocalRule]) -> io::Result<()> {
-    write_pretty(&path.join("map_local_rules.json"), &rules).await
+    save_json(path, "map_local_rules.json", &rules).await
 }
 
 pub fn load_access_rules(path: &Path) -> Vec<AccessRule> {
-    std::fs::read_to_string(path.join("access_rules.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "access_rules.json")
 }
 
 pub async fn save_access_rules(path: &Path, rules: &[AccessRule]) -> io::Result<()> {
-    write_pretty(&path.join("access_rules.json"), &rules).await
+    save_json(path, "access_rules.json", &rules).await
 }
 
 pub fn load_map_remote_rules(path: &Path) -> Vec<MapRemoteRule> {
-    std::fs::read_to_string(path.join("map_remote_rules.json"))
-        .ok()
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
+    load_json(path, "map_remote_rules.json")
 }
 
 pub async fn save_map_remote_rules(path: &Path, rules: &[MapRemoteRule]) -> io::Result<()> {
-    write_pretty(&path.join("map_remote_rules.json"), &rules).await
+    save_json(path, "map_remote_rules.json", &rules).await
 }
 
 #[cfg(test)]

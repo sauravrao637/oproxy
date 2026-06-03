@@ -1,4 +1,5 @@
 use crate::middleware::{RequestContext, ResponseContext};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -312,7 +313,7 @@ impl SessionManager {
 
     // ── Async file I/O ────────────────────────────────────────────────────────
 
-    pub async fn save_to_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<(), std::io::Error> {
+    pub async fn save_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
         // Flush pending writes before taking the read snapshot.
         self.flush().await;
         let json = {
@@ -323,10 +324,7 @@ impl SessionManager {
         tokio::fs::write(path, json).await
     }
 
-    pub async fn load_from_file<P: AsRef<Path> + Send>(
-        &self,
-        path: P,
-    ) -> Result<(), std::io::Error> {
+    pub async fn load_from_file(&self, path: &Path) -> Result<(), std::io::Error> {
         let data = tokio::fs::read(path).await?;
         let map: IndexMap<String, Exchange> = serde_json::from_slice(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -376,7 +374,95 @@ impl SessionManager {
     }
 }
 
-pub type SharedSessionManager = Arc<SessionManager>;
+#[async_trait]
+pub trait ExchangeRecorder: Send + Sync {
+    fn subscribe(&self) -> broadcast::Receiver<SessionChange>;
+    async fn flush(&self);
+    fn record_request(&self, id: String, request: RequestContext);
+    fn record_request_with_source(
+        &self,
+        id: String,
+        request: RequestContext,
+        source: SessionSource,
+    );
+    fn record_response(&self, id: String, response: ResponseContext);
+    fn record_response_with_metrics(
+        &self,
+        id: String,
+        response: ResponseContext,
+        metrics: InspectionMetrics,
+    );
+    fn import_sessions(&self, exchanges: Vec<Exchange>);
+    fn append_ws_frame(&self, id: &str, frame: WsFrame);
+    fn clear_sessions(&self);
+    fn update_inspector_data(&self, id: &str, data: InspectorData);
+    async fn annotate(&self, id: &str, note: Option<String>, tags: Option<Vec<String>>) -> bool;
+    async fn save_to_file(&self, path: &Path) -> Result<(), std::io::Error>;
+    async fn load_from_file(&self, path: &Path) -> Result<(), std::io::Error>;
+    fn get_all_sessions(&self) -> Vec<Exchange>;
+    fn get_session(&self, id: &str) -> Option<Exchange>;
+}
+
+#[async_trait]
+impl ExchangeRecorder for SessionManager {
+    fn subscribe(&self) -> broadcast::Receiver<SessionChange> {
+        self.subscribe()
+    }
+    async fn flush(&self) {
+        self.flush().await
+    }
+    fn record_request(&self, id: String, request: RequestContext) {
+        self.record_request(id, request)
+    }
+    fn record_request_with_source(
+        &self,
+        id: String,
+        request: RequestContext,
+        source: SessionSource,
+    ) {
+        self.record_request_with_source(id, request, source)
+    }
+    fn record_response(&self, id: String, response: ResponseContext) {
+        self.record_response(id, response)
+    }
+    fn record_response_with_metrics(
+        &self,
+        id: String,
+        response: ResponseContext,
+        metrics: InspectionMetrics,
+    ) {
+        self.record_response_with_metrics(id, response, metrics)
+    }
+    fn import_sessions(&self, exchanges: Vec<Exchange>) {
+        self.import_sessions(exchanges)
+    }
+    fn append_ws_frame(&self, id: &str, frame: WsFrame) {
+        self.append_ws_frame(id, frame)
+    }
+    fn clear_sessions(&self) {
+        self.clear_sessions()
+    }
+    fn update_inspector_data(&self, id: &str, data: InspectorData) {
+        self.update_inspector_data(id, data)
+    }
+    async fn annotate(&self, id: &str, note: Option<String>, tags: Option<Vec<String>>) -> bool {
+        self.annotate(id, note, tags).await
+    }
+    async fn save_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
+        self.save_to_file(path).await
+    }
+    async fn load_from_file(&self, path: &Path) -> Result<(), std::io::Error> {
+        self.load_from_file(path).await
+    }
+    fn get_all_sessions(&self) -> Vec<Exchange> {
+        self.get_all_sessions()
+    }
+    fn get_session(&self, id: &str) -> Option<Exchange> {
+        self.get_session(id)
+    }
+}
+
+pub type SharedSessionManager = Arc<dyn ExchangeRecorder>;
 
 // ── Writer task ───────────────────────────────────────────────────────────────
 
@@ -832,7 +918,9 @@ mod tests {
     #[tokio::test]
     async fn load_from_nonexistent_file_returns_error() {
         let sm = SessionManager::new(10_000);
-        let result = sm.load_from_file("/nonexistent/path/sessions.json").await;
+        let result = sm
+            .load_from_file(Path::new("/nonexistent/path/sessions.json"))
+            .await;
         assert!(result.is_err());
     }
 

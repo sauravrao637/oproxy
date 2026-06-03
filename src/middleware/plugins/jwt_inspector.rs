@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
 use crate::session::JwtInfo;
 
 pub struct JwtInspectorMiddleware;
@@ -81,10 +81,6 @@ impl Middleware for JwtInspectorMiddleware {
         {
             ctx.inspector.jwt = Some(info);
         }
-        MiddlewareAction::Continue
-    }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 }

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use graphql_parser::query::{Definition, OperationDefinition, parse_query};
 
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
 use crate::session::GraphQLInfo;
 
 pub struct GraphQLInspectorMiddleware;
@@ -80,10 +80,6 @@ impl Middleware for GraphQLInspectorMiddleware {
         {
             ctx.inspector.graphql = Some(info);
         }
-        MiddlewareAction::Continue
-    }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 }

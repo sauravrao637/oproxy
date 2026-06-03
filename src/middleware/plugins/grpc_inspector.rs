@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
 use crate::session::{GrpcField, GrpcInfo, GrpcMessage};
 
 pub struct GrpcInspectorMiddleware;
@@ -192,10 +192,6 @@ impl Middleware for GrpcInspectorMiddleware {
             method,
             messages,
         });
-        MiddlewareAction::Continue
-    }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 }
