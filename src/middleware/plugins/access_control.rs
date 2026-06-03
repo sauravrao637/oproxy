@@ -1,7 +1,5 @@
 use crate::middleware::matcher::{Location, MatchTarget};
-use crate::middleware::{
-    InterceptedResponse, Middleware, MiddlewareAction, RequestContext, ResponseContext,
-};
+use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -99,17 +97,13 @@ impl Middleware for AccessControlMiddleware {
 
         MiddlewareAction::Continue
     }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
-        MiddlewareAction::Continue
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::middleware::matcher::Location;
-    use crate::middleware::{Middleware, MiddlewareAction};
+    use crate::middleware::{Middleware, MiddlewareAction, ResponseContext};
     use bytes::Bytes;
     use std::collections::HashMap;
 

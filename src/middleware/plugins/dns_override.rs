@@ -1,4 +1,4 @@
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,10 +36,6 @@ impl Middleware for DnsOverrideMiddleware {
             ctx.host = new_host;
             ctx.destination = Some(dest);
         }
-        MiddlewareAction::Continue
-    }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 }

@@ -1,4 +1,5 @@
 pub mod context;
+pub mod decompression;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;

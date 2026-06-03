@@ -8,7 +8,7 @@ pub struct ThrottlingMiddleware {
     pub config: Arc<RwLock<ThrottlingConfig>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThrottlingConfig {
     pub latency_ms: u64,
     pub bandwidth_limit_kbps: u64,

@@ -9,7 +9,7 @@
 //! normally want exactly one upstream per matching request.
 
 use crate::middleware::matcher::{Location, MatchTarget};
-use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -68,10 +68,6 @@ impl Middleware for MapRemoteMiddleware {
                 return MiddlewareAction::Continue; // first-match wins
             }
         }
-        MiddlewareAction::Continue
-    }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 }

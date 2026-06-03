@@ -11,6 +11,8 @@
 use crate::middleware::matcher::{Location, MatchTarget};
 use crate::middleware::{
     InterceptedResponse, Middleware, MiddlewareAction, RequestContext, ResponseContext,
+    append_header, path_of, remove_header, remove_query_param, set_header, set_query_param,
+    split_path_query,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -281,115 +283,6 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
             | RewriteAction::Redirect { .. }
             | RewriteAction::Block { .. } => {}
         }
-    }
-}
-
-// ── Header helpers ────────────────────────────────────────────────────────────
-
-/// Case-insensitive find of the canonical key as stored in the map.
-fn find_key(headers: &HashMap<String, String>, name: &str) -> Option<String> {
-    headers
-        .keys()
-        .find(|k| k.eq_ignore_ascii_case(name))
-        .cloned()
-}
-
-fn set_header(headers: &mut HashMap<String, String>, name: &str, value: String) {
-    let key = find_key(headers, name).unwrap_or_else(|| name.to_lowercase());
-    headers.insert(key, value);
-}
-
-fn append_header(headers: &mut HashMap<String, String>, name: &str, value: &str) {
-    let key = find_key(headers, name).unwrap_or_else(|| name.to_lowercase());
-    let existing = headers.get(&key).cloned().unwrap_or_default();
-    let sep = if existing.is_empty() { "" } else { ", " };
-    headers.insert(key, format!("{existing}{sep}{value}"));
-}
-
-fn remove_header(headers: &mut HashMap<String, String>, name: &str) {
-    if let Some(key) = find_key(headers, name) {
-        headers.remove(&key);
-    }
-}
-
-// ── URI/query-param helpers ───────────────────────────────────────────────────
-
-fn path_of(uri: &str) -> &str {
-    let s = uri.split('?').next().unwrap_or(uri);
-    // Strip absolute-form scheme://host prefix if present.
-    if let Some(idx) = s.find("://") {
-        let after_scheme = &s[idx + 3..];
-        return after_scheme
-            .find('/')
-            .map(|i| &after_scheme[i..])
-            .unwrap_or("/");
-    }
-    s
-}
-
-fn split_path_query(uri: &str) -> (String, String) {
-    match uri.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (uri.to_string(), String::new()),
-    }
-}
-
-/// Parse `key=value` pairs from a raw query string.
-fn parse_query(query: &str) -> Vec<(String, String)> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-    query
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|p| match p.split_once('=') {
-            Some((k, v)) => (k.to_string(), v.to_string()),
-            None => (p.to_string(), String::new()),
-        })
-        .collect()
-}
-
-fn build_query(pairs: &[(String, String)]) -> String {
-    pairs
-        .iter()
-        .map(|(k, v)| {
-            if v.is_empty() {
-                k.clone()
-            } else {
-                format!("{k}={v}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn set_query_param(uri: &str, name: &str, value: &str) -> String {
-    let (path, query) = split_path_query(uri);
-    let mut pairs = parse_query(&query);
-    if let Some(pos) = pairs.iter().position(|(k, _)| k == name) {
-        pairs[pos].1 = value.to_string();
-    } else {
-        pairs.push((name.to_string(), value.to_string()));
-    }
-    let new_q = build_query(&pairs);
-    if new_q.is_empty() {
-        path
-    } else {
-        format!("{path}?{new_q}")
-    }
-}
-
-fn remove_query_param(uri: &str, name: &str) -> String {
-    let (path, query) = split_path_query(uri);
-    let pairs: Vec<_> = parse_query(&query)
-        .into_iter()
-        .filter(|(k, _)| k != name)
-        .collect();
-    let new_q = build_query(&pairs);
-    if new_q.is_empty() {
-        path
-    } else {
-        format!("{path}?{new_q}")
     }
 }
 

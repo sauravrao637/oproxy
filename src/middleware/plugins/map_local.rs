@@ -9,9 +9,7 @@
 //! served, after path-traversal checks).
 
 use crate::middleware::matcher::{Location, MatchTarget};
-use crate::middleware::{
-    InterceptedResponse, Middleware, MiddlewareAction, RequestContext, ResponseContext,
-};
+use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -123,10 +121,6 @@ impl Middleware for MapLocalMiddleware {
                 }
             }
         }
-        MiddlewareAction::Continue
-    }
-
-    async fn on_response(&self, _ctx: &mut ResponseContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 }
