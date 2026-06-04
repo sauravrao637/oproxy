@@ -3,8 +3,15 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// Bound on the in-flight session write queue. Generous enough that normal
+/// operation never blocks or drops; only pathological overload (writer task
+/// starved) hits the limit, where dropping a record is preferable to unbounded
+/// memory growth.
+const WRITE_QUEUE_CAPACITY: usize = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WsDirection {
@@ -189,7 +196,8 @@ pub struct SessionManager {
     /// Shared with the writer task; only the writer task acquires write locks.
     exchanges: Arc<RwLock<IndexMap<String, Exchange>>>,
     change_tx: broadcast::Sender<SessionChange>,
-    write_tx: mpsc::UnboundedSender<WriteOp>,
+    write_tx: mpsc::Sender<WriteOp>,
+    dropped_writes: Arc<AtomicU64>,
 }
 
 impl SessionManager {
@@ -201,7 +209,7 @@ impl SessionManager {
     pub fn with_body_budget(max_sessions: usize, max_retained_body_bytes: usize) -> Self {
         let (change_tx, _) = broadcast::channel(64);
         let exchanges = Arc::new(RwLock::new(IndexMap::new()));
-        let (write_tx, write_rx) = mpsc::unbounded_channel();
+        let (write_tx, write_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
 
         tokio::spawn(writer_task(
             write_rx,
@@ -215,6 +223,26 @@ impl SessionManager {
             exchanges,
             change_tx,
             write_tx,
+            dropped_writes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Fire-and-forget enqueue. Drops (and counts) the op if the writer queue is
+    /// saturated, trading record loss for bounded memory under overload.
+    fn enqueue(&self, op: WriteOp) {
+        if let Err(e) = self.write_tx.try_send(op) {
+            let kind = match e {
+                mpsc::error::TrySendError::Full(_) => "queue full",
+                mpsc::error::TrySendError::Closed(_) => "writer closed",
+            };
+            let total = self.dropped_writes.fetch_add(1, Ordering::Relaxed) + 1;
+            if total.is_power_of_two() {
+                tracing::warn!(
+                    reason = kind,
+                    dropped_total = total,
+                    "dropping session write op; writer task is not keeping up"
+                );
+            }
         }
     }
 
@@ -226,7 +254,7 @@ impl SessionManager {
     /// Wait until all previously sent write ops have been processed.
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
-        let _ = self.write_tx.send(WriteOp::Flush(tx));
+        let _ = self.write_tx.send(WriteOp::Flush(tx)).await;
         let _ = rx.await;
     }
 
@@ -242,7 +270,7 @@ impl SessionManager {
         request: RequestContext,
         source: SessionSource,
     ) {
-        let _ = self.write_tx.send(WriteOp::RecordRequest {
+        self.enqueue(WriteOp::RecordRequest {
             id,
             request: Box::new(request),
             source,
@@ -250,7 +278,7 @@ impl SessionManager {
     }
 
     pub fn record_response(&self, id: String, response: ResponseContext) {
-        let _ = self.write_tx.send(WriteOp::RecordResponse { id, response });
+        self.enqueue(WriteOp::RecordResponse { id, response });
     }
 
     pub fn record_response_with_metrics(
@@ -259,7 +287,7 @@ impl SessionManager {
         response: ResponseContext,
         metrics: InspectionMetrics,
     ) {
-        let _ = self.write_tx.send(WriteOp::RecordResponseWithMetrics {
+        self.enqueue(WriteOp::RecordResponseWithMetrics {
             id,
             response,
             metrics,
@@ -267,22 +295,22 @@ impl SessionManager {
     }
 
     pub fn import_sessions(&self, exchanges: Vec<Exchange>) {
-        let _ = self.write_tx.send(WriteOp::ImportSessions { exchanges });
+        self.enqueue(WriteOp::ImportSessions { exchanges });
     }
 
     pub fn append_ws_frame(&self, id: &str, frame: WsFrame) {
-        let _ = self.write_tx.send(WriteOp::AppendWsFrame {
+        self.enqueue(WriteOp::AppendWsFrame {
             id: id.to_string(),
             frame,
         });
     }
 
     pub fn clear_sessions(&self) {
-        let _ = self.write_tx.send(WriteOp::ClearSessions);
+        self.enqueue(WriteOp::ClearSessions);
     }
 
     pub fn update_inspector_data(&self, id: &str, data: InspectorData) {
-        let _ = self.write_tx.send(WriteOp::UpdateInspectorData {
+        self.enqueue(WriteOp::UpdateInspectorData {
             id: id.to_string(),
             data,
         });
@@ -301,12 +329,15 @@ impl SessionManager {
         tags: Option<Vec<String>>,
     ) -> bool {
         let (tx, rx) = oneshot::channel();
-        let _ = self.write_tx.send(WriteOp::Annotate {
-            id: id.to_string(),
-            note,
-            tags,
-            reply: tx,
-        });
+        let _ = self
+            .write_tx
+            .send(WriteOp::Annotate {
+                id: id.to_string(),
+                note,
+                tags,
+                reply: tx,
+            })
+            .await;
         rx.await.unwrap_or(false)
     }
 
@@ -331,7 +362,10 @@ impl SessionManager {
         let map: IndexMap<String, Exchange> = serde_json::from_slice(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let (tx, rx) = oneshot::channel();
-        let _ = self.write_tx.send(WriteOp::LoadData { map, reply: tx });
+        let _ = self
+            .write_tx
+            .send(WriteOp::LoadData { map, reply: tx })
+            .await;
         rx.await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer task closed"))
     }
@@ -381,7 +415,7 @@ pub type SharedSessionManager = Arc<SessionManager>;
 // ── Writer task ───────────────────────────────────────────────────────────────
 
 async fn writer_task(
-    mut rx: mpsc::UnboundedReceiver<WriteOp>,
+    mut rx: mpsc::Receiver<WriteOp>,
     exchanges: Arc<RwLock<IndexMap<String, Exchange>>>,
     max_sessions: usize,
     max_retained_body_bytes: usize,
@@ -713,13 +747,12 @@ pub fn parse_search_query(query: &str) -> Vec<SearchTerm> {
 mod tests {
     use super::*;
     use crate::middleware::{RequestContext, ResponseContext};
-    use std::collections::HashMap;
 
     fn req(uri: &str) -> RequestContext {
         RequestContext {
             method: "GET".to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::from_static(b"body"),
             host: "localhost".to_string(),
             ..Default::default()
@@ -729,7 +762,7 @@ mod tests {
     fn res(uri: &str, status: u16) -> ResponseContext {
         ResponseContext {
             status,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::from_static(b"response"),
             request_uri: uri.to_string(),
             session_id: None,
@@ -1178,7 +1211,7 @@ mod tests {
             request: RequestContext {
                 method: "GET".to_string(),
                 uri: "/x".to_string(),
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 host: "localhost".to_string(),
                 ..Default::default()

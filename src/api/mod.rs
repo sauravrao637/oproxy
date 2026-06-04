@@ -426,7 +426,6 @@ mod tests {
     use crate::middleware::plugins::breakpoints::BreakpointManager;
     use crate::middleware::{RequestContext, ResponseContext};
     use crate::session::SessionManager;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn make_handler() -> ApiHandler {
@@ -442,7 +441,7 @@ mod tests {
         RequestContext {
             method: "GET".to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             host: "localhost".to_string(),
             ..Default::default()
@@ -453,7 +452,7 @@ mod tests {
         RequestContext {
             method: method.to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             host: host.to_string(),
             ..Default::default()
@@ -503,7 +502,7 @@ mod tests {
             "a".to_string(),
             ResponseContext {
                 status: 200,
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 request_uri: "/a".to_string(),
                 ..Default::default()
@@ -556,7 +555,7 @@ mod tests {
             "id1".to_string(),
             ResponseContext {
                 status: 200,
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::from_static(b"response-body"),
                 request_uri: "/large".to_string(),
                 ..Default::default()
@@ -631,7 +630,7 @@ mod tests {
             "ok".to_string(),
             ResponseContext {
                 status: 200,
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 request_uri: "/ok".to_string(),
                 ..Default::default()
@@ -643,7 +642,7 @@ mod tests {
             "bad".to_string(),
             ResponseContext {
                 status: 500,
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 request_uri: "/bad".to_string(),
                 ..Default::default()
@@ -686,7 +685,7 @@ mod tests {
             "slow".to_string(),
             ResponseContext {
                 status: 200,
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 request_uri: "/b".to_string(),
                 ..Default::default()
@@ -702,7 +701,7 @@ mod tests {
             "fast".to_string(),
             ResponseContext {
                 status: 200,
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 request_uri: "/a".to_string(),
                 ..Default::default()

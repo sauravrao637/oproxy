@@ -5,7 +5,6 @@ use crate::middleware::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -54,7 +53,10 @@ impl AccessControlMiddleware {
     fn block_response(status: u16) -> InterceptedResponse {
         InterceptedResponse {
             status,
-            headers: HashMap::from([("Content-Type".to_string(), "text/plain".to_string())]),
+            headers: crate::middleware::HeaderMap::from_iter([(
+                "Content-Type".to_string(),
+                "text/plain".to_string(),
+            )]),
             body: Bytes::from("Blocked by access control rule"),
             tags: vec!["access-blocked".to_string()],
         }
@@ -109,16 +111,15 @@ impl Middleware for AccessControlMiddleware {
 mod tests {
     use super::*;
     use crate::middleware::matcher::Location;
-    use crate::middleware::{Middleware, MiddlewareAction};
+    use crate::middleware::{HeaderMap, Middleware, MiddlewareAction};
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     fn req(host: &str, path: &str) -> RequestContext {
         RequestContext {
             method: "GET".into(),
             host: host.into(),
             uri: path.into(),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::new(),
             ..Default::default()
         }
@@ -271,7 +272,7 @@ mod tests {
         let mw = AccessControlMiddleware::new(vec![block_rule("any.host")]);
         let mut ctx = ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::new(),
             request_uri: "/".to_string(),
             ..Default::default()

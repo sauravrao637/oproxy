@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -265,10 +264,10 @@ pub async fn handle_websocket(
         }
     }
 
-    let mut req_headers_map = HashMap::new();
+    let mut req_headers_map = crate::middleware::HeaderMap::new();
     for (k, v) in &headers {
         if let Ok(v) = v.to_str() {
-            req_headers_map.insert(k.to_string(), v.to_string());
+            req_headers_map.append(k.to_string(), v.to_string());
         }
     }
     sm.record_request(

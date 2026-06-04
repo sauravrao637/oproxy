@@ -52,13 +52,12 @@ mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     fn req() -> RequestContext {
         RequestContext {
             method: "GET".to_string(),
             uri: "/".to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::new(),
             host: "x".to_string(),
             ..Default::default()
@@ -125,7 +124,7 @@ mod tests {
         };
         let mut ctx = ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::new(),
             request_uri: "/".to_string(),
             ..Default::default()
@@ -146,7 +145,7 @@ mod tests {
         // 1 KB body: expected transfer_ms = 1024 * 1000 / (8 * 1024 / 8) = 1000ms
         let mut ctx = ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::from("a".repeat(1024)),
             request_uri: "/".to_string(),
             ..Default::default()

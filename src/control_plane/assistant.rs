@@ -24,6 +24,7 @@ use super::workspace::{
 
 const ASSISTANT_ACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_TOOL_LOOPS: usize = 4;
+const MAX_PENDING_ACTIONS: usize = 50;
 
 #[derive(Default)]
 pub(crate) struct AssistantState {
@@ -347,12 +348,17 @@ async fn register_pending_action(state: &Arc<AppState>, action: &mut AssistantAc
         confirmation_token: action.confirmation_token.clone(),
         expires_at: Instant::now() + ASSISTANT_ACTION_TTL,
     };
-    state
-        .assistant
-        .pending_actions
-        .write()
-        .await
-        .insert(action.action_id.clone(), pending);
+    let mut map = state.assistant.pending_actions.write().await;
+    prune_expired_actions(&mut map);
+    // Hard cap: drop the oldest-inserted entry if we're at the limit.
+    // This prevents unbounded growth when the user fires many chat requests
+    // without confirming or dismissing the resulting pending actions.
+    if map.len() >= MAX_PENDING_ACTIONS
+        && let Some(oldest_key) = map.keys().next().cloned()
+    {
+        map.remove(&oldest_key);
+    }
+    map.insert(action.action_id.clone(), pending);
     action.payload = redact_value(&action.payload);
 }
 

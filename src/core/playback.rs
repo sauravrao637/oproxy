@@ -90,7 +90,7 @@ impl PlaybackEngine {
                         new_id,
                         crate::middleware::ResponseContext {
                             status,
-                            headers: std::collections::HashMap::new(),
+                            headers: crate::middleware::HeaderMap::new(),
                             body,
                             request_uri: uri.clone(),
                             ..Default::default()

@@ -93,65 +93,186 @@ fn exec_with_timeout(lua: &Lua, code: &str) -> mlua::Result<()> {
     res
 }
 
-/// Inject request context into Lua globals.
-fn inject_request(lua: &Lua, ctx: &RequestContext) -> mlua::Result<()> {
+/// Inject request data into Lua globals.
+fn inject_request(
+    lua: &Lua,
+    method: &str,
+    uri: &str,
+    body: &str,
+    headers: &HashMap<String, String>,
+) -> mlua::Result<()> {
     let request = lua.create_table()?;
-    request.set("method", ctx.method.clone())?;
-    request.set("uri", ctx.uri.clone())?;
-    request.set("body", ctx.body_text().into_owned())?;
+    request.set("method", method)?;
+    request.set("uri", uri)?;
+    request.set("body", body)?;
 
-    let headers = lua.create_table()?;
-    for (k, v) in &ctx.headers {
-        headers.set(k.clone(), v.clone())?;
+    let header_table = lua.create_table()?;
+    for (k, v) in headers {
+        header_table.set(k.clone(), v.clone())?;
     }
-    request.set("headers", headers)?;
+    request.set("headers", header_table)?;
     lua.globals().set("request", request)?;
     Ok(())
 }
 
-/// Extract modified request context from Lua globals.
-fn extract_request(lua: &Lua, ctx: &mut RequestContext) -> mlua::Result<()> {
+/// Extract modified request data from Lua globals.
+fn extract_request(
+    lua: &Lua,
+    body: &mut String,
+    headers: &mut HashMap<String, String>,
+) -> mlua::Result<()> {
     let request: mlua::Table = lua.globals().get("request")?;
 
-    if let Ok(body) = request.get::<String>("body") {
-        ctx.set_body_text(body);
+    if let Ok(new_body) = request.get::<String>("body") {
+        *body = new_body;
     }
-    let headers: mlua::Table = request.get("headers")?;
-    for (k, v) in headers.pairs::<String, String>().flatten() {
-        ctx.headers.insert(k, v);
+    let header_table: mlua::Table = request.get("headers")?;
+    for (k, v) in header_table.pairs::<String, String>().flatten() {
+        headers.insert(k, v);
     }
     Ok(())
 }
 
-/// Inject response context into Lua globals.
-fn inject_response(lua: &Lua, ctx: &ResponseContext) -> mlua::Result<()> {
+/// Inject response data into Lua globals.
+fn inject_response(
+    lua: &Lua,
+    status: u16,
+    body: &str,
+    headers: &HashMap<String, String>,
+) -> mlua::Result<()> {
     let response = lua.create_table()?;
-    response.set("status", ctx.status)?;
-    response.set("body", ctx.body_text().into_owned())?;
+    response.set("status", status)?;
+    response.set("body", body)?;
 
-    let headers = lua.create_table()?;
-    for (k, v) in &ctx.headers {
-        headers.set(k.clone(), v.clone())?;
+    let header_table = lua.create_table()?;
+    for (k, v) in headers {
+        header_table.set(k.clone(), v.clone())?;
     }
-    response.set("headers", headers)?;
+    response.set("headers", header_table)?;
     lua.globals().set("response", response)?;
     Ok(())
 }
 
-/// Extract modified response context from Lua globals.
-fn extract_response(lua: &Lua, ctx: &mut ResponseContext) -> mlua::Result<()> {
+/// Extract modified response data from Lua globals.
+fn extract_response(
+    lua: &Lua,
+    status: &mut u16,
+    body: &mut String,
+    headers: &mut HashMap<String, String>,
+) -> mlua::Result<()> {
     let response: mlua::Table = lua.globals().get("response")?;
-    if let Ok(status) = response.get::<u16>("status") {
-        ctx.status = status;
+    if let Ok(new_status) = response.get::<u16>("status") {
+        *status = new_status;
     }
-    if let Ok(body) = response.get::<String>("body") {
-        ctx.set_body_text(body);
+    if let Ok(new_body) = response.get::<String>("body") {
+        *body = new_body;
     }
-    let headers: mlua::Table = response.get("headers")?;
-    for (k, v) in headers.pairs::<String, String>().flatten() {
-        ctx.headers.insert(k, v);
+    let header_table: mlua::Table = response.get("headers")?;
+    for (k, v) in header_table.pairs::<String, String>().flatten() {
+        headers.insert(k, v);
     }
     Ok(())
+}
+
+struct RequestScriptOutcome {
+    body: String,
+    headers: HashMap<String, String>,
+    abort: Option<(u16, String)>,
+}
+
+/// Runs the enabled request scripts synchronously. Intended to be called from
+/// `spawn_blocking` so the Lua VM never blocks a Tokio worker thread.
+fn run_request_scripts(
+    scripts: Vec<LuaScript>,
+    method: String,
+    uri: String,
+    mut body: String,
+    mut headers: HashMap<String, String>,
+) -> RequestScriptOutcome {
+    for script in scripts {
+        let lua = match make_sandbox() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("Lua sandbox init failed: {e}");
+                continue;
+            }
+        };
+        if let Err(e) = setup_log(&lua) {
+            tracing::warn!("Lua log setup failed: {e}");
+            continue;
+        }
+        if let Err(e) = setup_abort(&lua) {
+            tracing::warn!("Lua abort setup failed: {e}");
+            continue;
+        }
+        if let Err(e) = inject_request(&lua, &method, &uri, &body, &headers) {
+            tracing::warn!("Lua inject failed: {e}");
+            continue;
+        }
+        if let Err(e) = exec_with_timeout(&lua, &script.code) {
+            tracing::warn!(script = %script.name, "Lua exec error: {e}");
+            continue;
+        }
+        if let Some((status, abort_body)) = check_abort(&lua) {
+            return RequestScriptOutcome {
+                body,
+                headers,
+                abort: Some((status, abort_body)),
+            };
+        }
+        if let Err(e) = extract_request(&lua, &mut body, &mut headers) {
+            tracing::warn!("Lua extract failed: {e}");
+        }
+    }
+    RequestScriptOutcome {
+        body,
+        headers,
+        abort: None,
+    }
+}
+
+struct ResponseScriptOutcome {
+    status: u16,
+    body: String,
+    headers: HashMap<String, String>,
+}
+
+/// Runs the enabled response scripts synchronously inside `spawn_blocking`.
+fn run_response_scripts(
+    scripts: Vec<LuaScript>,
+    mut status: u16,
+    mut body: String,
+    mut headers: HashMap<String, String>,
+) -> ResponseScriptOutcome {
+    for script in scripts {
+        let lua = match make_sandbox() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("Lua sandbox init failed: {e}");
+                continue;
+            }
+        };
+        if let Err(e) = setup_log(&lua) {
+            tracing::warn!("{e}");
+            continue;
+        }
+        if let Err(e) = inject_response(&lua, status, &body, &headers) {
+            tracing::warn!("Lua inject resp failed: {e}");
+            continue;
+        }
+        if let Err(e) = exec_with_timeout(&lua, &script.code) {
+            tracing::warn!(script = %script.name, "Lua exec error: {e}");
+            continue;
+        }
+        if let Err(e) = extract_response(&lua, &mut status, &mut body, &mut headers) {
+            tracing::warn!("Lua extract resp failed: {e}");
+        }
+    }
+    ResponseScriptOutcome {
+        status,
+        body,
+        headers,
+    }
 }
 
 fn setup_log(lua: &Lua) -> mlua::Result<()> {
@@ -190,77 +311,87 @@ impl Middleware for LuaEngineMiddleware {
     }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
-        let scripts = self.scripts.read().await;
-        for script in scripts.iter().filter(|s| s.enabled) {
-            let lua = match make_sandbox() {
-                Ok(l) => l,
+        let scripts: Vec<LuaScript> = self
+            .scripts
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect();
+        if scripts.is_empty() {
+            return MiddlewareAction::Continue;
+        }
+
+        let method = ctx.method.clone();
+        let uri = ctx.uri.clone();
+        let body = ctx.body_text().into_owned();
+        let headers: HashMap<String, String> = ctx.headers.clone().into();
+
+        let outcome =
+            match tokio::task::spawn_blocking(move || {
+                run_request_scripts(scripts, method, uri, body, headers)
+            })
+            .await
+            {
+                Ok(o) => o,
                 Err(e) => {
-                    tracing::warn!("Lua sandbox init failed: {e}");
-                    continue;
+                    tracing::error!(error = %e, "Lua request task failed to join");
+                    return MiddlewareAction::Continue;
                 }
             };
-            if let Err(e) = setup_log(&lua) {
-                tracing::warn!("Lua log setup failed: {e}");
-                continue;
-            }
-            if let Err(e) = setup_abort(&lua) {
-                tracing::warn!("Lua abort setup failed: {e}");
-                continue;
-            }
-            if let Err(e) = inject_request(&lua, ctx) {
-                tracing::warn!("Lua inject failed: {e}");
-                continue;
-            }
-            if let Err(e) = exec_with_timeout(&lua, &script.code) {
-                tracing::warn!(script=%script.name, "Lua exec error: {e}");
-                continue;
-            }
-            if let Some((status, body)) = check_abort(&lua) {
-                let sc = axum::http::StatusCode::from_u16(status)
-                    .unwrap_or(axum::http::StatusCode::FORBIDDEN);
-                let mut headers = HashMap::new();
-                headers.insert("content-type".to_string(), "text/plain".to_string());
-                ctx.mock_response = Some(crate::middleware::InterceptedResponse {
-                    status: sc.as_u16(),
-                    headers,
-                    body: Bytes::from(body),
-                    tags: Vec::new(),
-                });
-                return MiddlewareAction::StopAndReturn;
-            }
-            if let Err(e) = extract_request(&lua, ctx) {
-                tracing::warn!("Lua extract failed: {e}");
-            }
+
+        if let Some((status, body)) = outcome.abort {
+            let sc = axum::http::StatusCode::from_u16(status)
+                .unwrap_or(axum::http::StatusCode::FORBIDDEN);
+            let mut headers = crate::middleware::HeaderMap::new();
+            headers.insert("content-type".to_string(), "text/plain".to_string());
+            ctx.mock_response = Some(crate::middleware::InterceptedResponse {
+                status: sc.as_u16(),
+                headers,
+                body: Bytes::from(body),
+                tags: Vec::new(),
+            });
+            return MiddlewareAction::StopAndReturn;
         }
+
+        ctx.set_body_text(outcome.body);
+        ctx.headers = outcome.headers.into();
         MiddlewareAction::Continue
     }
 
     async fn on_response(&self, ctx: &mut ResponseContext) -> MiddlewareAction {
-        let scripts = self.scripts.read().await;
-        for script in scripts.iter().filter(|s| s.enabled) {
-            let lua = match make_sandbox() {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!("Lua sandbox init failed: {e}");
-                    continue;
-                }
-            };
-            if let Err(e) = setup_log(&lua) {
-                tracing::warn!("{e}");
-                continue;
-            }
-            if let Err(e) = inject_response(&lua, ctx) {
-                tracing::warn!("Lua inject resp failed: {e}");
-                continue;
-            }
-            if let Err(e) = exec_with_timeout(&lua, &script.code) {
-                tracing::warn!(script=%script.name, "Lua exec error: {e}");
-                continue;
-            }
-            if let Err(e) = extract_response(&lua, ctx) {
-                tracing::warn!("Lua extract resp failed: {e}");
-            }
+        let scripts: Vec<LuaScript> = self
+            .scripts
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect();
+        if scripts.is_empty() {
+            return MiddlewareAction::Continue;
         }
+
+        let status = ctx.status;
+        let body = ctx.body_text().into_owned();
+        let headers: HashMap<String, String> = ctx.headers.clone().into();
+
+        let outcome = match tokio::task::spawn_blocking(move || {
+            run_response_scripts(scripts, status, body, headers)
+        })
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!(error = %e, "Lua response task failed to join");
+                return MiddlewareAction::Continue;
+            }
+        };
+
+        ctx.status = outcome.status;
+        ctx.set_body_text(outcome.body);
+        ctx.headers = outcome.headers.into();
         MiddlewareAction::Continue
     }
 }
@@ -268,13 +399,13 @@ impl Middleware for LuaEngineMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::middleware::HeaderMap;
 
     fn make_req(method: &str, uri: &str, body: &str) -> RequestContext {
         RequestContext {
             method: method.to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::from(body.to_string()),
             host: "example.com".to_string(),
             ..Default::default()

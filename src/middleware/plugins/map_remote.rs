@@ -82,14 +82,13 @@ mod tests {
     use crate::middleware::matcher::Location;
     use crate::middleware::{Middleware, MiddlewareAction};
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     fn req(host: &str, path: &str) -> RequestContext {
         RequestContext {
             method: "GET".into(),
             host: host.into(),
             uri: path.into(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::new(),
             ..Default::default()
         }

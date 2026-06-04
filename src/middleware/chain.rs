@@ -66,7 +66,6 @@ mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
     use async_trait::async_trait;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     /// Records which order middlewares fired by pushing a label into a shared vec.
@@ -96,7 +95,7 @@ mod tests {
         RequestContext {
             method: "GET".to_string(),
             uri: "/".to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             host: "localhost".to_string(),
             ..Default::default()
@@ -106,7 +105,7 @@ mod tests {
     fn res() -> ResponseContext {
         ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             request_uri: "/".to_string(),
             session_id: None,
