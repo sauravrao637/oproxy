@@ -1,0 +1,62 @@
+name: 🐛 Bug Report
+description: Report a bug to help us improve oproxy
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: How did you run into this bug? Please provide step-by-step instructions.
+      placeholder: |
+        1. Run oproxy with `docker run ...`
+        2. Send a request to ...
+        3. Observe the crash/error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen.
+      placeholder: I expected the proxy to ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / Version
+      description: Please share your OS, oproxy version (e.g., Docker tag, commit hash, or release version), browser/client being proxied, etc.
+      placeholder: |
+        - OS: Ubuntu 22.04
+        - oproxy Version: ghcr.io/sauravrao637/oproxy:latest
+        - Client: curl 7.81.0 / Chrome 120
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Please paste any relevant console logs, terminal output, or drag-and-drop screenshots here.
+      placeholder: |
+        Paste logs here...
+  - type: checkboxes
+    id: checkboxes
+    attributes:
+      label: Checklist
+      description: Please check the following before submitting.
+      options:
+        - label: I have searched the existing issues to make sure this bug has not already been reported.
+          required: true

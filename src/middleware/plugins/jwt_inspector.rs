@@ -8,7 +8,7 @@ use crate::session::JwtInfo;
 pub struct JwtInspectorMiddleware;
 
 impl JwtInspectorMiddleware {
-    pub fn extract_jwt(headers: &std::collections::HashMap<String, String>) -> Option<String> {
+    pub fn extract_jwt(headers: &crate::middleware::HeaderMap) -> Option<String> {
         // Authorization: Bearer <token>
         if let Some(auth) = headers.get("authorization") {
             let lower = auth.to_lowercase();
@@ -89,7 +89,7 @@ impl Middleware for JwtInspectorMiddleware {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use std::collections::HashMap;
+    use crate::middleware::HeaderMap;
 
     fn make_jwt(header: &str, payload: &str) -> String {
         let h = URL_SAFE_NO_PAD.encode(header.as_bytes());
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn extract_jwt_from_bearer_header() {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert(
             "authorization".to_string(),
             "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.sig".to_string(),
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn extract_jwt_from_cookie_token() {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert(
             "cookie".to_string(),
             "session=abc; token=mytoken123; other=val".to_string(),
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn extract_jwt_from_cookie_jwt_name() {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert("cookie".to_string(), "jwt=tok.en.val".to_string());
         let token = JwtInspectorMiddleware::extract_jwt(&headers);
         assert_eq!(token.as_deref(), Some("tok.en.val"));
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn extract_jwt_from_cookie_access_token() {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert("cookie".to_string(), "access_token=at.123.sig".to_string());
         let token = JwtInspectorMiddleware::extract_jwt(&headers);
         assert_eq!(token.as_deref(), Some("at.123.sig"));
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn no_jwt_returns_none() {
-        let headers = HashMap::new();
+        let headers = HeaderMap::new();
         assert!(JwtInspectorMiddleware::extract_jwt(&headers).is_none());
     }
 

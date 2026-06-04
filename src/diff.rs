@@ -82,14 +82,14 @@ fn unified_diff(old: &str, new: &str) -> Option<LineDiff> {
 }
 
 fn diff_headers(
-    a: &std::collections::HashMap<String, String>,
-    b: &std::collections::HashMap<String, String>,
+    a: &crate::middleware::HeaderMap,
+    b: &crate::middleware::HeaderMap,
 ) -> (Vec<String>, Vec<String>, Vec<HeaderChange>) {
     let mut added = Vec::new();
     let mut removed = Vec::new();
     let mut changed = Vec::new();
 
-    for (k, bv) in b {
+    for (k, bv) in b.iter() {
         match a.get(k) {
             None => added.push(format!("{}: {}", k, bv)),
             Some(av) if av != bv => changed.push(HeaderChange {
@@ -100,9 +100,9 @@ fn diff_headers(
             _ => {}
         }
     }
-    for k in a.keys() {
+    for (k, av) in a.iter() {
         if !b.contains_key(k) {
-            removed.push(format!("{}: {}", k, a[k]));
+            removed.push(format!("{}: {}", k, av));
         }
     }
     (added, removed, changed)
@@ -172,7 +172,7 @@ mod tests {
     use crate::middleware::{RequestContext, ResponseContext};
     use crate::session::{Exchange, InspectionMetrics, SessionSource};
     use chrono::Utc;
-    use std::collections::HashMap;
+    use crate::middleware::HeaderMap;
 
     fn make_exchange(
         id: &str,
@@ -182,9 +182,9 @@ mod tests {
         status: u16,
         resp_body: &str,
     ) -> Exchange {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
-        let mut resp_headers = HashMap::new();
+        let mut resp_headers = HeaderMap::new();
         resp_headers.insert("content-type".to_string(), "application/json".to_string());
         Exchange {
             id: id.to_string(),

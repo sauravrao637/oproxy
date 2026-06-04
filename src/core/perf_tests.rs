@@ -33,7 +33,7 @@ mod tests {
                 .execute_request(&mut crate::middleware::RequestContext {
                     method: "GET".to_string(),
                     uri: "/".to_string(),
-                    headers: std::collections::HashMap::new(),
+                    headers: crate::middleware::HeaderMap::new(),
                     body: bytes::Bytes::new(),
                     host: "example.com".to_string(),
                     ..Default::default()

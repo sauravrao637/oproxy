@@ -51,14 +51,18 @@ impl Middleware for InspectionMiddleware {
         let tags = std::mem::take(&mut ctx.tags);
         // Use the session ID injected during on_request for exact lookup.
         // This fixes correlation when multiple concurrent requests target the same URI.
-        let session = if let Some(ref id) = ctx.session_id {
-            self.session_manager.get_session(id)
-        } else {
-            // Fallback: URI match (best-effort, breaks under concurrent same-URI requests)
-            self.session_manager
-                .get_all_sessions()
-                .into_iter()
-                .find(|s| s.request.uri == ctx.request_uri && s.response.is_none())
+        let session = match ctx.session_id {
+            Some(ref id) => self.session_manager.get_session(id),
+            None => {
+                // No correlated request session. The previous URI-match fallback was
+                // removed because it mis-attributed responses under concurrent
+                // same-URI requests; dropping the record is safer than corrupting one.
+                tracing::warn!(
+                    uri = %ctx.request_uri,
+                    "response has no session_id; skipping correlation"
+                );
+                None
+            }
         };
 
         if let Some(session) = session {
@@ -106,14 +110,14 @@ impl Middleware for InspectionMiddleware {
     }
 }
 
-fn strip_internal_headers(headers: &mut std::collections::HashMap<String, String>) {
+fn strip_internal_headers(headers: &mut crate::middleware::HeaderMap) {
     headers.retain(|name, _| {
         let name = name.trim().to_ascii_lowercase();
         !name.starts_with("x-oproxy-")
     });
 }
 
-fn content_length(headers: &std::collections::HashMap<String, String>) -> Option<usize> {
+fn content_length(headers: &crate::middleware::HeaderMap) -> Option<usize> {
     headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -125,14 +129,13 @@ mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
     use crate::session::SessionManager;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn req(uri: &str) -> RequestContext {
         RequestContext {
             method: "GET".to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::from_static(b"body12345"),
             host: "localhost".to_string(),
             ..Default::default()
@@ -142,7 +145,7 @@ mod tests {
     fn res(uri: &str, status: u16, body: &str) -> ResponseContext {
         ResponseContext {
             status,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::from(body.to_string()),
             request_uri: uri.to_string(),
             ..Default::default()
@@ -207,6 +210,7 @@ mod tests {
         mw.on_request(&mut rq).await;
         sm.flush().await;
         let mut rs = res("/check", 201, "resp-body");
+        rs.session_id = rq.session_id.clone();
         mw.on_response(&mut rs).await;
         sm.flush().await;
         let sessions = sm.get_all_sessions();
@@ -225,6 +229,7 @@ mod tests {
         mw.on_request(&mut rq).await;
         sm.flush().await;
         let mut rs = res("/sizes", 200, "response-payload");
+        rs.session_id = rq.session_id.clone();
         mw.on_response(&mut rs).await;
         sm.flush().await;
         let sessions = sm.get_all_sessions();
@@ -241,6 +246,7 @@ mod tests {
         mw.on_request(&mut rq).await;
         sm.flush().await;
         let mut rs = res("/binary", 200, "");
+        rs.session_id = rq.session_id.clone();
         rs.body = bytes::Bytes::from_static(&[1, 2, 3, 4]);
         mw.on_response(&mut rs).await;
         sm.flush().await;
@@ -257,6 +263,7 @@ mod tests {
         mw.on_request(&mut rq).await;
         sm.flush().await;
         let mut rs = res("/large", 200, "");
+        rs.session_id = rq.session_id.clone();
         rs.headers
             .insert("Content-Length".to_string(), "614400".to_string());
         mw.on_response(&mut rs).await;

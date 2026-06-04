@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -120,30 +119,22 @@ impl RewriteMiddleware {
         None
     }
 
-    fn apply_action_header(
-        &self,
-        rule: &RewriteRule,
-        headers: &mut std::collections::HashMap<String, String>,
-    ) {
+    fn apply_action_header(&self, rule: &RewriteRule, headers: &mut crate::middleware::HeaderMap) {
         match &rule.action {
             RewriteAction::AddHeader { name, value } => {
-                let key = header_key(headers, name).unwrap_or_else(|| name.clone());
-                headers.insert(key, value.clone());
+                headers.insert(name.clone(), value.clone());
             }
             RewriteAction::RemoveHeader { name } => {
-                if let Some(key) = header_key(headers, name) {
-                    headers.remove(&key);
-                }
+                headers.remove(name);
             }
             RewriteAction::ReplaceHeader {
                 name,
                 pattern,
                 replacement,
             } => {
-                if let Some(key) = header_key(headers, name) {
-                    let val = headers.get(&key).cloned().unwrap_or_default();
+                if let Some(val) = headers.get(name).cloned() {
                     if let Ok(re) = Regex::new(pattern) {
-                        headers.insert(key, re.replace_all(&val, replacement).to_string());
+                        headers.insert(name.clone(), re.replace_all(&val, replacement).to_string());
                     }
                 }
             }
@@ -152,24 +143,12 @@ impl RewriteMiddleware {
     }
 }
 
-fn header_key(headers: &HashMap<String, String>, name: &str) -> Option<String> {
-    headers
-        .keys()
-        .find(|header_name| header_name.eq_ignore_ascii_case(name))
-        .cloned()
+fn header_value<'a>(headers: &'a crate::middleware::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).map(|value| value.as_str())
 }
 
-fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
-}
-
-fn remove_header(headers: &mut HashMap<String, String>, name: &str) {
-    if let Some(key) = header_key(headers, name) {
-        headers.remove(&key);
-    }
+fn remove_header(headers: &mut crate::middleware::HeaderMap, name: &str) {
+    headers.remove(name);
 }
 
 #[async_trait]
@@ -184,7 +163,7 @@ impl Middleware for RewriteMiddleware {
             if self.matches(rule, ctx) {
                 match &rule.action {
                     RewriteAction::Redirect { status, location } => {
-                        let mut headers = HashMap::new();
+                        let mut headers = crate::middleware::HeaderMap::new();
                         headers.insert("Location".to_string(), location.clone());
                         ctx.mock_response = Some(crate::middleware::InterceptedResponse {
                             status: *status,
@@ -197,7 +176,7 @@ impl Middleware for RewriteMiddleware {
                     RewriteAction::Block { status } => {
                         ctx.mock_response = Some(crate::middleware::InterceptedResponse {
                             status: *status,
-                            headers: HashMap::new(),
+                            headers: crate::middleware::HeaderMap::new(),
                             body: Bytes::new(),
                             tags: Vec::new(),
                         });
@@ -239,7 +218,7 @@ mod tests {
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
     use bytes::Bytes;
     fn req(host: &str, uri: &str, body: &str) -> RequestContext {
-        let mut headers = HashMap::new();
+        let mut headers = crate::middleware::HeaderMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         RequestContext {
             method: "GET".to_string(),
@@ -254,7 +233,7 @@ mod tests {
     fn res(uri: &str, body: &str) -> ResponseContext {
         ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::from(body.to_string()),
             request_uri: uri.to_string(),
             ..Default::default()

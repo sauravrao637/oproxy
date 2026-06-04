@@ -135,15 +135,16 @@ impl BreakpointMiddleware {
 mod tests {
     use super::*;
     use crate::middleware::matcher::{Location, MatchMode};
-    use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
-    use std::collections::HashMap;
+    use crate::middleware::{
+        HeaderMap, Middleware, MiddlewareAction, RequestContext, ResponseContext,
+    };
     use std::sync::Arc;
 
     fn req(uri: &str, _body: &str) -> RequestContext {
         RequestContext {
             method: "GET".to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::from(_body.to_string()),
             host: "localhost".to_string(),
             ..Default::default()
@@ -153,7 +154,7 @@ mod tests {
     fn res(uri: &str, _body: &str) -> ResponseContext {
         ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::from(_body.to_string()),
             request_uri: uri.to_string(),
             ..Default::default()
@@ -429,7 +430,7 @@ impl Middleware for BreakpointMiddleware {
             Err(_) => {
                 self.manager.pending.write().await.remove(&bp_id);
                 tracing::warn!(id = %bp_id, "Breakpoint request timed out, dropping");
-                let mut headers = HashMap::new();
+                let mut headers = crate::middleware::HeaderMap::new();
                 headers.insert("content-type".to_string(), "text/plain".to_string());
                 ctx.mock_response = Some(crate::middleware::InterceptedResponse {
                     status: 504,

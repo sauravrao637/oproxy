@@ -11,7 +11,6 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Render body bytes for the HAR `text` field: base64 for binary content types
 /// (matching how binary bodies are presented elsewhere) and lossy UTF-8 otherwise.
@@ -329,7 +328,7 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
 // ── Conversion: HarEntry → Exchange ──────────────────────────────────────────
 
 pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
-    let headers: HashMap<String, String> = entry
+    let headers: crate::middleware::HeaderMap = entry
         .request
         .headers
         .iter()
@@ -363,7 +362,7 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
     let ttfb_ms = full_ttfb_ms(&entry.timings);
 
     let response = if entry.response.status > 0 {
-        let res_headers: HashMap<String, String> = entry
+        let res_headers: crate::middleware::HeaderMap = entry
             .response
             .headers
             .iter()
@@ -493,7 +492,7 @@ fn redact_exchange_for_export(mut ex: Exchange) -> Exchange {
     ex
 }
 
-fn strip_har_headers(headers: &mut HashMap<String, String>) {
+fn strip_har_headers(headers: &mut crate::middleware::HeaderMap) {
     headers.retain(|name, _| !should_skip_har_header(name));
 }
 
@@ -612,18 +611,18 @@ fn http_status_text(status: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::{RequestContext, ResponseContext};
+    use crate::middleware::{HeaderMap, RequestContext, ResponseContext};
     use crate::session::InspectionMetrics;
     use chrono::Utc;
 
     fn make_exchange(method: &str, uri: &str, status: u16, body: &str, req_body: &str) -> Exchange {
-        let mut req_headers = HashMap::new();
+        let mut req_headers = HeaderMap::new();
         req_headers.insert("host".to_string(), "example.com".to_string());
         if !req_body.is_empty() {
             req_headers.insert("content-type".to_string(), "application/json".to_string());
         }
         let response = if status > 0 {
-            let mut res_headers = HashMap::new();
+            let mut res_headers = HeaderMap::new();
             res_headers.insert("content-type".to_string(), "application/json".to_string());
             Some(ResponseContext {
                 status,

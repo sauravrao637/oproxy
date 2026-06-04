@@ -61,7 +61,7 @@ impl HeaderMapRule {
         }
     }
 
-    fn apply_to_headers(&self, headers: &mut std::collections::HashMap<String, String>) {
+    fn apply_to_headers(&self, headers: &mut crate::middleware::HeaderMap) {
         let key = self.name.to_lowercase();
         match self.action {
             HmAction::Set => {
@@ -115,8 +115,7 @@ impl Middleware for HeaderMapMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::{Middleware, RequestContext};
-    use std::collections::HashMap;
+    use crate::middleware::{HeaderMap, Middleware, RequestContext};
 
     fn rule(
         scope: HmScope,
@@ -141,7 +140,7 @@ mod tests {
             method: "GET".to_string(),
             uri: uri.to_string(),
             host: host.to_string(),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: bytes::Bytes::new(),
             ..Default::default()
         }

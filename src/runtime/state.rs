@@ -174,7 +174,8 @@ pub(super) async fn build_runtime_services(
         let dispatcher = crate::webhooks::WebhookDispatcher::new(
             shared.clone(),
             crate::security::AdminEgressPolicy::from_config(config),
-        );
+        )
+        .map_err(|e| StartupError::ServiceInit(format!("webhook dispatcher: {e}")))?;
         dispatcher.spawn(session_manager.subscribe(), session_manager.clone());
         shared
     };

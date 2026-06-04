@@ -65,7 +65,7 @@ mod tests {
         RequestContext {
             method: "GET".to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::from_static(b"original"),
             host: "localhost".to_string(),
             ..Default::default()
@@ -146,7 +146,7 @@ mod tests {
         let mw = ModificationMiddleware::new(vec![rule("/any", vec![("x-h", "v")], Some("body"))]);
         let mut ctx = ResponseContext {
             status: 200,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::from_static(b"resp"),
             request_uri: "/any".to_string(),
             ..Default::default()

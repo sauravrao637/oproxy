@@ -13,7 +13,6 @@ use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, Reque
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -105,7 +104,7 @@ impl Middleware for MapLocalMiddleware {
             match tokio::fs::read(&path_to_serve).await {
                 Ok(contents) => {
                     let ct = mime_for_path(&path_to_serve);
-                    let mut headers = HashMap::new();
+                    let mut headers = crate::middleware::HeaderMap::new();
                     headers.insert("Content-Type".to_string(), ct.to_string());
                     headers.insert("Content-Length".to_string(), contents.len().to_string());
                     ctx.mock_response = Some(InterceptedResponse {
@@ -152,16 +151,15 @@ fn mime_for_path(path: &Path) -> &'static str {
 mod tests {
     use super::*;
     use crate::middleware::matcher::Location;
-    use crate::middleware::{Middleware, MiddlewareAction};
+    use crate::middleware::{HeaderMap, Middleware, MiddlewareAction};
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     fn req(host: &str, path: &str) -> RequestContext {
         RequestContext {
             method: "GET".into(),
             host: host.into(),
             uri: path.into(),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::new(),
             ..Default::default()
         }
