@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use axum::body::Body;
 use hyper::body::Incoming;
@@ -56,7 +55,7 @@ pub async fn handle_connect(
             crate::middleware::RequestContext {
                 method: "CONNECT".to_string(),
                 uri: format!("https://{}", host),
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 host: host.clone(),
                 ..Default::default()
@@ -94,7 +93,7 @@ pub async fn handle_connect(
                                 session_id.clone(),
                                 crate::middleware::ResponseContext {
                                     status: 200,
-                                    headers: HashMap::new(),
+                                    headers: crate::middleware::HeaderMap::new(),
                                     body: bytes::Bytes::from(format!(
                                         "↑{} ↓{}",
                                         fmt_bytes(to_server),
@@ -121,7 +120,7 @@ pub async fn handle_connect(
                                 session_id.clone(),
                                 crate::middleware::ResponseContext {
                                     status: 502,
-                                    headers: HashMap::new(),
+                                    headers: crate::middleware::HeaderMap::new(),
                                     body: bytes::Bytes::from(format!("upstream unreachable: {}", e)),
                                     request_uri: format!("https://{}", host),
                                     session_id: Some(session_id),
@@ -144,7 +143,7 @@ pub async fn handle_connect(
                                 session_id.clone(),
                                 crate::middleware::ResponseContext {
                                     status: 504,
-                                    headers: HashMap::new(),
+                                    headers: crate::middleware::HeaderMap::new(),
                                     body: bytes::Bytes::from_static(b"upstream connect timed out"),
                                     request_uri: format!("https://{}", host),
                                     session_id: Some(session_id),

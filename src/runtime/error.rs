@@ -12,4 +12,6 @@ pub(crate) enum StartupError {
     },
     #[error("Failed to initialise certificate authority: {0}")]
     CaInit(String),
+    #[error("Failed to initialise runtime service: {0}")]
+    ServiceInit(String),
 }

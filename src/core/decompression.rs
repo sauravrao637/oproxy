@@ -1,9 +1,8 @@
 use brotli::BrotliDecompress;
 use bytes::Bytes;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
-use std::collections::HashMap;
 
-use crate::middleware::{header_value, remove_header};
+use crate::middleware::{HeaderMap, header_value, remove_header};
 
 fn read_decoder_to_bytes<R: std::io::Read>(mut reader: R) -> Option<Vec<u8>> {
     let mut out = Vec::new();
@@ -21,7 +20,7 @@ fn decode_deflate(bytes: &[u8]) -> Option<Vec<u8>> {
 /// gzip/deflate/br. On success the `content-encoding`/`content-length` headers
 /// are stripped so they match the decoded body.
 pub fn decoded_response_body(
-    res_headers: &mut HashMap<String, String>,
+    res_headers: &mut HeaderMap,
     res_bytes: &Bytes,
 ) -> Bytes {
     let encoding = header_value(res_headers, "content-encoding")

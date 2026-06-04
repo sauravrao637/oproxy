@@ -39,6 +39,8 @@ fn display_request_uri(
     format!("http://{}{}", host, path_and_query)
 }
 
+
+
 pub struct ProxyEngine {
     /// (http_client, streaming_client) — pair wrapped for upstream proxy hot-reload.
     clients: tokio::sync::RwLock<(Client, Client)>,
@@ -53,6 +55,10 @@ pub struct ProxyEngine {
     pool_idle_timeout_secs: u64,
     pub(crate) bind_port: u16,
     pub(crate) bind_host: String,
+    /// LAN/host IPs of this proxy, resolved once at construction. Used for
+    /// self-proxy loop detection when bound to a wildcard address. Cached to
+    /// avoid a per-request UDP socket syscall in `detect_lan_ip`.
+    self_lan_hosts: Vec<String>,
 }
 
 impl ProxyEngine {
@@ -77,10 +83,17 @@ impl ProxyEngine {
                 streaming = streaming.proxy(p);
             }
         }
-        (
-            http.build().unwrap_or_else(|_| Client::new()),
-            streaming.build().unwrap_or_else(|_| Client::new()),
-        )
+        let http = http.build().unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to build HTTP client with configured settings; \
+                falling back to default client — timeout, pool, and upstream-proxy settings are NOT applied");
+            Client::new()
+        });
+        let streaming = streaming.build().unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to build streaming HTTP client with configured settings; \
+                falling back to default client — timeout, pool, and upstream-proxy settings are NOT applied");
+            Client::new()
+        });
+        (http, streaming)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -115,6 +128,14 @@ impl ProxyEngine {
             pool_idle_timeout_secs,
             bind_port,
             bind_host,
+            self_lan_hosts: [
+                crate::setup::public_lan_ip_for_setup(),
+                crate::setup::detect_lan_ip(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|h| h.to_ascii_lowercase())
+            .collect(),
         }
     }
 
@@ -189,18 +210,10 @@ impl ProxyEngine {
             return true;
         }
         // 3. If bound to wildcard, check matching LAN hosts
-        if matches!(bind_host_clean.as_str(), "0.0.0.0" | "::" | "[::]") {
-            let lan_hosts = [
-                crate::setup::public_lan_ip_for_setup(),
-                crate::setup::detect_lan_ip(),
-            ];
-            if lan_hosts
-                .into_iter()
-                .flatten()
-                .any(|lan_host| host_clean == lan_host.to_ascii_lowercase())
-            {
-                return true;
-            }
+        if matches!(bind_host_clean.as_str(), "0.0.0.0" | "::" | "[::]")
+            && self.self_lan_hosts.contains(&host_clean)
+        {
+            return true;
         }
 
         false
@@ -291,16 +304,28 @@ impl ProxyEngine {
 
         let req_method = method.to_string();
         let req_uri = uri.to_string();
-        let mut req_headers = std::collections::HashMap::new();
+        let mut req_headers = crate::middleware::HeaderMap::new();
         for (name, value) in req.headers().iter() {
-            req_headers.insert(name.to_string(), value.to_str().unwrap_or("").to_string());
+            req_headers.append(name.to_string(), value.to_str().unwrap_or("").to_string());
         }
 
         let display_uri = display_request_uri(&uri, mitm_destination.as_deref(), &host);
 
-        let req_body_bytes = axum::body::to_bytes(req.into_body(), self.max_body_bytes())
-            .await
-            .unwrap_or_default();
+        let req_body_bytes =
+            match axum::body::to_bytes(req.into_body(), self.max_body_bytes()).await {
+                Ok(b) => b,
+                Err(_) => {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        format!(
+                            "Request body exceeds the {} byte limit. \
+                             Raise max_body_bytes in settings to increase it.",
+                            self.max_body_bytes()
+                        ),
+                    )
+                        .into_response();
+                }
+            };
 
         let mut req_ctx = RequestContext {
             method: req_method.clone(),
@@ -403,7 +428,7 @@ impl ProxyEngine {
             "trailers",
             "upgrade",
         ] {
-            req_ctx.headers.remove(*hdr);
+            req_ctx.headers.remove(hdr);
         }
 
         // In forward-proxy mode the browser sends an absolute URI as the request
@@ -466,7 +491,7 @@ impl ProxyEngine {
             tracing::warn!(url = %target_url, "Proxy loop detected: request forwarded to the proxy itself");
             let mut err_ctx = crate::middleware::ResponseContext {
                 status: 502,
-                headers: std::collections::HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::from(
                     "Proxy error: Proxy loop detected (request forwarded to the proxy itself)",
                 ),
@@ -497,31 +522,25 @@ impl ProxyEngine {
                 && let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                 && let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
             {
-                target_headers.insert(n, v);
+                // append (not insert) so multi-valued request headers survive.
+                target_headers.append(n, v);
             }
         }
 
-        // SSE and other event-stream requests need no timeout — they stream indefinitely.
-        let is_sse = req_ctx
-            .headers
-            .get("accept")
-            .map(|v| v.contains("text/event-stream"))
-            .unwrap_or(false);
-        // Clone the client before any await — reqwest::Client is Arc-backed, clone is free.
-        let client = {
-            let pool = self.clients.read().await;
-            if is_sse {
-                pool.1.clone()
-            } else {
-                pool.0.clone()
+        // Use the no-timeout streaming client for all proxied requests.
+        // Proxied traffic can be arbitrarily long (SSE, large downloads); the timeout
+        // client (pool.0) is reserved for control-plane outbound calls via http_client().
+        let client = self.clients.read().await.1.clone();
+
+        let forward_method = match reqwest::Method::from_bytes(req_method.as_bytes()) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(method = %req_method, error = %e, "rejecting request with invalid HTTP method");
+                return (StatusCode::BAD_REQUEST, "invalid HTTP method").into_response();
             }
         };
-
         let mut request_builder = client
-            .request(
-                reqwest::Method::from_bytes(req_method.as_bytes()).unwrap(),
-                &target_url,
-            )
+            .request(forward_method, &target_url)
             .headers(target_headers);
 
         // Avoid attaching an empty body to methods like GET if the original request didn't specify one.
@@ -537,9 +556,11 @@ impl ProxyEngine {
             Ok(res) => {
                 let ttfb_ms = net_start.elapsed().as_millis() as u64;
                 let status = res.status().as_u16();
-                let mut res_headers = std::collections::HashMap::new();
+                let mut res_headers = crate::middleware::HeaderMap::new();
                 for (name, value) in res.headers().iter() {
-                    res_headers.insert(name.to_string(), value.to_str().unwrap_or("").to_string());
+                    // append (not insert) so duplicate upstream headers such as
+                    // multiple Set-Cookie survive instead of collapsing to the last one.
+                    res_headers.append(name.to_string(), value.to_str().unwrap_or("").to_string());
                 }
 
                 let content_type = header_value(&res_headers, "content-type").unwrap_or_default();
@@ -560,7 +581,16 @@ impl ProxyEngine {
                 // Streaming path: text/event-stream (SSE) or large response above threshold.
                 // Check Content-Length if present; stream when body is too large to buffer.
                 let content_length = res.content_length().unwrap_or(0);
-                let force_stream = content_length > STREAM_THRESHOLD_BYTES;
+                // Chunked transfer-encoded responses have no Content-Length, so
+                // content_length defaults to 0 and would bypass the threshold,
+                // buffering an arbitrarily large body. Stream them unconditionally.
+                let is_chunked = res
+                    .headers()
+                    .get("transfer-encoding")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.to_ascii_lowercase().contains("chunked"))
+                    .unwrap_or(false);
+                let force_stream = content_length > STREAM_THRESHOLD_BYTES || is_chunked;
                 if content_type.contains("text/event-stream") || force_stream {
                     let mut res_ctx = ResponseContext {
                         status,
@@ -574,7 +604,11 @@ impl ProxyEngine {
                     };
                     {
                         let chain = self.middleware_chain.read().await.clone();
-                        chain.execute_response(&mut res_ctx).await;
+                        let action = chain.execute_response(&mut res_ctx).await;
+                        if action != MiddlewareAction::Continue {
+                            return (StatusCode::FORBIDDEN, "Response stopped by middleware")
+                                .into_response();
+                        }
                     }
                     let status_code = StatusCode::from_u16(res_ctx.status)
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -663,7 +697,7 @@ impl ProxyEngine {
                 // the failed exchange instead of leaving it as a dangling "pending" session.
                 let mut err_ctx = crate::middleware::ResponseContext {
                     status: 502,
-                    headers: std::collections::HashMap::new(),
+                    headers: crate::middleware::HeaderMap::new(),
                     body: Bytes::from(format!("Proxy error: {}", e)),
                     request_uri: display_uri.clone(),
                     session_id: oproxy_session_id,
@@ -709,7 +743,6 @@ mod tests {
     use axum::http::Uri;
     use bytes::Bytes;
     use flate2::{Compression, write::ZlibEncoder};
-    use std::collections::HashMap;
     use std::io::Write as _;
 
     #[test]
@@ -747,7 +780,7 @@ mod tests {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(b"hello-deflate-body").unwrap();
         let compressed = encoder.finish().unwrap();
-        let mut headers = HashMap::new();
+        let mut headers = crate::middleware::HeaderMap::new();
         headers.insert("Content-Encoding".to_string(), "deflate".to_string());
         headers.insert("Content-Length".to_string(), compressed.len().to_string());
 

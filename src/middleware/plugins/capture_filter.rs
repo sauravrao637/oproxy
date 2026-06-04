@@ -67,7 +67,6 @@ impl Middleware for CaptureFilterMiddleware {
 mod tests {
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
-    use std::collections::HashMap;
 
     fn cfg(mode: FilterMode, hosts: &[&str]) -> Arc<RwLock<CaptureFilterConfig>> {
         Arc::new(RwLock::new(CaptureFilterConfig {
@@ -80,7 +79,7 @@ mod tests {
         RequestContext {
             method: "GET".to_string(),
             uri: format!("http://{}/", host),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             host: host.to_string(),
             ..Default::default()

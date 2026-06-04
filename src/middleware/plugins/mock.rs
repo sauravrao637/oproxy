@@ -1,12 +1,13 @@
 use async_trait::async_trait;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::middleware::matcher::{Location, MatchMode, MatchTarget};
-use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
+use crate::middleware::{
+    InterceptedResponse, Middleware, MiddlewareAction, RequestContext, ResponseContext,
+};
 use bytes::Bytes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,17 +104,10 @@ impl Middleware for MockMiddleware {
                 let delay_ms = resp.delay_ms;
 
                 // Capture-group template substitution for regex path patterns.
-                let body = if rule.location.mode == MatchMode::Regex {
-                    if let Some(ref path_pat) = rule.location.path {
-                        if let Ok(re) = Regex::new(path_pat) {
-                            if let Some(caps) = re.captures(&target.path) {
-                                apply_template(&resp.body, &caps)
-                            } else {
-                                resp.body.clone()
-                            }
-                        } else {
-                            resp.body.clone()
-                        }
+                // Reuse the already-cached compiled regex from location matching.
+                let body = if let Some(re) = rule.location.compiled_path_regex() {
+                    if let Some(caps) = re.captures(&target.path) {
+                        apply_template(&resp.body, &caps)
                     } else {
                         resp.body.clone()
                     }
@@ -128,7 +122,7 @@ impl Middleware for MockMiddleware {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
 
-            let mut resp_headers = resp.headers.clone();
+            let mut resp_headers: crate::middleware::HeaderMap = resp.headers.clone().into();
             if !resp_headers.contains_key("content-length") {
                 resp_headers.insert("content-length".to_string(), body.len().to_string());
             }
@@ -150,12 +144,13 @@ mod tests {
     use super::*;
     use crate::middleware::RequestContext;
     use crate::middleware::matcher::{Location, MatchMode};
+    use regex::Regex;
 
     fn make_ctx(method: &str, host: &str, uri: &str) -> RequestContext {
         RequestContext {
             method: method.to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             host: host.to_string(),
             ..Default::default()

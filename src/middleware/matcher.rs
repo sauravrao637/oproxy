@@ -21,7 +21,10 @@
 // middleware chain, these items have no non-test caller in the binary target.
 #![allow(dead_code)]
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// How the freeform string fields (`host`, `path`, `query`) are interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -34,6 +37,13 @@ pub enum MatchMode {
     /// Regular-expression matching via the `regex` crate. Unanchored, i.e. a
     /// substring match unless the pattern uses `^`/`$`.
     Regex,
+}
+
+thread_local! {
+    /// Per-thread cache of compiled regexes keyed by pattern string.
+    /// Avoids recompiling the same pattern on every request in Regex match mode.
+    static REGEX_CACHE: RefCell<HashMap<String, Option<Regex>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// A Charles-style location condition. Unset fields match anything; set fields
@@ -115,13 +125,37 @@ impl Location {
         true
     }
 
+    /// Returns the compiled path regex when mode is Regex, using the
+    /// thread-local cache. Used by mock middleware for capture-group
+    /// template substitution after a successful location match.
+    /// Regex is Clone (Arc-backed), so this is cheap.
+    pub fn compiled_path_regex(&self) -> Option<Regex> {
+        if self.mode != MatchMode::Regex {
+            return None;
+        }
+        let path = self.path.as_deref().filter(|p| !p.is_empty())?;
+        REGEX_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(path.to_string())
+                .or_insert_with(|| Regex::new(path).ok())
+                .clone()
+        })
+    }
+
     fn match_str(&self, pattern: &str, value: &str) -> bool {
         match self.mode {
             MatchMode::Glob => glob_match(pattern, value),
-            // Invalid regex never matches (matches the old fail-safe behaviour).
-            MatchMode::Regex => regex::Regex::new(pattern)
-                .map(|re| re.is_match(value))
-                .unwrap_or(false),
+            // Use thread-local cache to avoid recompiling the same pattern
+            // on every request. Invalid patterns are stored as None and
+            // never match (preserves the original fail-safe behaviour).
+            MatchMode::Regex => REGEX_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                let re = cache
+                    .entry(pattern.to_string())
+                    .or_insert_with(|| Regex::new(pattern).ok());
+                re.as_ref().map(|r| r.is_match(value)).unwrap_or(false)
+            }),
         }
     }
 }
@@ -247,7 +281,6 @@ mod tests {
     use super::*;
     use crate::middleware::RequestContext;
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     // ── glob_match ──────────────────────────────────────────────────────────
 
@@ -420,7 +453,7 @@ mod tests {
             method: method.into(),
             uri: uri.into(),
             host: host.into(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: Bytes::new(),
             ..Default::default()
         }

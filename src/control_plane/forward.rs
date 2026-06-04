@@ -89,7 +89,7 @@ pub(super) async fn forward_request(
         method: req.method.clone(),
         uri: display_uri.clone(),
         host: host.clone(),
-        headers: req.headers.clone(),
+        headers: req.headers.clone().into(),
         body: bytes::Bytes::from(req.body.clone().unwrap_or_default()),
         ..Default::default()
     };
@@ -143,7 +143,7 @@ pub(super) async fn forward_request(
             // Record response
             let res_ctx = ResponseContext {
                 status,
-                headers: res_headers.clone(),
+                headers: res_headers.clone().into(),
                 body: bytes.clone(),
                 request_uri: display_uri,
                 session_id: Some(session_id.clone()),

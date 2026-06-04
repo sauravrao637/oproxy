@@ -7,12 +7,174 @@ use std::collections::HashMap;
 
 use crate::core::engine::is_binary_content_type;
 
-fn content_type_of(headers: &HashMap<String, String>) -> String {
-    headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-        .map(|(_, value)| value.clone())
-        .unwrap_or_default()
+/// An ordered, duplicate-preserving, case-insensitive collection of HTTP headers.
+///
+/// HTTP allows several headers with the same field name (e.g. multiple
+/// `Set-Cookie`), but a `HashMap<String, String>` silently collapses them to a
+/// single value. `HeaderMap` keeps every entry in insertion order so that the
+/// engine can forward all of them to the client/upstream intact.
+///
+/// Field names are normalised to lowercase on insert and all lookups are
+/// case-insensitive, matching HTTP's case-insensitive header semantics. The
+/// API mirrors the subset of `HashMap` used across the codebase
+/// (`get`/`insert`/`remove`/`contains_key`/`iter`/…) so it is a near drop-in,
+/// with [`append`](HeaderMap::append)/[`get_all`](HeaderMap::get_all) added for
+/// the multi-value cases.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeaderMap {
+    entries: Vec<(String, String)>,
+}
+
+impl HeaderMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// First value for `key` (case-insensitive), if any.
+    pub fn get(&self, key: &str) -> Option<&String> {
+        let k = key.to_ascii_lowercase();
+        self.entries.iter().find(|(n, _)| *n == k).map(|(_, v)| v)
+    }
+
+    /// All values for `key` (case-insensitive), in insertion order.
+    pub fn get_all<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a String> + 'a {
+        let k = key.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .filter(move |(n, _)| *n == k)
+            .map(|(_, v)| v)
+    }
+
+    /// Replace every existing value for `key` with a single `value`
+    /// (HashMap-like semantics). Returns the previous first value, if any.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> Option<String> {
+        let k = key.into().to_ascii_lowercase();
+        let prev = self.remove(&k);
+        self.entries.push((k, value.into()));
+        prev
+    }
+
+    /// Append a value for `key` without disturbing existing entries — this is
+    /// what preserves multi-valued headers such as `Set-Cookie`.
+    pub fn append(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.entries
+            .push((key.into().to_ascii_lowercase(), value.into()));
+    }
+
+    /// Remove all entries for `key`, returning the first removed value.
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        let k = key.to_ascii_lowercase();
+        let mut removed = None;
+        self.entries.retain(|(n, v)| {
+            if *n == k {
+                if removed.is_none() {
+                    removed = Some(v.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        let k = key.to_ascii_lowercase();
+        self.entries.iter().any(|(n, _)| *n == k)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.entries.iter().map(|(n, v)| (n, v))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Retain only entries for which `f(name, value)` returns true.
+    pub fn retain(&mut self, mut f: impl FnMut(&str, &str) -> bool) {
+        self.entries.retain(|(n, v)| f(n, v));
+    }
+}
+
+impl<'a> IntoIterator for &'a HeaderMap {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, (String, String)>,
+        fn(&'a (String, String)) -> (&'a String, &'a String),
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter().map(|(n, v)| (n, v))
+    }
+}
+
+impl IntoIterator for HeaderMap {
+    type Item = (String, String);
+    type IntoIter = std::vec::IntoIter<(String, String)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl FromIterator<(String, String)> for HeaderMap {
+    fn from_iter<T: IntoIterator<Item = (String, String)>>(iter: T) -> Self {
+        let mut map = HeaderMap::new();
+        for (k, v) in iter {
+            map.append(k, v);
+        }
+        map
+    }
+}
+
+impl Extend<(String, String)> for HeaderMap {
+    fn extend<T: IntoIterator<Item = (String, String)>>(&mut self, iter: T) {
+        for (k, v) in iter {
+            self.append(k, v);
+        }
+    }
+}
+
+impl From<HashMap<String, String>> for HeaderMap {
+    fn from(map: HashMap<String, String>) -> Self {
+        map.into_iter().collect()
+    }
+}
+
+impl From<HeaderMap> for HashMap<String, String> {
+    /// Collapses duplicate field names (last value wins). Used at the
+    /// serialization/export boundary where a JSON object cannot hold duplicates.
+    fn from(headers: HeaderMap) -> Self {
+        headers.entries.into_iter().collect()
+    }
+}
+
+impl Serialize for HeaderMap {
+    /// Serialized as a JSON object for backward compatibility with stored
+    /// sessions/exports. A JSON object cannot hold duplicate keys, so duplicate
+    /// field names collapse (last value wins) — multi-value preservation lives in
+    /// the live proxy path, not the persisted representation.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let map: HashMap<&str, &str> = self
+            .entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        serializer.collect_map(map)
+    }
+}
+
+impl<'de> Deserialize<'de> for HeaderMap {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(HashMap::<String, String>::deserialize(deserializer)?.into())
+    }
+}
+
+fn content_type_of(headers: &HeaderMap) -> String {
+    headers.get("content-type").cloned().unwrap_or_default()
 }
 
 /// A response a middleware wants the engine to return immediately instead of
@@ -24,7 +186,7 @@ fn content_type_of(headers: &HashMap<String, String>) -> String {
 #[derive(Debug, Clone)]
 pub struct InterceptedResponse {
     pub status: u16,
-    pub headers: HashMap<String, String>,
+    pub headers: HeaderMap,
     pub body: Bytes,
     /// Session tags to attach when this response is recorded (e.g. "mock").
     pub tags: Vec<String>,
@@ -44,7 +206,7 @@ pub struct InterceptedResponse {
 pub struct RequestContext {
     pub method: String,
     pub uri: String,
-    pub headers: HashMap<String, String>,
+    pub headers: HeaderMap,
     pub body: Bytes,
     pub host: String,
     // ── Internal middleware ↔ engine side-channel ───────────────────────────────
@@ -89,7 +251,7 @@ impl RequestContext {
 #[serde(into = "ResponseContextWire", from = "ResponseContextWire")]
 pub struct ResponseContext {
     pub status: u16,
-    pub headers: HashMap<String, String>,
+    pub headers: HeaderMap,
     pub body: Bytes,
     pub request_uri: String,
     // Injected by InspectionMiddleware during on_request; used in on_response for exact
@@ -145,7 +307,7 @@ impl From<RequestContext> for RequestContextWire {
             uri: ctx.uri,
             body: String::from_utf8_lossy(&ctx.body).into_owned(),
             host: ctx.host,
-            headers: ctx.headers,
+            headers: ctx.headers.into(),
         }
     }
 }
@@ -155,7 +317,7 @@ impl From<RequestContextWire> for RequestContext {
         RequestContext {
             method: wire.method,
             uri: wire.uri,
-            headers: wire.headers,
+            headers: wire.headers.into(),
             body: Bytes::from(wire.body.into_bytes()),
             host: wire.host,
             ..Default::default()
@@ -186,7 +348,7 @@ impl From<ResponseContext> for ResponseContextWire {
         };
         ResponseContextWire {
             status: ctx.status,
-            headers: ctx.headers,
+            headers: ctx.headers.into(),
             body,
             request_uri: ctx.request_uri,
             session_id: ctx.session_id,
@@ -198,7 +360,8 @@ impl From<ResponseContext> for ResponseContextWire {
 
 impl From<ResponseContextWire> for ResponseContext {
     fn from(wire: ResponseContextWire) -> Self {
-        let body = if is_binary_content_type(&content_type_of(&wire.headers)) {
+        let headers: HeaderMap = wire.headers.into();
+        let body = if is_binary_content_type(&content_type_of(&headers)) {
             base64::engine::general_purpose::STANDARD
                 .decode(wire.body.as_bytes())
                 .map(Bytes::from)
@@ -208,7 +371,7 @@ impl From<ResponseContextWire> for ResponseContext {
         };
         ResponseContext {
             status: wire.status,
-            headers: wire.headers,
+            headers,
             body,
             request_uri: wire.request_uri,
             session_id: wire.session_id,
@@ -244,34 +407,22 @@ pub trait Middleware: Send + Sync {
 
 // ── Unified Context Helpers ─────────────────────────────────────────────────
 
-/// Case-insensitive find of the canonical key as stored in the headers map.
-pub fn find_header_key(headers: &HashMap<String, String>, name: &str) -> Option<String> {
-    headers
-        .keys()
-        .find(|k| k.eq_ignore_ascii_case(name))
-        .cloned()
+pub fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(name).cloned()
 }
 
-pub fn header_value(headers: &HashMap<String, String>, name: &str) -> Option<String> {
-    find_header_key(headers, name).and_then(|k| headers.get(&k).cloned())
+pub fn set_header(headers: &mut HeaderMap, name: &str, value: String) {
+    headers.insert(name, value);
 }
 
-pub fn set_header(headers: &mut HashMap<String, String>, name: &str, value: String) {
-    let key = find_header_key(headers, name).unwrap_or_else(|| name.to_lowercase());
-    headers.insert(key, value);
-}
-
-pub fn append_header(headers: &mut HashMap<String, String>, name: &str, value: &str) {
-    let key = find_header_key(headers, name).unwrap_or_else(|| name.to_lowercase());
-    let existing = headers.get(&key).cloned().unwrap_or_default();
+pub fn append_header(headers: &mut HeaderMap, name: &str, value: &str) {
+    let existing = headers.get(name).cloned().unwrap_or_default();
     let sep = if existing.is_empty() { "" } else { ", " };
-    headers.insert(key, format!("{existing}{sep}{value}"));
+    headers.insert(name, format!("{existing}{sep}{value}"));
 }
 
-pub fn remove_header(headers: &mut HashMap<String, String>, name: &str) {
-    if let Some(key) = find_header_key(headers, name) {
-        headers.remove(&key);
-    }
+pub fn remove_header(headers: &mut HeaderMap, name: &str) {
+    headers.remove(name);
 }
 
 pub fn path_of(uri: &str) -> &str {

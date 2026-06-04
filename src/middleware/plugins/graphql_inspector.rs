@@ -87,11 +87,9 @@ impl Middleware for GraphQLInspectorMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
     fn make_ctx(content_type: &str, body: &str) -> RequestContext {
-        let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), content_type.to_string());
+        let mut headers = crate::middleware::HeaderMap::new();
+        headers.insert("content-type", content_type.to_string());
         RequestContext {
             method: "POST".to_string(),
             uri: "/graphql".to_string(),

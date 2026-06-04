@@ -192,12 +192,11 @@ mod tests {
     use super::*;
     use crate::middleware::{RequestContext, ResponseContext};
     use crate::session::{Exchange, InspectionMetrics};
-    use std::collections::HashMap;
 
     fn exchange(id: &str, source: SessionSource, status: Option<u16>) -> Exchange {
         let response = status.map(|code| ResponseContext {
             status: code,
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             request_uri: "/test".to_string(),
             session_id: Some(id.to_string()),
@@ -221,7 +220,7 @@ mod tests {
             request: RequestContext {
                 method: "GET".to_string(),
                 uri: "/test".to_string(),
-                headers: HashMap::new(),
+                headers: crate::middleware::HeaderMap::new(),
                 body: bytes::Bytes::new(),
                 host: "example.com".to_string(),
                 ..Default::default()

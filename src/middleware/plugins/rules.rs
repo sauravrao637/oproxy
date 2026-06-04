@@ -18,10 +18,68 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// A regex pattern that compiles once on first use and caches the result.
+/// Serialises/deserialises as a plain string for JSON compatibility.
+#[derive(Debug)]
+pub struct CompiledPattern {
+    pub pattern: String,
+    regex: OnceLock<Option<Arc<Regex>>>,
+}
+
+impl CompiledPattern {
+    pub fn new(pattern: impl Into<String>) -> Self {
+        Self {
+            pattern: pattern.into(),
+            regex: OnceLock::new(),
+        }
+    }
+
+    pub fn regex(&self) -> Option<&Regex> {
+        self.regex
+            .get_or_init(|| Regex::new(&self.pattern).ok().map(Arc::new))
+            .as_deref()
+    }
+}
+
+impl Clone for CompiledPattern {
+    fn clone(&self) -> Self {
+        Self::new(self.pattern.clone())
+    }
+}
+
+impl PartialEq for CompiledPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl Serialize for CompiledPattern {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.pattern.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompiledPattern {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Self::new(String::deserialize(d)?))
+    }
+}
+
+impl From<String> for CompiledPattern {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for CompiledPattern {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
@@ -61,7 +119,7 @@ pub enum RewriteAction {
     SetHost { value: String },
     /// Regex find-and-replace on the request path (not including query string).
     SetPath {
-        pattern: String,
+        pattern: CompiledPattern,
         replacement: String,
     },
 
@@ -72,7 +130,7 @@ pub enum RewriteAction {
     // ── Body mutations (request + response) ──────────────────────────────
     /// Regex find-and-replace on the body text. Silently skips binary bodies.
     ReplaceBody {
-        pattern: String,
+        pattern: CompiledPattern,
         replacement: String,
     },
 
@@ -193,7 +251,7 @@ fn apply_request_actions(
                 pattern,
                 replacement,
             } => {
-                if let Ok(re) = Regex::new(pattern) {
+                if let Some(re) = pattern.regex() {
                     let (_, query) = split_path_query(&ctx.uri);
                     let new_path = re
                         .replace_all(path_of(&ctx.uri), replacement.as_str())
@@ -209,7 +267,7 @@ fn apply_request_actions(
                 pattern,
                 replacement,
             } => {
-                if let Ok(re) = Regex::new(pattern) {
+                if let Some(re) = pattern.regex() {
                     let text = ctx.body_text().into_owned();
                     let new_body = re.replace_all(&text, replacement.as_str()).to_string();
                     if new_body != text {
@@ -219,7 +277,7 @@ fn apply_request_actions(
                 }
             }
             RewriteAction::Redirect { status, location } => {
-                let mut headers = HashMap::new();
+                let mut headers = crate::middleware::HeaderMap::new();
                 headers.insert("Location".to_string(), location.clone());
                 ctx.mock_response = Some(InterceptedResponse {
                     status: *status,
@@ -232,7 +290,7 @@ fn apply_request_actions(
             RewriteAction::Block { status } => {
                 ctx.mock_response = Some(InterceptedResponse {
                     status: *status,
-                    headers: HashMap::new(),
+                    headers: crate::middleware::HeaderMap::new(),
                     body: Bytes::new(),
                     tags: Vec::new(),
                 });
@@ -266,7 +324,7 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
                 pattern,
                 replacement,
             } => {
-                if let Ok(re) = Regex::new(pattern) {
+                if let Some(re) = pattern.regex() {
                     let text = ctx.body_text().into_owned();
                     let new_body = re.replace_all(&text, replacement.as_str()).to_string();
                     if new_body != text {
@@ -286,15 +344,18 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
     }
 }
 
+
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::middleware::matcher::MatchMode;
-    use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+    use crate::middleware::{
+        HeaderMap, Middleware, MiddlewareAction, RequestContext, ResponseContext,
+    };
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     fn req(method: &str, host: &str, uri: &str, body: &str) -> RequestContext {
         RequestContext {
@@ -302,7 +363,7 @@ mod tests {
             host: host.into(),
             uri: uri.into(),
             body: Bytes::from(body.to_string()),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             ..Default::default()
         }
     }
@@ -313,7 +374,7 @@ mod tests {
             request_uri: uri.into(),
             request_host: host.into(),
             request_method: method.into(),
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Bytes::from("hello world"),
             ..Default::default()
         }
@@ -388,7 +449,7 @@ mod tests {
             }],
         )]);
         let mut ctx = req("GET", "h", "/", "");
-        ctx.headers.insert("x-foo".into(), "old".into());
+        ctx.headers.insert("x-foo", "old");
         mw.on_request(&mut ctx).await;
         assert_eq!(ctx.headers.get("x-foo").map(String::as_str), Some("bar"));
     }
@@ -405,7 +466,7 @@ mod tests {
         )]);
         let mut ctx = req("GET", "h", "/", "");
         ctx.headers
-            .insert("accept".into(), "application/json".into());
+            .insert("accept", "application/json");
         mw.on_request(&mut ctx).await;
         assert_eq!(
             ctx.headers.get("accept").map(String::as_str),
@@ -424,7 +485,7 @@ mod tests {
         )]);
         let mut ctx = req("GET", "h", "/", "");
         ctx.headers
-            .insert("authorization".into(), "Bearer s".into());
+            .insert("authorization", "Bearer s");
         mw.on_request(&mut ctx).await;
         assert!(!ctx.headers.contains_key("authorization"));
     }
@@ -530,7 +591,7 @@ mod tests {
             }],
         )]);
         let mut ctx = req("POST", "h", "/", "my secret data");
-        ctx.headers.insert("content-length".into(), "14".into());
+        ctx.headers.insert("content-length", "14");
         mw.on_request(&mut ctx).await;
         assert_eq!(ctx.body_text(), "my REDACTED data");
         assert!(!ctx.headers.contains_key("content-length"));
@@ -675,7 +736,7 @@ mod tests {
             }],
         )]);
         let mut ctx = res("h", "GET", "/", 200);
-        ctx.headers.insert("content-length".into(), "11".into());
+        ctx.headers.insert("content-length", "11");
         mw.on_response(&mut ctx).await;
         assert_eq!(ctx.body_text(), "goodbye world");
         assert!(!ctx.headers.contains_key("content-length"));

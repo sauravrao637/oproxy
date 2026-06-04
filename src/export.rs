@@ -322,7 +322,7 @@ impl From<ParsedCurl> for RequestContext {
         RequestContext {
             method: p.method,
             uri: p.url,
-            headers: p.headers,
+            headers: p.headers.into(),
             body: bytes::Bytes::from(p.body.into_bytes()),
             host,
             ..Default::default()
@@ -350,7 +350,7 @@ mod tests {
     use chrono::Utc;
 
     fn make_exchange(method: &str, uri: &str, headers: Vec<(&str, &str)>, body: &str) -> Exchange {
-        let mut hmap = std::collections::HashMap::new();
+        let mut hmap = crate::middleware::HeaderMap::new();
         for (k, v) in headers {
             hmap.insert(k.to_string(), v.to_string());
         }

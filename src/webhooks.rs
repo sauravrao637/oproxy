@@ -63,16 +63,18 @@ pub struct WebhookDispatcher {
 }
 
 impl WebhookDispatcher {
-    pub fn new(configs: SharedWebhooks, egress_policy: crate::security::AdminEgressPolicy) -> Self {
+    pub fn new(
+        configs: SharedWebhooks,
+        egress_policy: crate::security::AdminEgressPolicy,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .build()
-            .expect("webhook reqwest client");
-        Self {
+            .build()?;
+        Ok(Self {
             configs,
             client,
             egress_policy,
-        }
+        })
     }
 
     pub fn spawn(self, mut change_rx: broadcast::Receiver<SessionChange>, sm: Arc<SessionManager>) {

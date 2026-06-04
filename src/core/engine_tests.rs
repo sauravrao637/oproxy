@@ -18,7 +18,7 @@ mod tests {
         RequestContext {
             method: "GET".to_string(),
             uri: uri.to_string(),
-            headers: HashMap::new(),
+            headers: crate::middleware::HeaderMap::new(),
             body: bytes::Bytes::new(),
             host: host.to_string(),
             ..Default::default()
@@ -74,7 +74,7 @@ mod tests {
             status: 200,
             headers: Default::default(),
             body: bytes::Bytes::new(),
-            session_id: None,
+            session_id: req_ctx.session_id.clone(),
             ttfb_ms: 0,
             body_ms: 0,
             ..Default::default()

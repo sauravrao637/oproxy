@@ -169,15 +169,29 @@ fn admin_token_cookie(token: &str) -> Option<header::HeaderValue> {
 }
 
 fn token_matches(candidate: &str, expected: &str) -> bool {
-    let candidate = candidate.as_bytes();
-    let expected = expected.as_bytes();
-    if candidate.len() != expected.len() {
-        return false;
-    }
-    candidate
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+
+    // Double-HMAC comparison: hash both inputs with an ephemeral random key, then
+    // compare the fixed-size 32-byte tags in constant time. Unlike a direct
+    // byte-compare, this does not short-circuit on length, so it leaks neither the
+    // token's contents nor its length via timing.
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+
+    let tag = |data: &str| -> [u8; 32] {
+        let mut mac = <Hmac<Sha256>>::new_from_slice(&key).expect("HMAC accepts any key length");
+        mac.update(data.as_bytes());
+        mac.finalize().into_bytes().into()
+    };
+
+    let candidate_tag = tag(candidate);
+    let expected_tag = tag(expected);
+    candidate_tag
         .iter()
-        .zip(expected)
-        .fold(0u8, |diff, (a, b)| diff | (*a ^ *b))
+        .zip(expected_tag.iter())
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
         == 0
 }
 

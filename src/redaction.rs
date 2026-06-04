@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::middleware::HeaderMap;
 
 pub const REDACTED: &str = "[redacted]";
 
@@ -22,7 +22,7 @@ pub fn is_sensitive_key(key: &str) -> bool {
         || key.contains("api_key")
 }
 
-pub fn redact_headers(headers: &HashMap<String, String>) -> HashMap<String, String> {
+pub fn redact_headers(headers: &HeaderMap) -> HeaderMap {
     headers
         .iter()
         .map(|(k, v)| {
@@ -36,7 +36,7 @@ pub fn redact_headers(headers: &HashMap<String, String>) -> HashMap<String, Stri
         .collect()
 }
 
-pub fn sensitive_values(headers: &HashMap<String, String>, body: &str) -> Vec<String> {
+pub fn sensitive_values(headers: &HeaderMap, body: &str) -> Vec<String> {
     let mut values = Vec::new();
     for (key, value) in headers {
         if is_sensitive_key(key) {
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_headers_case_insensitively() {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert("Authorization".to_string(), "Bearer secret".to_string());
         headers.insert("content-type".to_string(), "application/json".to_string());
 
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn collects_sensitive_values_for_reflected_response_redaction() {
-        let mut headers = HashMap::new();
+        let mut headers = HeaderMap::new();
         headers.insert(
             "authorization".to_string(),
             "Bearer request-token".to_string(),
