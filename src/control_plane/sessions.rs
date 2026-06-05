@@ -31,7 +31,9 @@ pub(super) struct SessionQuery {
     methods: Option<String>,
     status_buckets: Option<String>,
     host_focus: Option<String>,
+    /// Exact host filter. `host` is accepted as an alias for ergonomics.
     host_filter: Option<String>,
+    host: Option<String>,
     sort_key: Option<String>,
     sort_dir: Option<String>,
     workspace_view: Option<String>,
@@ -58,7 +60,7 @@ pub(super) async fn list_sessions(
             methods: q.methods.as_deref().map(split_csv),
             status_buckets: q.status_buckets.as_deref().map(split_csv),
             host_focus: q.host_focus.as_deref().map(split_csv).unwrap_or_default(),
-            host_filter: q.host_filter.filter(|host| !host.trim().is_empty()),
+            host_filter: q.host_filter.or(q.host).filter(|h| !h.trim().is_empty()),
             sort: SessionSort {
                 key: q.sort_key.unwrap_or_else(|| "ts".to_string()),
                 dir: parse_sort_dir(q.sort_dir.as_deref()),
