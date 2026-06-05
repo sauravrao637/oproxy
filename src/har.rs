@@ -1,5 +1,14 @@
 use crate::core::engine::is_binary_content_type;
 use crate::middleware::{RequestContext, ResponseContext};
+
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
 /// HAR 1.2 (HTTP Archive) serialisation/deserialisation.
 /// Spec: http://www.softwareishard.com/blog/har-12-spec/
 ///
@@ -88,7 +97,8 @@ pub struct HarEntry {
     #[serde(
         rename = "_oproxy_tags",
         default,
-        skip_serializing_if = "Vec::is_empty"
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "null_as_empty_vec"
     )]
     pub oproxy_tags: Vec<String>,
     #[serde(
