@@ -68,6 +68,24 @@ impl Middleware for MapLocalMiddleware {
                 continue;
             }
             let file_path = Path::new(&rule.file_path);
+            // Verify the root exists before trying to serve from it.
+            if !file_path.exists() {
+                tracing::warn!(
+                    path=%file_path.display(),
+                    "map_local: root path does not exist — \
+                     in containers ensure the path is mounted inside the container"
+                );
+                ctx.mock_response = Some(InterceptedResponse {
+                    status: 502,
+                    headers: error_headers(),
+                    body: bytes::Bytes::from(format!(
+                        "map_local: root path '{}' does not exist",
+                        file_path.display()
+                    )),
+                    tags: vec!["map-local-error".to_string()],
+                });
+                return MiddlewareAction::StopAndReturn;
+            }
             let path_to_serve = if file_path.is_dir() {
                 // Strip leading '?' or '#' from uri, take the path component only.
                 let req_path = target.path.trim_start_matches('/');
@@ -87,17 +105,43 @@ impl Middleware for MapLocalMiddleware {
                         }
                         resolved
                     }
-                    Err(e) => {
-                        tracing::debug!(path=%candidate.display(), error=%e, "map_local: file not found in dir");
+                    Err(_) => {
+                        // File doesn't exist at this path within the directory — fall
+                        // through to the next rule (correct behaviour: the directory may
+                        // serve some paths but not all).
                         continue;
                     }
                 }
             } else {
                 match file_path.canonicalize() {
                     Ok(p) if p.is_file() => p,
-                    _ => {
-                        tracing::warn!(path=%file_path.display(), "map_local: file not found or not a file");
-                        continue;
+                    Ok(p) => {
+                        tracing::warn!(path=%p.display(), "map_local: resolved path is not a file");
+                        ctx.mock_response = Some(InterceptedResponse {
+                            status: 502,
+                            headers: error_headers(),
+                            body: bytes::Bytes::from(format!(
+                                "map_local: '{}' is not a regular file",
+                                file_path.display()
+                            )),
+                            tags: vec!["map-local-error".to_string()],
+                        });
+                        return MiddlewareAction::StopAndReturn;
+                    }
+                    Err(e) => {
+                        tracing::warn!(path=%file_path.display(), error=%e,
+                            "map_local: file_path inaccessible — \
+                             in containers ensure the path is mounted inside the container");
+                        ctx.mock_response = Some(InterceptedResponse {
+                            status: 502,
+                            headers: error_headers(),
+                            body: bytes::Bytes::from(format!(
+                                "map_local: '{}' is not accessible: {e}",
+                                file_path.display()
+                            )),
+                            tags: vec!["map-local-error".to_string()],
+                        });
+                        return MiddlewareAction::StopAndReturn;
                     }
                 }
             };
@@ -122,6 +166,12 @@ impl Middleware for MapLocalMiddleware {
         }
         MiddlewareAction::Continue
     }
+}
+
+fn error_headers() -> crate::middleware::HeaderMap {
+    let mut h = crate::middleware::HeaderMap::new();
+    h.insert("content-type".to_string(), "text/plain".to_string());
+    h
 }
 
 fn mime_for_path(path: &Path) -> &'static str {

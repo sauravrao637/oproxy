@@ -165,11 +165,37 @@ pub(super) async fn list_map_local_rules(State(state): State<Arc<AppState>>) -> 
     axum::Json(state.map_local_rules.read().await.clone())
 }
 
+/// Validate that a MapLocalRule's file_path exists and is accessible.
+/// Returns an error response if it doesn't so operators discover path issues
+/// at rule-save time instead of silently at request time.
+fn validate_map_local_path(rule: &MapLocalRule) -> Option<axum::response::Response> {
+    let p = std::path::Path::new(&rule.file_path);
+    if !p.exists() {
+        return Some(
+            (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({
+                    "error": format!(
+                        "file_path '{}' does not exist or is not accessible from this process. \
+                         In containerized deployments ensure the path is mounted inside the container.",
+                        rule.file_path
+                    )
+                })),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 pub(super) async fn create_map_local_rule(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(mut rule): axum::extract::Json<MapLocalRule>,
 ) -> impl IntoResponse {
     rule.id = MapLocalRule::new_id();
+    if let Some(err) = validate_map_local_path(&rule) {
+        return err;
+    }
     let saved = rule.clone();
     state.map_local_rules.write().await.push(rule);
     let rules = state.map_local_rules.read().await.clone();
@@ -185,6 +211,9 @@ pub(super) async fn update_map_local_rule(
     axum::extract::Json(mut rule): axum::extract::Json<MapLocalRule>,
 ) -> impl IntoResponse {
     rule.id = id.clone();
+    if let Some(err) = validate_map_local_path(&rule) {
+        return err;
+    }
     {
         let mut rules = state.map_local_rules.write().await;
         match rules.iter_mut().find(|r| r.id == id) {
