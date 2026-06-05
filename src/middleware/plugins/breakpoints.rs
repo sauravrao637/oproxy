@@ -20,6 +20,7 @@ pub enum BreakpointType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BreakpointRule {
+    #[serde(default)]
     pub id: String,
     /// Full Location-based matching (host, path, port, protocol, query, methods, mode).
     /// Leave all fields at default to match every request/response.

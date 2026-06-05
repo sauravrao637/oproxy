@@ -13,6 +13,7 @@ const LUA_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuaScript {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub code: String,
