@@ -13,6 +13,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -22,8 +25,7 @@ jobs:
 
       - name: Build UI
         run: |
-          corepack enable
-          yarn --cwd src/design install --frozen-lockfile
+          yarn --cwd src/design install --immutable
           yarn --cwd src/design build
 
       - name: Set up Rust
