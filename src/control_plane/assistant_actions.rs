@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -38,7 +46,11 @@ pub(crate) struct AssistantAction {
     #[serde(default)]
     pub payload: Value,
     pub requires_confirmation: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "null_as_empty_vec"
+    )]
     pub preconditions: Vec<AssistantActionPrecondition>,
 }
 
