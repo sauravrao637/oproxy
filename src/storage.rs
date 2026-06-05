@@ -36,7 +36,26 @@ async fn save_json<T: serde::Serialize>(path: &Path, file_name: &str, value: &T)
 }
 
 pub fn load_rule_sets(path: &Path) -> Vec<RewriteRuleSet> {
-    load_json(path, "rule_sets.json")
+    let current = path.join("rule_sets.json");
+    if current.exists() {
+        return load_json(path, "rule_sets.json");
+    }
+    // Warn once if legacy files exist — they can't be auto-migrated because their
+    // schemas differ from RewriteRuleSet. Operators should export + re-import rules.
+    let legacy = ["rewrites.json", "header_maps.json", "modifications.json"];
+    let found: Vec<&str> = legacy
+        .iter()
+        .copied()
+        .filter(|f| path.join(f).exists())
+        .collect();
+    if !found.is_empty() {
+        tracing::warn!(
+            files = ?found,
+            "Legacy rule files found but cannot be auto-migrated to rule_sets.json. \
+             Export your rules from the old proxy version and re-import them via the Rules UI."
+        );
+    }
+    Vec::new()
 }
 
 pub async fn save_rule_sets(path: &Path, rules: &[RewriteRuleSet]) -> io::Result<()> {
@@ -135,7 +154,37 @@ pub async fn save_webhooks(
 }
 
 pub fn load_map_local_rules(path: &Path) -> Vec<MapLocalRule> {
-    load_json(path, "map_local_rules.json")
+    let current = path.join("map_local_rules.json");
+    if current.exists() {
+        return load_json(path, "map_local_rules.json");
+    }
+    // Migrate from the legacy map_local.json format: HashMap<host, file_path>
+    let legacy = path.join("map_local.json");
+    if let Ok(data) = std::fs::read_to_string(&legacy) {
+        if let Ok(old_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&data) {
+            if !old_map.is_empty() {
+                tracing::warn!(
+                    count = old_map.len(),
+                    "Migrating map_local.json (legacy host→file format) to map_local_rules.json"
+                );
+                let rules: Vec<MapLocalRule> = old_map
+                    .into_iter()
+                    .map(|(host, file_path)| MapLocalRule {
+                        id: MapLocalRule::new_id(),
+                        name: host.clone(),
+                        enabled: true,
+                        location: crate::middleware::matcher::Location {
+                            host: Some(host),
+                            ..Default::default()
+                        },
+                        file_path,
+                    })
+                    .collect();
+                return rules;
+            }
+        }
+    }
+    Vec::new()
 }
 
 pub async fn save_map_local_rules(path: &Path, rules: &[MapLocalRule]) -> io::Result<()> {
@@ -151,7 +200,19 @@ pub async fn save_access_rules(path: &Path, rules: &[AccessRule]) -> io::Result<
 }
 
 pub fn load_map_remote_rules(path: &Path) -> Vec<MapRemoteRule> {
-    load_json(path, "map_remote_rules.json")
+    let current = path.join("map_remote_rules.json");
+    if current.exists() {
+        return load_json(path, "map_remote_rules.json");
+    }
+    // Warn if legacy routes.json exists — schema is incompatible (HashMap<host,url>
+    // vs Vec<MapRemoteRule>), so no auto-migration is possible.
+    if path.join("routes.json").exists() {
+        tracing::warn!(
+            "Legacy routes.json found but cannot be auto-migrated to map_remote_rules.json. \
+             Re-create your routing rules via the Rules UI."
+        );
+    }
+    Vec::new()
 }
 
 pub async fn save_map_remote_rules(path: &Path, rules: &[MapRemoteRule]) -> io::Result<()> {
