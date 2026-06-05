@@ -55,3 +55,4 @@ PRD.md
 ROADMAP.md
 src/design/certs/root.crt
 src/design/certs/root.key
+.gstack/
