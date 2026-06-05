@@ -5,9 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::middleware::matcher::{Location, MatchTarget};
-use crate::middleware::{
-    InterceptedResponse, Middleware, MiddlewareAction, RequestContext, ResponseContext,
-};
+use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
 use bytes::Bytes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,7 +3,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { sampleSession, importSession } = require('./helpers');
+const { sampleSession, importSession, resetWorkspace } = require('./helpers');
 
 test.describe('Import / Export flows', () => {
   test('export HAR from UI downloads file', async ({ page }) => {
@@ -29,6 +29,7 @@ test.describe('Import / Export flows', () => {
 
   test('import JSON from UI populates sessions', async ({ page, request }) => {
     await request.delete('/admin/sessions');
+    await resetWorkspace(request);
     const id = `ui-json-import-${Date.now()}`;
     const filePath = path.join(os.tmpdir(), `${id}.json`);
     fs.writeFileSync(filePath, JSON.stringify([

@@ -2,8 +2,8 @@
 FROM node:22-bookworm-slim AS ui-builder
 
 WORKDIR /ui
-COPY src/design/package.json src/design/yarn.lock ./
-RUN corepack enable && yarn install --frozen-lockfile
+COPY src/design/package.json src/design/yarn.lock src/design/.yarnrc.yml ./
+RUN corepack enable && yarn install --immutable
 COPY src/design ./
 RUN yarn build
 

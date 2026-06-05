@@ -60,6 +60,7 @@ impl CertificateAuthority {
     fn root_params() -> CertificateParams {
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.use_authority_key_identifier_extension = true;
         params.distinguished_name = DistinguishedName::new();
         params
             .distinguished_name

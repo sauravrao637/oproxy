@@ -407,34 +407,24 @@ pub trait Middleware: Send + Sync {
 
 // ── Unified Context Helpers ─────────────────────────────────────────────────
 
-/// Case-insensitive find of the canonical key as stored in the headers map.
-pub fn find_header_key(headers: &HashMap<String, String>, name: &str) -> Option<String> {
-    headers
-        .keys()
-        .find(|k| k.eq_ignore_ascii_case(name))
-        .cloned()
+pub fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(name).cloned()
 }
 
-pub fn header_value(headers: &HashMap<String, String>, name: &str) -> Option<String> {
-    find_header_key(headers, name).and_then(|k| headers.get(&k).cloned())
+pub fn set_header(headers: &mut HeaderMap, name: &str, value: String) {
+    headers.insert(name, value);
 }
 
-pub fn set_header(headers: &mut HashMap<String, String>, name: &str, value: String) {
-    let key = find_header_key(headers, name).unwrap_or_else(|| name.to_lowercase());
-    headers.insert(key, value);
+pub fn append_header(headers: &mut HeaderMap, name: &str, value: &str) {
+    let joined = match headers.get(name) {
+        Some(existing) if !existing.is_empty() => format!("{existing}, {value}"),
+        _ => value.to_string(),
+    };
+    headers.insert(name, joined);
 }
 
-pub fn append_header(headers: &mut HashMap<String, String>, name: &str, value: &str) {
-    let key = find_header_key(headers, name).unwrap_or_else(|| name.to_lowercase());
-    let existing = headers.get(&key).cloned().unwrap_or_default();
-    let sep = if existing.is_empty() { "" } else { ", " };
-    headers.insert(key, format!("{existing}{sep}{value}"));
-}
-
-pub fn remove_header(headers: &mut HashMap<String, String>, name: &str) {
-    if let Some(key) = find_header_key(headers, name) {
-        headers.remove(&key);
-    }
+pub fn remove_header(headers: &mut HeaderMap, name: &str) {
+    headers.remove(name);
 }
 
 pub fn path_of(uri: &str) -> &str {

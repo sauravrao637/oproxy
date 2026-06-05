@@ -1,5 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
+const { resetWorkspace } = require('./helpers');
 
 const RAIL_VIEWS = [
   { label: 'Compose', heading: 'Compose' },
@@ -16,7 +17,8 @@ const RAIL_VIEWS = [
 ];
 
 test.describe('Sidebar navigation', () => {
-  test('sessions view is active by default', async ({ page }) => {
+  test('sessions view is active by default', async ({ page, request }) => {
+    await resetWorkspace(request);
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Sessions', exact: true })).toHaveClass(/active/);
     await expect(page.locator('table')).toBeVisible();

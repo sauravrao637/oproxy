@@ -7,6 +7,26 @@ async function gotoRail(page, name, heading = name) {
   await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
 }
 
+async function resetWorkspace(request) {
+  await request.patch('/admin/workspace', {
+    data: {
+      patch: {
+        active_surface: 'sessions',
+        sessions_view: {
+          query: '',
+          regex: false,
+          methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'CONNECT', 'OPTIONS', 'HEAD'],
+          status_buckets: ['2', '3', '4', '5', '-'],
+          host_focus: [],
+          host_filter: null,
+          sort: null,
+          selected_session_id: null,
+        },
+      },
+    },
+  });
+}
+
 function sampleSession(overrides = {}) {
   const id = overrides.id || `session-${Date.now()}`;
   const host = overrides.host || 'example.test';
@@ -49,4 +69,4 @@ async function importSession(request, session, merge = false) {
   expect(res.ok()).toBeTruthy();
 }
 
-module.exports = { gotoRail, sampleSession, importSession };
+module.exports = { gotoRail, sampleSession, importSession, resetWorkspace };

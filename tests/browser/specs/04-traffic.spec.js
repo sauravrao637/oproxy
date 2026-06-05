@@ -1,10 +1,11 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { sampleSession, importSession } = require('./helpers');
+const { sampleSession, importSession, resetWorkspace } = require('./helpers');
 
 test.describe('Traffic view', () => {
   test.beforeEach(async ({ request }) => {
     await request.delete('/admin/sessions');
+    await resetWorkspace(request);
   });
 
   test.afterEach(async ({ request }) => {
@@ -34,10 +35,15 @@ test.describe('Traffic view', () => {
     const search = page.getByPlaceholder('Filter requests by method, host, path, status, or tag');
     await page.keyboard.press('Control+f');
     await expect(search).toBeFocused();
+
+    // Filtering is server-side: fill before the re-fetch so the empty result + active
+    // search state both reach the app at the same time. The server genuinely returns
+    // nothing for a term that matches no stored session.
     await search.fill('does-not-match');
-    await expect(page.getByText('No sessions match the current filters.')).toBeVisible();
+    await expect(page.getByText('No sessions match the current filters.')).toBeVisible({ timeout: 8000 });
+
     await search.fill('traffic-search.example.com');
-    await expect(page.locator('tbody tr')).toHaveCount(1);
+    await expect(page.locator('tbody tr')).toHaveCount(1, { timeout: 8000 });
   });
 
   test('status chips can filter and reset', async ({ page, request }) => {

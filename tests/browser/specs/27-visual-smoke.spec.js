@@ -1,6 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { gotoRail, importSession, sampleSession } = require('./helpers');
+const { gotoRail, importSession, sampleSession, resetWorkspace } = require('./helpers');
 
 function pngSize(buffer) {
   expect(buffer.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
@@ -50,6 +50,7 @@ test.describe('desktop visual smoke', () => {
       method: 'POST',
       requestBody: '{"name":"visual"}',
     }));
+    await resetWorkspace(request);
     await page.goto('/');
     await expect(page.locator('tbody tr').filter({ hasText: 'visual.example.com' })).toBeVisible();
     await expectDesktopChrome(page);

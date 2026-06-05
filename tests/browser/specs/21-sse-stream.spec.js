@@ -1,5 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
+const { resetWorkspace } = require('./helpers');
 
 test.describe('SSE session stream', () => {
   test('/api/sessions/stream returns event-stream content-type', async ({ request }) => {
@@ -14,6 +15,7 @@ test.describe('SSE session stream', () => {
   });
 
   test('UI opens SSE on load and shows session imported after load', async ({ page }) => {
+    await resetWorkspace(page.request);
     await page.goto('/');
     await page.waitForTimeout(500);
     // Clear

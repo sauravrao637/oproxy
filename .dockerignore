@@ -6,6 +6,7 @@ target
 **/target
 
 src/design/node_modules
+src/design/.yarn
 tests/browser/node_modules
 node_modules
 
