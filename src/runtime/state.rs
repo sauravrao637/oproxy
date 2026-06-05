@@ -201,7 +201,9 @@ pub(super) async fn build_runtime_services(
         // A second idempotent inspection pass records responses from short-circuit
         // middlewares above (Map Local, Mock, Lua) that stop request execution after
         // the primary inspection pass has recorded the request.
-        chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager.clone())));
+        chain.add_middleware(Arc::new(InspectionMiddleware::new_response_pass(
+            session_manager.clone(),
+        )));
     }
 
     let state = Arc::new(AppState {

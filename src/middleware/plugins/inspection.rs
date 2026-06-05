@@ -5,18 +5,31 @@ use uuid::Uuid;
 
 pub struct InspectionMiddleware {
     session_manager: SharedSessionManager,
+    label: &'static str,
 }
 
 impl InspectionMiddleware {
     pub fn new(session_manager: SharedSessionManager) -> Self {
-        Self { session_manager }
+        Self {
+            session_manager,
+            label: "InspectionMiddleware",
+        }
+    }
+
+    /// Second-pass instance that records responses from short-circuit middlewares
+    /// (MapLocal, Mock, Lua). Shown as a distinct entry in /admin/plugins.
+    pub fn new_response_pass(session_manager: SharedSessionManager) -> Self {
+        Self {
+            session_manager,
+            label: "InspectionMiddleware:response-pass",
+        }
     }
 }
 
 #[async_trait]
 impl Middleware for InspectionMiddleware {
     fn name(&self) -> &str {
-        "InspectionMiddleware"
+        self.label
     }
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
