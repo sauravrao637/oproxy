@@ -7,13 +7,16 @@
 //! `file_path` can point to either a **file** (always served verbatim) or a
 //! **directory** (the request path is appended and the resulting file is
 //! served, after path-traversal checks).
+//!
+//! When a base path is configured, relative paths are resolved from it;
+//! absolute paths work as before for backward compatibility.
 
 use crate::middleware::matcher::{Location, MatchTarget};
 use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -44,12 +47,35 @@ pub type SharedMapLocalRules = Arc<RwLock<Vec<MapLocalRule>>>;
 
 pub struct MapLocalMiddleware {
     pub rules: SharedMapLocalRules,
+    pub base_path: Option<PathBuf>,
 }
 
 impl MapLocalMiddleware {
+    #[allow(dead_code)]
     pub fn new(rules: Vec<MapLocalRule>) -> Self {
         Self {
             rules: Arc::new(RwLock::new(rules)),
+            base_path: None,
+        }
+    }
+
+    pub fn with_base_path(rules: Vec<MapLocalRule>, base_path: Option<PathBuf>) -> Self {
+        Self {
+            rules: Arc::new(RwLock::new(rules)),
+            base_path,
+        }
+    }
+
+    /// Resolve a file_path using the base_path if configured.
+    /// Relative paths are joined with base_path; absolute paths are used as-is.
+    fn resolve_path(&self, file_path: &str) -> PathBuf {
+        let path = Path::new(file_path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(ref base) = self.base_path {
+            base.join(file_path)
+        } else {
+            path.to_path_buf()
         }
     }
 }
@@ -67,7 +93,7 @@ impl Middleware for MapLocalMiddleware {
             if !rule.location.matches(&target) {
                 continue;
             }
-            let file_path = Path::new(&rule.file_path);
+            let file_path = self.resolve_path(&rule.file_path);
             // Verify the root exists before trying to serve from it.
             if !file_path.exists() {
                 tracing::warn!(
@@ -300,5 +326,44 @@ mod tests {
         let mut ctx2 = req("h", "/static/x.js");
         assert_eq!(mw.on_request(&mut ctx2).await, MiddlewareAction::Continue);
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    #[tokio::test]
+    async fn base_path_resolves_relative_paths() {
+        let base_dir = std::env::temp_dir().join("map_local_base_test");
+        tokio::fs::create_dir_all(&base_dir).await.unwrap();
+        tokio::fs::write(base_dir.join("api.json"), b"[1,2,3]")
+            .await
+            .unwrap();
+
+        let mw = MapLocalMiddleware::with_base_path(
+            vec![rule("local.test", None, "api.json")],
+            Some(base_dir.clone()),
+        );
+        let mut ctx = req("local.test", "/any");
+        let action = mw.on_request(&mut ctx).await;
+        assert_eq!(action, MiddlewareAction::StopAndReturn);
+        let mock = ctx.mock_response.unwrap();
+        assert_eq!(&mock.body[..], b"[1,2,3]");
+        let _ = tokio::fs::remove_dir_all(&base_dir).await;
+    }
+
+    #[tokio::test]
+    async fn base_path_still_allows_absolute_paths() {
+        let base_dir = std::env::temp_dir().join("map_local_base_abs");
+        tokio::fs::create_dir_all(&base_dir).await.unwrap();
+        let abs_file = base_dir.join("absolute.json");
+        tokio::fs::write(&abs_file, b"absolute").await.unwrap();
+
+        let mw = MapLocalMiddleware::with_base_path(
+            vec![rule("local.test", None, abs_file.to_str().unwrap())],
+            Some(base_dir.clone()),
+        );
+        let mut ctx = req("local.test", "/any");
+        let action = mw.on_request(&mut ctx).await;
+        assert_eq!(action, MiddlewareAction::StopAndReturn);
+        let mock = ctx.mock_response.unwrap();
+        assert_eq!(&mock.body[..], b"absolute");
+        let _ = tokio::fs::remove_dir_all(&base_dir).await;
     }
 }
