@@ -70,6 +70,10 @@ fn default_allow_private_admin_egress() -> bool {
     false
 }
 
+fn default_map_local_base_path() -> Option<PathBuf> {
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogConfig {
     /// Log level: trace, debug, info, warn, error (overridden by RUST_LOG).
@@ -160,6 +164,11 @@ pub struct Config {
     /// Port to listen for SOCKS5 connections. Disabled when None (default).
     #[serde(default)]
     pub socks5_port: Option<u16>,
+    /// Base directory for map_local fixture files. When set, MapLocalRule.file_path
+    /// is resolved relative to this directory. When unset, paths are absolute.
+    /// In containerized deployments, set via OPROXY_MAP_LOCAL_BASE_PATH env var.
+    #[serde(default = "default_map_local_base_path")]
+    pub map_local_base_path: Option<PathBuf>,
     /// Logging configuration.
     #[serde(default)]
     pub log: LogConfig,
@@ -199,6 +208,7 @@ impl Default for Config {
             allow_private_admin_egress: default_allow_private_admin_egress(),
             upstream_proxy: None,
             socks5_port: None,
+            map_local_base_path: default_map_local_base_path(),
         }
     }
 }
@@ -311,6 +321,15 @@ impl Config {
                 "allow_private_admin_egress is enabled with remote admin - admin forward/webhook requests can reach private networks"
                     .to_string(),
             );
+        }
+
+        if let Some(ref path) = self.map_local_base_path {
+            if !path.exists() {
+                warnings.push(format!(
+                    "map_local_base_path '{}' does not exist - map_local rules will fail at runtime",
+                    path.display()
+                ));
+            }
         }
 
         warnings
@@ -440,6 +459,12 @@ impl Config {
                 Err(_) => {
                     warn!(value = %val, "OPROXY_SHUTDOWN_GRACE_SECS is not a valid timeout, ignoring")
                 }
+            }
+        }
+        if let Ok(val) = std::env::var("OPROXY_MAP_LOCAL_BASE_PATH") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                config.map_local_base_path = Some(PathBuf::from(trimmed));
             }
         }
 
@@ -785,5 +810,51 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(cfg.port, 7777);
         assert!(cfg.mitm.enabled);
+    }
+
+    #[test]
+    fn map_local_base_path_nonexistent_warns() {
+        let cfg = Config {
+            map_local_base_path: Some(PathBuf::from("/nonexistent/fixtures")),
+            ..Config::default()
+        };
+        let warnings = cfg.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("map_local_base_path") && w.contains("does not exist"))
+        );
+    }
+
+    #[test]
+    fn map_local_base_path_existing_no_warn() {
+        let base = std::env::temp_dir().join("map_local_test_base");
+        std::fs::create_dir_all(&base).unwrap();
+        let cfg = Config {
+            map_local_base_path: Some(base.clone()),
+            ..Config::default()
+        };
+        let warnings = cfg.validate();
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("map_local_base_path"))
+        );
+        let _ = std::fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn oproxy_map_local_base_path_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
+            std::env::set_var("OPROXY_MAP_LOCAL_BASE_PATH", "/fixtures");
+        }
+        let cfg = Config::load();
+        unsafe {
+            std::env::remove_var("OPROXY_CONFIG");
+            std::env::remove_var("OPROXY_MAP_LOCAL_BASE_PATH");
+        }
+        assert_eq!(cfg.map_local_base_path, Some(PathBuf::from("/fixtures")));
     }
 }

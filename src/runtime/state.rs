@@ -190,7 +190,11 @@ pub(super) async fn build_runtime_services(
     {
         let mut chain = middleware_chain.write().await;
         chain.add_middleware(Arc::new({
-            let mut mw = MapLocalMiddleware::new(vec![]);
+            let mw = MapLocalMiddleware::with_base_path(
+                vec![],
+                config.map_local_base_path.clone(),
+            );
+            let mut mw = mw;
             mw.rules = map_local_rules.clone();
             mw
         }));
