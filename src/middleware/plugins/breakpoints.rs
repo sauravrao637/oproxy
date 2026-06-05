@@ -423,6 +423,9 @@ impl Middleware for BreakpointMiddleware {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Write back so InspectionMiddleware reuses the same ID rather than
+        // generating a fresh one and creating a duplicate ghost session.
+        ctx.session_id = Some(session_id.clone());
 
         // Record the request immediately so it appears in the sessions list as paused
         self.session_manager.record_request_with_source(

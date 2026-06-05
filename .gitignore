@@ -7,6 +7,7 @@ src/design/dist/
 # Generated automatically on first run — NEVER commit the private key.
 certs/root.key
 certs/root.crt
+tests/certs/
 
 # ── Runtime state ──────────────────────────────────────────────────────────────
 # Created and managed by the proxy at runtime; user-specific.

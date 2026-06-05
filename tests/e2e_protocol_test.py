@@ -1388,7 +1388,10 @@ def section_misc():
 
     def t_sse_endpoint(name):
         try:
+            # /api/sessions/stream exposes session data and requires admin auth.
+            headers = {"x-oproxy-admin-token": ADMIN_TOKEN} if ADMIN_TOKEN else {}
             r = requests.get(f"{BASE_URL}/api/sessions/stream",
+                             headers=headers,
                              stream=True, timeout=2)
             ct = r.headers.get("content-type", "")
             assert "text/event-stream" in ct, f"wrong content-type: {ct}"

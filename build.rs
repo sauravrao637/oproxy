@@ -3,26 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    let design_sources = [
-        "src/design/package.json",
-        "src/design/package-lock.json",
-        "src/design/build.mjs",
-        "src/design/index.html",
-        "src/design/app.jsx",
-        "src/design/compose.jsx",
-        "src/design/detail-panel.jsx",
-        "src/design/entry.jsx",
-        "src/design/icons.jsx",
-        "src/design/redaction.jsx",
-        "src/design/sessions-table.jsx",
-        "src/design/styles.css",
-        "src/design/surfaces-extra.jsx",
-        "src/design/surfaces.jsx",
-        "src/design/tweaks-panel.jsx",
-    ];
-    for path in design_sources {
-        println!("cargo:rerun-if-changed={path}");
-    }
+    // Only the dist outputs are direct inputs to this script: when they change
+    // (i.e. after a `yarn build`), Cargo re-runs build.rs to re-copy them into
+    // OUT_DIR. Source files (jsx, css) are not listed here — they are not direct
+    // inputs to build.rs; they affect the dist only after an explicit yarn build,
+    // at which point the dist timestamps change and trigger the rerun correctly.
     println!("cargo:rerun-if-changed=src/design/dist/index.html");
     println!("cargo:rerun-if-changed=src/design/dist/assets/app.js");
     println!("cargo:rerun-if-changed=src/design/dist/assets/app.css");
@@ -30,28 +15,24 @@ fn main() {
     let index = Path::new("src/design/dist/index.html");
     let app_js = Path::new("src/design/dist/assets/app.js");
     let app_css = Path::new("src/design/dist/assets/app.css");
+    let outputs = [index, app_js, app_css];
 
-    if needs_design_build(&design_sources, &[index, app_js, app_css]) {
+    let dist_missing = outputs.iter().any(|p| !p.exists());
+
+    if dist_missing {
         let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
         if !Path::new("src/design/node_modules").exists() {
-            let install = Command::new(npm)
+            let status = Command::new(npm)
                 .args(["ci", "--prefix", "src/design"])
                 .status()
-                .expect("failed to run npm ci --prefix src/design");
-            assert!(
-                install.success(),
-                "npm ci --prefix src/design failed; install Node.js/npm or run the UI build manually"
-            );
+                .expect("failed to run npm ci — install Node.js/npm or run `yarn --cwd src/design install` manually");
+            assert!(status.success(), "npm ci failed");
         }
-
-        let build = Command::new(npm)
+        let status = Command::new(npm)
             .args(["run", "build", "--prefix", "src/design"])
             .status()
-            .expect("failed to run npm run build --prefix src/design");
-        assert!(
-            build.success(),
-            "npm run build --prefix src/design failed; Rust compile requires built UI assets"
-        );
+            .expect("failed to run npm run build — install Node.js/npm or run `yarn --cwd src/design build` manually");
+        assert!(status.success(), "npm run build failed");
     }
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
@@ -70,24 +51,4 @@ pub const APP_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/design-dist/ass
 "#,
     )
     .expect("failed to write generated design asset module");
-}
-
-fn needs_design_build(sources: &[&str], outputs: &[&Path]) -> bool {
-    if outputs.iter().any(|path| !path.exists()) {
-        return true;
-    }
-
-    let oldest_output = outputs
-        .iter()
-        .filter_map(|path| fs::metadata(path).ok()?.modified().ok())
-        .min();
-    let newest_source = sources
-        .iter()
-        .filter_map(|path| fs::metadata(path).ok()?.modified().ok())
-        .max();
-
-    match (newest_source, oldest_output) {
-        (Some(source), Some(output)) => source > output,
-        _ => true,
-    }
 }

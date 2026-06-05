@@ -165,9 +165,10 @@ pub(super) async fn post_login(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Only allow paths that start with `/` but not `//` (open-redirect guard).
-/// Redirecting to `/login` would create a loop, so we fall back to `/` there.
+/// Block any `/login` variant (exact, with query, or with fragment) to prevent
+/// a post-login redirect back to the login error page.
 fn sanitize_next(next: &str) -> &str {
-    if next.starts_with('/') && !next.starts_with("//") && next != "/login" {
+    if next.starts_with('/') && !next.starts_with("//") && !next.starts_with("/login") {
         next
     } else {
         "/"

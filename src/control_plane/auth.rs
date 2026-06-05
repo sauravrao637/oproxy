@@ -68,12 +68,13 @@ pub(super) async fn admin_auth_layer(
         })
         .unwrap_or_else(|| peer_ip.is_some_and(|ip| ip.is_loopback()));
 
-    // Public paths that don't require authentication even on admin hosts
+    // Public paths that don't require authentication even on admin hosts.
+    // /api/* is intentionally excluded: those routes expose session data and must
+    // be protected by the same cookie/token auth as the rest of the admin UI.
     let is_ui_or_public_api = matches!(
         req.uri().path(),
         "/" | "/login" | "/health" | "/robots.txt" | "/favicon.ico" | "/setup" | "/setup/mobile"
-    ) || req.uri().path().starts_with("/api/")
-        || req.uri().path().starts_with("/assets/");
+    ) || req.uri().path().starts_with("/assets/");
 
     // These admin paths are also public (CA cert download, setup network info)
     let is_public_admin_path =
