@@ -1,10 +1,11 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { sampleSession, importSession } = require('./helpers');
+const { sampleSession, importSession, resetWorkspace } = require('./helpers');
 
 test.describe('Session detail panel', () => {
   test.beforeEach(async ({ page, request }) => {
     await request.delete('/admin/sessions');
+    await resetWorkspace(request);
     await importSession(request, sampleSession({
       id: 'detail-test-sess',
       host: 'detail.example.com',

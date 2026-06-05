@@ -785,20 +785,31 @@ function App() {
   const hiddenSessionCount = Math.max(0, filtered.length - renderedSessions.length);
 
   const selected = selectedId ? (detailById[selectedId] || sessions.find(s => s.id === selectedId)) : null;
+  const hasActiveFilter =
+    search.trim().length > 0 ||
+    !!hostFilter ||
+    (Array.isArray(hostFocus) ? hostFocus.length > 0 : !!hostFocus) ||
+    methodFilter.size < METHODS.length ||
+    statusFilter.size < STATUS_BUCKETS.length;
   const emptyState = sessionsError
     ? {
         title: 'Session API unavailable.',
         hint: 'Check that oproxy is running, then reload this page.',
       }
-    : sessions.length === 0
+    : sessions.length === 0 && hasActiveFilter
       ? {
-          title: 'No sessions captured yet.',
-          hint: 'Send traffic through oproxy to populate this table.',
-        }
-      : {
           title: 'No sessions match the current filters.',
           hint: 'Try clearing search or method filters.',
-        };
+        }
+      : sessions.length === 0
+        ? {
+            title: 'No sessions captured yet.',
+            hint: 'Send traffic through oproxy to populate this table.',
+          }
+        : {
+            title: 'No sessions match the current filters.',
+            hint: 'Try clearing search or method filters.',
+          };
 
   const RAIL_ORDER_LOCAL = ['sessions','compose','rules','breakpoints','mock','lua','inspector','dns','capture','webhooks','ca','settings'];
 

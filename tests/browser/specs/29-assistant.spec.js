@@ -125,8 +125,8 @@ test.describe('Assistant', () => {
     await page.getByLabel('Assistant message').fill('show failed requests');
     await page.getByRole('button', { name: /Send/ }).click();
 
-    await expect(page.getByText(/Applied Sessions filter/)).toBeVisible();
-    await expect(page.getByText(/switched the UI to Sessions/)).toBeVisible();
+    await expect(page.getByText(/Applied Sessions filter/).first()).toBeVisible();
+    await expect(page.getByText(/I updated the UI/)).toBeVisible();
     await expect(page.getByRole('button', { name: '2xx' })).not.toHaveClass(/ on/);
     await expect(page.getByRole('button', { name: '4xx' })).toHaveClass(/ on/);
     await expect(page.getByRole('button', { name: '5xx' })).toHaveClass(/ on/);

@@ -416,9 +416,11 @@ pub fn set_header(headers: &mut HeaderMap, name: &str, value: String) {
 }
 
 pub fn append_header(headers: &mut HeaderMap, name: &str, value: &str) {
-    let existing = headers.get(name).cloned().unwrap_or_default();
-    let sep = if existing.is_empty() { "" } else { ", " };
-    headers.insert(name, format!("{existing}{sep}{value}"));
+    let joined = match headers.get(name) {
+        Some(existing) if !existing.is_empty() => format!("{existing}, {value}"),
+        _ => value.to_string(),
+    };
+    headers.insert(name, joined);
 }
 
 pub fn remove_header(headers: &mut HeaderMap, name: &str) {

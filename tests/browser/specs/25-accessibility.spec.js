@@ -1,6 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { importSession, sampleSession } = require('./helpers');
+const { importSession, sampleSession, resetWorkspace } = require('./helpers');
 
 async function expectNoUnnamedInteractive(page, context) {
   const offenders = await page.evaluate(() => {
@@ -41,6 +41,7 @@ test.describe('desktop accessibility smoke', () => {
   test.beforeEach(async ({ request }) => {
     await request.delete('/admin/sessions');
     await request.post('/admin/capture-filter', { data: { mode: 'disabled', hosts: [] } });
+    await resetWorkspace(request);
   });
 
   test.afterEach(async ({ request }) => {

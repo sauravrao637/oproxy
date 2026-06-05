@@ -1,5 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
+const { resetWorkspace } = require('./helpers');
 
 function makeSession(i) {
   const id = `large-capture-${i}`;
@@ -33,6 +34,7 @@ test.describe('Large captures', () => {
   test('session list paginates rendered rows for high-volume captures', async ({ page, request }) => {
     const sessions = Array.from({ length: 750 }, (_, i) => makeSession(i));
     await request.post('/admin/sessions/import', { data: { sessions, merge: true } });
+    await resetWorkspace(request);
 
     await page.goto('/');
     await page.getByPlaceholder(/Filter requests/).fill('large.example.com');

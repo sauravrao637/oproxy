@@ -1,6 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { gotoRail } = require('./helpers');
+const { gotoRail, resetWorkspace } = require('./helpers');
 
 const location = (overrides = {}) => ({
   host: null,
@@ -14,11 +14,18 @@ const location = (overrides = {}) => ({
 });
 
 test.describe('Rules / mapping and access', () => {
+  test.beforeEach(async ({ request }) => {
+    await resetWorkspace(request);
+    // Clean up all rule-sets so the empty-state text is visible
+    const ruleSets = await (await request.get('/admin/rule-sets')).json();
+    for (const r of ruleSets) await request.delete(`/admin/rule-sets/${r.id}`);
+  });
+
   test.afterEach(async ({ request }) => {
-    for (const endpoint of ['map-remote-rules', 'map-local-rules', 'access-rules']) {
+    for (const endpoint of ['map-remote-rules', 'map-local-rules', 'access-rules', 'rule-sets']) {
       const rules = await (await request.get(`/admin/${endpoint}`)).json();
       for (const rule of rules) {
-        if (String(rule.name || '').startsWith('ui-')) {
+        if (String(rule.name || '').startsWith('ui-') || String(rule.name || '').startsWith('Assistant')) {
           await request.delete(`/admin/${endpoint}/${rule.id}`);
         }
       }

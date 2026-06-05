@@ -1,5 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
+const { resetWorkspace } = require('./helpers');
 
 const SESSIONS_API = '**/api/sessions?*';
 
@@ -27,7 +28,8 @@ const sessionFixture = {
 };
 
 test.describe('beta UI smoke', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetWorkspace(request);
     await page.goto('/');
   });
 
@@ -80,6 +82,12 @@ test.describe('beta UI smoke', () => {
       });
     });
     await page.reload();
+    // Switch mock to return empty sessions before filling filter, so the re-fetch after
+    // workspace patch returns no results (server-side filtering, not client-side).
+    await page.unroute(SESSIONS_API);
+    await page.route(SESSIONS_API, async route => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: [] }) });
+    });
     await page.getByPlaceholder('Filter requests by method, host, path, status, or tag').fill('does-not-match');
     await expect(page.getByText('No sessions match the current filters.')).toBeVisible();
 

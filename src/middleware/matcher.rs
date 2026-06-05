@@ -16,11 +16,6 @@
 //! [`MatchMode`]: glob (`*` = any run, `?` = single char, anchored/full-string)
 //! by default, or regex (unanchored `is_match`) when opted in.
 
-// TODO(rules-phase2): remove once the unified rule engine consumes this module.
-// Until the rewrite/map-local/map-remote/block-list rules are wired into the
-// middleware chain, these items have no non-test caller in the binary target.
-#![allow(dead_code)]
-
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;

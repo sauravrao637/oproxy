@@ -1,6 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { gotoRail, importSession, sampleSession } = require('./helpers');
+const { gotoRail, importSession, sampleSession, resetWorkspace } = require('./helpers');
 
 test.describe('Critical control semantics', () => {
   test.afterEach(async ({ request }) => {
@@ -15,6 +15,7 @@ test.describe('Critical control semantics', () => {
   });
 
   test('primary navigation and session details affordances are discoverable', async ({ page, request }) => {
+    await resetWorkspace(request);
     const id = `ui-affordance-${Date.now()}`;
     await importSession(request, sampleSession({
       id,

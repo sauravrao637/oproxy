@@ -1,6 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 const http = require('http');
+const { resetWorkspace } = require('./helpers');
 
 async function withServer(handler, run) {
   const server = http.createServer(handler);
@@ -43,6 +44,10 @@ function session(overrides = {}) {
 }
 
 test.describe('P1 developer workflows', () => {
+  test.beforeEach(async ({ request }) => {
+    await resetWorkspace(request);
+  });
+
   test('session detail exposes redacted/raw views, binary body state, and inspector data', async ({ page, request }) => {
     const id = `p1-detail-${Date.now()}`;
     await request.post('/admin/sessions/import', {
