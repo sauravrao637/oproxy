@@ -323,13 +323,13 @@ impl Config {
             );
         }
 
-        if let Some(ref path) = self.map_local_base_path {
-            if !path.exists() {
-                warnings.push(format!(
-                    "map_local_base_path '{}' does not exist - map_local rules will fail at runtime",
-                    path.display()
-                ));
-            }
+        if let Some(ref path) = self.map_local_base_path
+            && !path.exists()
+        {
+            warnings.push(format!(
+                "map_local_base_path '{}' does not exist - map_local rules will fail at runtime",
+                path.display()
+            ));
         }
 
         warnings
@@ -835,11 +835,7 @@ mod tests {
             ..Config::default()
         };
         let warnings = cfg.validate();
-        assert!(
-            !warnings
-                .iter()
-                .any(|w| w.contains("map_local_base_path"))
-        );
+        assert!(!warnings.iter().any(|w| w.contains("map_local_base_path")));
         let _ = std::fs::remove_dir(&base);
     }
 

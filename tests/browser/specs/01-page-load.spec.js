@@ -1,7 +1,12 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
+const { resetWorkspace } = require('./helpers');
 
 test.describe('Page load', () => {
+  test.beforeEach(async ({ request }) => {
+    await resetWorkspace(request);
+  });
+
   test('loads the current app shell', async ({ page }) => {
     await page.goto('/');
     await expect(page).toHaveTitle(/oproxy/);

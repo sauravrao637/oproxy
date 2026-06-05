@@ -169,10 +169,10 @@ pub fn diff_exchanges(a: &Exchange, b: &Exchange) -> SessionDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::HeaderMap;
     use crate::middleware::{RequestContext, ResponseContext};
     use crate::session::{Exchange, InspectionMetrics, SessionSource};
     use chrono::Utc;
-    use crate::middleware::HeaderMap;
 
     fn make_exchange(
         id: &str,
@@ -221,6 +221,7 @@ mod tests {
             note: None,
             tags: vec![],
             inspector_data: None,
+            paused_at: None,
         }
     }
 

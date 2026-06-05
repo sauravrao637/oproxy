@@ -35,6 +35,7 @@ Configuration precedence is:
 | `allow_private_admin_egress` | `OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS` | `false` | `false` |
 | `upstream_proxy` | none | unset | unset |
 | `socks5_port` | none | unset | `1080` |
+| `map_local_base_path` | `OPROXY_MAP_LOCAL_BASE_PATH` | unset | unset |
 
 `OPROXY_CONFIG` selects the YAML file itself.
 
@@ -83,6 +84,7 @@ socks5_port: 1080
 max_sessions: 10000
 max_retained_body_bytes: 67108864
 upstream_proxy:
+map_local_base_path: /map-local
 ```
 
 

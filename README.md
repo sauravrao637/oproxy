@@ -123,6 +123,7 @@ For browser HTTPS capture, install the CA from `http://127.0.0.1:8080/admin/ca` 
 - [HTTPS MITM](docs/https-mitm.md)
 - [Compose](docs/compose.md)
 - [Assistant](docs/assistant.md)
+- [Map Local](docs/map-local.md) — serve local fixture files for testing
 - [DNS overrides](docs/dns-overrides.md)
 - [SOCKS5](docs/socks5.md)
 - [Configuration](docs/configuration.md)

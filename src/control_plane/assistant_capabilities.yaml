@@ -224,17 +224,24 @@ features:
       - Open the Rules rail item.
       - Choose the Map Local tab.
       - Click Add rule.
-      - Set the source Location and the absolute local file or directory path, then save.
+      - Set the Location matcher (host, path, method).
+      - "For the Local path: type a file/directory path, or click upload for binary files, or paste to type content inline."
+      - Save the rule.
     use_when:
       - The user wants fixture files, static JSON, images, or local assets returned for matching traffic.
       - The user wants offline frontend testing against local responses.
+      - The user wants to serve mock data from files instead of typing responses.
     read_tools: [get_rules]
     action_endpoints: [/admin/map-local-rules]
     examples:
-      - serve /api/config from /tmp/config.json
-      - map static assets to a local directory
+      - serve /api/users from users.json
+      - map all /assets/* requests to a local directory
+      - serve static files for offline testing
     notes:
-      - file_path must be an absolute file or directory path accessible to the oproxy process/container.
+      - To create a fixture+rule in one step, propose POST /admin/map-local-rules with inline_body (text content); the server writes it to storage/map-local/ and points file_path at it.
+      - File mode serves the file verbatim; directory mode appends the request path to find the file inside it.
+      - Relative file_path resolves against OPROXY_MAP_LOCAL_BASE_PATH (if set) then storage/map-local/; absolute paths are used verbatim.
+      - Prefer inline_body on the rule over raw-body fixture endpoints (those are mainly for uploads/scripts).
       - For dynamic responses or sequences, use mock_server instead.
 
   - id: access_rules

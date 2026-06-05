@@ -12,8 +12,19 @@ pub(super) async fn security_headers(
     req: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
+    // Admin JSON carries no cache validators (ETag/Last-Modified), so a browser's
+    // default fetch() cache mode can serve a stale list right after a mutation.
+    // Mark these responses no-store so the UI always reflects the latest state.
+    // Static UI assets are left cacheable.
+    let is_admin = req.uri().path().starts_with("/admin");
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
+    if is_admin {
+        headers.insert(
+            "cache-control",
+            header::HeaderValue::from_static("no-store"),
+        );
+    }
     headers.insert(
         "x-content-type-options",
         header::HeaderValue::from_static("nosniff"),
@@ -52,20 +63,23 @@ pub(super) async fn admin_auth_layer(
                 state.config.allow_remote_admin,
                 remote_admin_token_configured,
                 peer_ip,
+                state.config.port,
             )
         })
         .unwrap_or_else(|| peer_ip.is_some_and(|ip| ip.is_loopback()));
 
-    let is_public_path = matches!(
+    // Public paths that don't require authentication even on admin hosts
+    let is_ui_or_public_api = matches!(
         req.uri().path(),
-        "/health"
-            | "/robots.txt"
-            | "/favicon.ico"
-            | "/admin/ca"
-            | "/setup"
-            | "/setup/mobile"
-            | "/admin/setup/network-info"
-    );
+        "/" | "/login" | "/health" | "/robots.txt" | "/favicon.ico" | "/setup" | "/setup/mobile"
+    ) || req.uri().path().starts_with("/api/")
+        || req.uri().path().starts_with("/assets/");
+
+    // These admin paths are also public (CA cert download, setup network info)
+    let is_public_admin_path =
+        matches!(req.uri().path(), "/admin/ca" | "/admin/setup/network-info");
+
+    let is_public_path = is_ui_or_public_api || is_public_admin_path;
 
     let is_exempt = is_public_path || (req.uri().scheme().is_some() && !is_admin_target);
 
@@ -100,6 +114,25 @@ pub(super) async fn admin_auth_layer(
             response.headers_mut().insert(header::SET_COOKIE, cookie);
         }
         return response;
+    }
+
+    // For browser navigation (Accept: text/html) redirect to the login page so the
+    // user gets a proper sign-in form instead of a raw 401 JSON response.
+    if is_browser_navigation(&req) {
+        let path_and_query = req
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        // Don't create a redirect loop if someone navigates directly to /login.
+        if path_and_query != "/login" {
+            let next_encoded = encode_next_param(path_and_query);
+            return (
+                axum::http::StatusCode::FOUND,
+                [(header::LOCATION, format!("/login?next={next_encoded}"))],
+            )
+                .into_response();
+        }
     }
 
     (
@@ -168,7 +201,7 @@ fn admin_token_cookie(token: &str) -> Option<header::HeaderValue> {
     .ok()
 }
 
-fn token_matches(candidate: &str, expected: &str) -> bool {
+pub(crate) fn token_matches(candidate: &str, expected: &str) -> bool {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
@@ -224,6 +257,7 @@ fn csrf_origin_allowed(req: &axum::extract::Request, config: &crate::config::Con
         config.allow_remote_admin,
         configured_admin_token(config).is_some(),
         peer_ip,
+        config.port,
     )
 }
 
@@ -304,6 +338,7 @@ pub async fn proxy_dispatch_layer(
                 state.config.allow_remote_admin,
                 remote_admin_token_configured,
                 peer_ip,
+                state.config.port,
             )
         })
         .unwrap_or_else(|| peer_ip.is_some_and(|ip| ip.is_loopback()));
@@ -340,10 +375,15 @@ fn is_management_host(
     allow_remote_admin: bool,
     remote_admin_token_configured: bool,
     peer_ip: Option<IpAddr>,
+    proxy_port: u16,
 ) -> bool {
     let host = host_without_port(host_header).to_ascii_lowercase();
+    let host_port = authority_port(host_header);
+
     if matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") {
-        return peer_ip.is_some_and(|ip| ip.is_loopback());
+        // For localhost, check both that the peer is loopback AND that the port matches the proxy port
+        // (to distinguish between forward-proxy requests to 127.0.0.1:OTHER_PORT vs the proxy itself at 127.0.0.1:PROXY_PORT)
+        return peer_ip.is_some_and(|ip| ip.is_loopback()) && host_port.unwrap_or(80) == proxy_port;
     }
 
     if !allow_remote_admin || !remote_admin_token_configured {
@@ -369,6 +409,30 @@ fn is_management_host(
         .any(|lan_host| host == lan_host.to_ascii_lowercase())
 }
 
+/// Returns true when the request looks like a browser top-level navigation
+/// (i.e. `Accept` header contains `text/html`). AJAX fetch() calls typically
+/// send `Accept: */*` or `Accept: application/json` and will not match.
+fn is_browser_navigation(req: &axum::extract::Request) -> bool {
+    req.headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// Percent-encode a path+query string for safe embedding as a URL query value.
+/// Unreserved characters (RFC 3986) are kept as-is; everything else is %-encoded.
+pub(crate) fn encode_next_param(s: &str) -> String {
+    s.bytes()
+        .fold(String::with_capacity(s.len() * 3), |mut out, b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
+                out.push(b as char);
+            } else {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("%{b:02X}"));
+            }
+            out
+        })
+}
+
 fn host_without_port(host_header: &str) -> &str {
     let host = host_header.trim();
     if let Some(rest) = host.strip_prefix('[') {
@@ -390,74 +454,96 @@ mod tests {
     fn management_host_accepts_localhost_and_configured_lan_bindings() {
         let loopback = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let remote = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)));
+        let proxy_port = 8080u16;
         assert!(is_management_host(
             "localhost:8080",
             "127.0.0.1",
             false,
             false,
-            loopback
+            loopback,
+            proxy_port
         ));
         assert!(is_management_host(
             "127.0.0.1:8080",
             "127.0.0.1",
             false,
             false,
-            loopback
+            loopback,
+            proxy_port
         ));
+        // IPv6 Host headers must use bracket notation ([::1]:port), as mandated by RFC 7230.
+        // Bare "::1:8080" is not a valid Host header value and is not supported.
         assert!(is_management_host(
             "[::1]:8080",
             "127.0.0.1",
             false,
             false,
-            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
-        ));
-        assert!(is_management_host(
-            "::1",
-            "127.0.0.1",
-            false,
-            false,
-            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            proxy_port
         ));
         // 0.0.0.0 as host header (Linux routes http://0.0.0.0:port to local machine)
         assert!(
-            is_management_host("0.0.0.0:8080", "0.0.0.0", false, false, loopback),
+            is_management_host(
+                "0.0.0.0:8080",
+                "0.0.0.0",
+                false,
+                false,
+                loopback,
+                proxy_port
+            ),
             "loopback peer with Host: 0.0.0.0 should reach admin UI"
         );
         assert!(
-            !is_management_host("0.0.0.0:8080", "0.0.0.0", true, true, remote),
+            !is_management_host("0.0.0.0:8080", "0.0.0.0", true, true, remote, proxy_port),
             "remote clients must not reach admin by sending Host: 0.0.0.0"
         );
         assert!(
-            !is_management_host("localhost:8080", "0.0.0.0", true, true, remote),
+            !is_management_host("localhost:8080", "0.0.0.0", true, true, remote, proxy_port),
             "remote clients must not reach admin by spoofing a localhost Host header"
+        );
+        // Forward-proxy request to localhost on different port should not be admin
+        assert!(
+            !is_management_host(
+                "127.0.0.1:9999",
+                "127.0.0.1",
+                false,
+                false,
+                loopback,
+                proxy_port
+            ),
+            "forward-proxy request to 127.0.0.1:9999 should not be admin when proxy is on 8080"
         );
         assert!(!is_management_host(
             "192.168.1.10:8080",
             "192.168.1.10",
             false,
             true,
-            remote
+            remote,
+            proxy_port
         ));
         assert!(is_management_host(
             "192.168.1.10:8080",
             "192.168.1.10",
             true,
             true,
-            remote
+            remote,
+            proxy_port
         ));
         assert!(!is_management_host(
             "192.168.1.10:8080",
             "192.168.1.10",
             true,
             false,
-            remote
+            remote,
+            proxy_port
         ));
         assert!(!is_management_host(
             "example.com",
             "127.0.0.1",
             true,
             true,
-            remote
+            remote,
+            proxy_port
         ));
     }
 
@@ -514,5 +600,35 @@ mod tests {
             .unwrap();
 
         assert!(req.uri().scheme().is_some());
+    }
+
+    #[tokio::test]
+    async fn security_headers_mark_admin_json_no_store_but_leave_assets_cacheable() {
+        use tower::ServiceExt;
+
+        async fn cache_control_for(path: &str) -> Option<String> {
+            let app = axum::Router::new()
+                .fallback(|| async { axum::response::Response::new(axum::body::Body::empty()) })
+                .layer(axum::middleware::from_fn(security_headers));
+            let req = axum::http::Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            res.headers()
+                .get("cache-control")
+                .map(|v| v.to_str().unwrap().to_string())
+        }
+
+        assert_eq!(
+            cache_control_for("/admin/map-local-rules").await.as_deref(),
+            Some("no-store"),
+            "admin JSON must be no-store so the UI never shows a stale list after a mutation"
+        );
+        assert_eq!(
+            cache_control_for("/assets/app.js").await,
+            None,
+            "static UI assets should stay cacheable"
+        );
     }
 }

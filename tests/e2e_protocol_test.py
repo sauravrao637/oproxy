@@ -29,11 +29,13 @@ except ImportError:
     import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
+import os
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8080
 SOCKS5_PORT = 1080
 BASE_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
 PROXY_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
+ADMIN_TOKEN = os.environ.get("OPROXY_ADMIN_TOKEN")  # If set, pass to admin API calls
 
 RESULTS = []
 PASS = "PASS"
@@ -109,6 +111,9 @@ def api(method, path, **kwargs):
                             timeout=10, **kwargs)
 
 def admin(method, path, **kwargs):
+    # If OPROXY_ADMIN_TOKEN is set, pass it in the request header
+    if ADMIN_TOKEN and "headers" not in kwargs:
+        kwargs["headers"] = {"x-oproxy-admin-token": ADMIN_TOKEN}
     return api(method, f"/admin{path}", **kwargs)
 
 def proxied(method, url, **kwargs):
@@ -689,7 +694,8 @@ def section_admin_token():
         r = admin("GET", "/config")
         assert r.ok, f"config endpoint returned {r.status_code}"
         cfg = r.json()
-        configured_token = cfg.get("admin_token") or ""
+        # Config doesn't expose token value; use ADMIN_TOKEN env var if available
+        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
         if not configured_token:
             record(name, SKIP, "no admin_token configured in running instance")
             return
@@ -709,7 +715,7 @@ def section_admin_token():
         r = admin("GET", "/config")
         assert r.ok
         cfg = r.json()
-        configured_token = cfg.get("admin_token") or ""
+        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
         if not configured_token:
             record(name, SKIP, "no admin_token configured")
             return
@@ -723,7 +729,7 @@ def section_admin_token():
         r = admin("GET", "/config")
         assert r.ok
         cfg = r.json()
-        configured_token = cfg.get("admin_token") or ""
+        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
         if not configured_token:
             record(name, SKIP, "no admin_token configured")
             return
@@ -1238,23 +1244,25 @@ def section_mappings():
             if str(r.get("name","")).startswith("ua-maplocal-"):
                 admin("DELETE", f"/map-local-rules/{r['id']}")
 
-        # MapLocalRule uses "file_path" (absolute path), no content_type field
+        # Use inline_body to create a fixture directly on the rule (no filesystem dependency).
+        # This tests the paste workflow that stores content atomically with the rule.
         r = admin("POST", "/map-local-rules", json={
             "id": "", "name": "ua-maplocal-1", "enabled": True,
             "location": {"host": "local.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
-            "file_path": "/tmp/ua_map_local_test.html",
+            "file_path": "test-fixture.html",
+            "inline_body": "<html><body>test fixture via inline_body</body></html>",
         })
         if r.ok:
-            # POST returns {"ok":true}; find by name
+            # POST returns the created rule; find by name to verify
             rules2 = admin("GET", "/map-local-rules").json()
             rule = next((ru for ru in rules2 if ru.get("name") == "ua-maplocal-1"), None)
             assert rule is not None, "map-local not found after create"
+            # Verify file_path was rewritten to the sanitized name
+            assert rule.get("file_path") == "test-fixture.html", f"file_path should be set to {rule.get('file_path')}"
             admin("DELETE", f"/map-local-rules/{rule['id']}")
-            record(name, PASS, "map-local CRUD: create → list → delete")
-        elif r.status_code == 422:
-            record(name, SKIP, f"map-local schema different: {r.text[:80]}")
+            record(name, PASS, "map-local CRUD: create → list → delete (via inline_body)")
         else:
             record(name, FAIL, f"create map-local failed: {r.status_code} {r.text[:80]}")
 

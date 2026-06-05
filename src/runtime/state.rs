@@ -65,6 +65,9 @@ pub(super) async fn build_runtime_services(
     let storage_path = config.storage_path.clone();
 
     let _ = std::fs::create_dir_all(&storage_path);
+    // Managed Map Local fixtures live here; UI uploads land in this directory and
+    // are served without a restart (reads happen at request time).
+    let _ = std::fs::create_dir_all(storage_path.join("map-local"));
 
     let throttling_config = Arc::new(RwLock::new(storage::load_throttle(&storage_path)));
     let dns_overrides = Arc::new(RwLock::new(storage::load_dns_overrides(&storage_path)));
@@ -121,6 +124,7 @@ pub(super) async fn build_runtime_services(
     }
     chain.add_middleware(Arc::new(BreakpointMiddleware::new(
         breakpoint_manager.clone(),
+        session_manager.clone(),
     )));
     // Inspector plugins run BEFORE InspectionMiddleware so they can set inspector data
     // that InspectionMiddleware reads on the same on_request pass.
@@ -190,9 +194,10 @@ pub(super) async fn build_runtime_services(
     {
         let mut chain = middleware_chain.write().await;
         chain.add_middleware(Arc::new({
-            let mw = MapLocalMiddleware::with_base_path(
+            let mw = MapLocalMiddleware::with_dirs(
                 vec![],
                 config.map_local_base_path.clone(),
+                Some(storage_path.join("map-local")),
             );
             let mut mw = mw;
             mw.rules = map_local_rules.clone();

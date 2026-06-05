@@ -9,9 +9,18 @@ function Toggle({ on, onChange, label = 'Toggle' }) {
   return <button className={'toggle' + (on ? ' on' : '')} onClick={() => onChange && onChange(!on)} aria-pressed={on} aria-label={label} />;
 }
 
+// Redirect to the login page, preserving the current URL as the post-login destination.
+function redirectToLogin() {
+  const next = encodeURIComponent(window.location.pathname + window.location.search);
+  window.location.href = `/login?next=${next}`;
+}
+
 async function fetchJson(url, fallback) {
   try {
-    const res = await fetch(url);
+    // no-store: admin JSON has no Cache-Control, so without this the browser may
+    // serve a stale cached response on the refetch right after a save/delete.
+    const res = await fetch(url, { cache: 'no-store' });
+    if (res.status === 401) { redirectToLogin(); return fallback; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch {
@@ -25,6 +34,7 @@ async function sendJson(url, method, body) {
     headers: { 'Content-Type': 'application/json' },
     body: body == null ? undefined : JSON.stringify(body),
   });
+  if (res.status === 401) { redirectToLogin(); return res; }
   if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
   return res;
 }
@@ -35,6 +45,14 @@ function notifyError(message) {
   el.textContent = String(message || 'Action failed');
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 4500);
+}
+
+function notifyOk(message) {
+  const el = document.createElement('div');
+  el.className = 'ui-toast';
+  el.textContent = String(message || 'Done');
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
 }
 
 function ask(label, value = '') {
@@ -488,6 +506,75 @@ function RuleSetModal({ rule, onClose, onSave }) {
   );
 }
 
+// ── Map Local path field: type a path, upload a file, or paste content ────
+// Uploaded/pasted fixtures are stored server-side in storage/map-local/ and
+// referenced by name — no restart needed, served on the next matching request.
+
+function MapLocalPathField({ value, onChange, onInline, inlineBody, hint, placeholder }) {
+  const fileRef = React.useRef(null);
+  const [busy, setBusy] = React.useState(false);
+  const pasteOpen = inlineBody != null;
+
+  // Binary/large files: upload to the managed fixtures dir and reference by name.
+  const onFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) { return; }
+    setBusy(true);
+    try {
+      const res = await fetch(`/admin/map-local-rules/fixtures/${encodeURIComponent(f.name)}`, { method: 'POST', body: f });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `Upload failed (${res.status})`);
+      }
+      const j = await res.json();
+      onChange(j.name);
+      notifyOk(`Uploaded "${j.name}" — referenced by this rule.`);
+    } catch (err) { notifyError(err.message || err); }
+    finally { setBusy(false); e.target.value = ''; }
+  };
+
+  // Paste: stash the content on the rule as inline_body; it is written to
+  // storage/map-local/ atomically when the rule is saved. No separate request.
+  // When opening on an existing managed fixture, load its current content so
+  // editing shows what was previously pasted/uploaded.
+  const togglePaste = async () => {
+    if (pasteOpen) { onInline(null); return; }
+    const name = value.trim();
+    const isManagedName = name && !name.startsWith('/') && !name.includes('/');
+    if (!isManagedName) {
+      onInline('');
+      if (!name) { onChange('pasted.json'); }
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(`/admin/map-local-rules/fixtures/${encodeURIComponent(name)}`, { cache: 'no-store' });
+      onInline(res.ok ? await res.text() : '');
+    } catch { onInline(''); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ gridColumn: '2' }}>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input className="cmp-input" style={{ flex: 1 }} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
+        <button type="button" className="copy-btn" disabled={busy} onClick={() => fileRef.current?.click()}>{busy ? '…' : 'upload'}</button>
+        <button type="button" className={'copy-btn' + (pasteOpen ? ' on' : '')} onClick={togglePaste}>paste</button>
+        <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={onFile} />
+      </div>
+      {pasteOpen && (
+        <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+            Paste content below and set the file name above (e.g. <code>users.json</code>). It's saved to storage/map-local/ when you click Save.
+          </div>
+          <textarea className="cmp-input" rows={5} style={{ fontFamily: 'monospace', fontSize: 12 }} value={inlineBody} onChange={e => onInline(e.target.value)} placeholder="paste file content…" autoFocus />
+        </div>
+      )}
+      {hint && <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 4, lineHeight: 1.5 }}>{hint}</div>}
+    </div>
+  );
+}
+
 // ── Generic simple rule modal (Map Remote / Map Local / Access) ──────────
 
 function SimpleRuleModal({ title, rule, extraFields, onClose, onSave }) {
@@ -521,15 +608,22 @@ function SimpleRuleModal({ title, rule, extraFields, onClose, onSave }) {
       </div>
       <LocationEditor loc={loc} onChange={setLoc} />
       {(extraFields || []).map(f => (
-        <div key={f.key} style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '5px 10px', alignItems: 'center' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{f.label}</span>
-          {f.type === 'select'
+        <div key={f.key} style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '5px 10px', alignItems: f.type === 'file' ? 'start' : 'center' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-faint)', whiteSpace: 'nowrap', marginTop: f.type === 'file' ? 7 : 0 }}>{f.label}</span>
+          {f.type === 'file'
+            ? <MapLocalPathField
+                value={extra[f.key] ?? ''}
+                onChange={v => setE(f.key, v)}
+                onInline={b => setExtra(p => ({ ...p, inline_body: b == null ? undefined : b }))}
+                inlineBody={extra.inline_body}
+                hint={f.hint} placeholder={f.placeholder} />
+            : f.type === 'select'
             ? <select className="cmp-input" value={extra[f.key] ?? ''} onChange={e => setE(f.key, e.target.value)}>
                 {(f.options || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             : <input className="cmp-input" value={extra[f.key] ?? ''} onChange={e => setE(f.key, e.target.value)} placeholder={f.placeholder} />
           }
-          {f.hint && <span style={{ fontSize: 11, color: 'var(--text-faint)', gridColumn: '2', marginTop: -2 }}>{f.hint}</span>}
+          {f.hint && f.type !== 'file' && <span style={{ fontSize: 11, color: 'var(--text-faint)', gridColumn: '2', marginTop: -2 }}>{f.hint}</span>}
         </div>
       ))}
     </Modal>
@@ -704,7 +798,7 @@ function MapLocalTab({ rules, onReload, editTarget, setEditTarget }) {
     await onReload();
   };
 
-  const fields = [{ key: 'file_path', label: 'Local path', placeholder: '/absolute/path/or/dir', hint: 'File served verbatim; directory appends the request path.' }];
+  const fields = [{ key: 'file_path', label: 'Local path', type: 'file', placeholder: 'users.json or /absolute/path/or/dir', hint: 'Upload or paste to store a fixture in storage/map-local/, or type any path. A file is returned for every matching request; a directory maps the request path to a file inside it.' }];
 
   return (
     <>

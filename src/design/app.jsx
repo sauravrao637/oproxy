@@ -169,7 +169,10 @@ function adaptExchange(exchange, idx) {
     ttfb,
     timing: { dns: 0, tcp: 0, tls: 0, ttfb, body },
     tags,
-    paused: !res && req.method !== 'WS',
+    // paused_at is only set by the breakpoint middleware when a rule is actively holding the request.
+    // A request with no response but no paused_at is simply in-flight (pending).
+    paused: !!exchange.paused_at,
+    pending: !res && !exchange.paused_at && (req.method || 'GET').toUpperCase() !== 'WS',
     note: exchange.note || '',
     proto: req.version || 'HTTP/1.1',
     remote: req.remote_addr || '',
@@ -256,6 +259,30 @@ function buildRawCurlFromSession(s) {
   });
 }
 
+// Client-side sort that mirrors the backend sort_sessions logic (api/mod.rs).
+// Used after incremental merges so new sessions land in the correct display position
+// without waiting for a full reload.
+function clientSortSessions(sessions, sort) {
+  const { key, dir } = sort;
+  const cmp = (a, b) => {
+    switch (key) {
+      case 'idx': case 'ts': return a.ts - b.ts;
+      case 'method': return a.method.localeCompare(b.method);
+      case 'status': return a.status - b.status;
+      case 'host':   return a.host.localeCompare(b.host);
+      case 'path':   return a.path.localeCompare(b.path);
+      case 'type':   return a.type.localeCompare(b.type);
+      case 'reqSize': return (a.resSize || a.reqSize || 0) - (b.resSize || b.reqSize || 0);
+      case 'total':  return a.total - b.total;
+      default:       return a.ts - b.ts;
+    }
+  };
+  sessions.sort((a, b) => {
+    const result = cmp(a, b);
+    return dir === 'desc' ? -result : result;
+  });
+}
+
 function copyText(text) {
   if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
   else fallbackCopy(text);
@@ -338,6 +365,13 @@ async function importSessionsFile(file, merge = true) {
 async function loadRuntimePart(label, url, parse) {
   try {
     const res = await fetch(url);
+    if (res.status === 401) {
+      // Admin token is required but not present — redirect to the login page.
+      // Preserve the current URL so the user lands back here after signing in.
+      const next = encodeURIComponent(window.location.pathname + window.location.search);
+      window.location.href = `/login?next=${next}`;
+      return { label, value: null, error: null };
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const value = parse ? await parse(res) : await res.json();
     return { label, value, error: null };
@@ -391,8 +425,10 @@ function normalizeWorkspaceStatusBuckets(buckets) {
 }
 
 function normalizeWorkspaceSort(sort) {
-  const key = SESSION_SORT_KEYS.has(sort?.key) ? sort.key : 'idx';
-  const dir = sort?.dir === 'desc' ? 'desc' : 'asc';
+  // 'idx' is no longer a user-visible sort (SEQ column removed). Treat it as 'ts'.
+  const rawKey = SESSION_SORT_KEYS.has(sort?.key) ? sort.key : 'ts';
+  const key = rawKey === 'idx' ? 'ts' : rawKey;
+  const dir = sort?.dir === 'asc' ? 'asc' : 'desc';
   return { key, dir };
 }
 
@@ -450,7 +486,7 @@ function App() {
   const [hostFilter, setHostFilter] = React.useState(null);
   const [hostFocus, setHostFocus] = React.useState([]); // pinned hosts shown as chips
   const [liveRefresh, setLiveRefresh] = React.useState(true);
-  const [sort, setSort] = React.useState({ key: 'idx', dir: 'asc' });
+  const [sort, setSort] = React.useState({ key: 'ts', dir: 'desc' });
   const [activeRail, setActiveRail] = React.useState('sessions');
   const [assistantOpen, setAssistantOpen] = React.useState(false);
   const [regexMode, setRegexMode] = React.useState(false);
@@ -471,17 +507,26 @@ function App() {
   const lastFetchRef = React.useRef(null);    // Date of last full or incremental session fetch
   const sessionsRef = React.useRef([]);        // always-current sessions array (no stale closure)
   const selectedIdRef = React.useRef(null);    // always-current selectedId
+  const sortRef = React.useRef(sort);          // always-current sort (used inside fetchIncremental callback)
   const workspaceVersionRef = React.useRef(null);
   const workspaceSnapshotRef = React.useRef(null);
   const [detailVersion, setDetailVersion] = React.useState(0); // bumped to force detail re-fetch
   // Keep refs in sync on every render (standard "latest-value ref" pattern).
   sessionsRef.current = sessions;
+  sortRef.current = sort;
   selectedIdRef.current = selectedId;
 
   const applyWorkspaceState = React.useCallback((workspace) => {
     const snapshot = workspaceSnapshotFromState(workspace);
     workspaceVersionRef.current = Number.isFinite(workspace?.version) ? workspace.version : null;
-    workspaceSnapshotRef.current = JSON.stringify(snapshot);
+    // Store the snapshot ref using the SERVER's raw sort key so that any client-side
+    // key migration (e.g. idx→ts) produces a diff and triggers a workspace PATCH to
+    // persist the migrated value back to the server.
+    const rawSortKey = workspace?.sessions_view?.sort?.key;
+    const snapshotForRef = rawSortKey && rawSortKey !== snapshot.sessions_view.sort.key
+      ? { ...snapshot, sessions_view: { ...snapshot.sessions_view, sort: { key: rawSortKey, dir: workspace.sessions_view.sort.dir } } }
+      : snapshot;
+    workspaceSnapshotRef.current = JSON.stringify(snapshotForRef);
     setWorkspaceError(null);
     setActiveRail(snapshot.active_surface);
     setSearch(snapshot.sessions_view.query);
@@ -499,6 +544,11 @@ function App() {
   const loadWorkspace = React.useCallback(async () => {
     try {
       const res = await fetch('/admin/workspace');
+      if (res.status === 401) {
+        const next = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.href = `/login?next=${next}`;
+        return;
+      }
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       applyWorkspaceState(data.workspace);
@@ -552,6 +602,7 @@ function App() {
       setSessions(prev => {
         const idxMap = new Map(prev.map((s, i) => [s.id, i]));
         const next = [...prev];
+        let hadNew = false;
         for (const ex of updated) {
           const existingIdx = idxMap.get(ex.id) ?? -1;
           const adapted = adaptExchange(ex, existingIdx >= 0 ? existingIdx : next.length);
@@ -560,8 +611,12 @@ function App() {
           } else {
             if (next.length >= SESSION_LIST_LIMIT) next.shift();
             next.push(adapted);
+            hadNew = true;
           }
         }
+        // Re-sort after any insertion so new sessions appear in the correct position
+        // (e.g. newest-first with ts desc) without requiring a full reload.
+        if (hadNew) clientSortSessions(next, sortRef.current);
         return next;
       });
       // Invalidate detail cache for updated sessions so the panel gets fresh data.
@@ -755,11 +810,14 @@ function App() {
       return next;
     });
   };
+  const DEFAULT_SORT = { key: 'ts', dir: 'desc' };
   const onSort = (key) => setSort(prev => {
     if (prev.key !== key) return { key, dir: 'asc' };
     if (prev.dir === 'asc') return { key, dir: 'desc' };
-    // third click on same column → clear sort (back to default chronological)
-    return { key: 'idx', dir: 'asc' };
+    // third click (desc → reset). If we're already on the default column,
+    // wrap back to asc rather than staying in place.
+    if (key === DEFAULT_SORT.key) return { key, dir: 'asc' };
+    return { ...DEFAULT_SORT };
   });
 
   // host counts (for filter chip)
@@ -872,14 +930,15 @@ function App() {
 
   // Counts for status bar
   const counts = React.useMemo(() => {
-    const c = { total: sessions.length, ok: 0, redirect: 0, client: 0, server: 0, paused: 0, bytes: 0 };
+    const c = { total: sessions.length, ok: 0, redirect: 0, client: 0, server: 0, paused: 0, pending: 0, bytes: 0 };
     sessions.forEach(s => {
       const b = statusBucket(s.status);
       if (b === '2') c.ok++;
       else if (b === '3') c.redirect++;
       else if (b === '4') c.client++;
       else if (b === '5') c.server++;
-      else if (b === '-') c.paused++;
+      else if (s.paused) c.paused++;
+      else if (s.pending) c.pending++;
       c.bytes += (s.reqSize || 0) + (s.resSize || 0);
     });
     return c;
@@ -1000,6 +1059,7 @@ function App() {
         }}
         onShortcuts={() => setShowShortcuts(true)}
         setActiveRail={setActiveRail}
+        activeRail={activeRail}
         sessions={sessions}
         onImportFile={handleImportFile}
       />
@@ -1038,7 +1098,7 @@ function App() {
                   counts={displayCounts}
                   total={sessionMeta.filtered_total ?? filtered.length}
                   viewMode={viewMode} setViewMode={setViewMode}
-                  sort={sort} onResetSort={() => setSort({ key: 'idx', dir: 'asc' })}
+                  sort={sort} onResetSort={() => setSort({ key: 'ts', dir: 'desc' })}
                 />
                 {bulkSel.size > 0 && (
                   <div className="bulk-bar">
@@ -1223,7 +1283,7 @@ function App() {
 }
 
 /* ===== Top bar ===== */
-function TopBar({ liveRefresh, setLiveRefresh, search, setSearch, regexMode, setRegexMode, theme, setTheme, onClear, onShortcuts, setActiveRail, sessions, onImportFile }) {
+function TopBar({ liveRefresh, setLiveRefresh, search, setSearch, regexMode, setRegexMode, theme, setTheme, onClear, onShortcuts, setActiveRail, activeRail, sessions, onImportFile }) {
   const exportHar = () => downloadHar(null, 'oproxy-session.har').catch(showDownloadError);
   const importInputRef = React.useRef(null);
   return (
@@ -1268,21 +1328,23 @@ function TopBar({ liveRefresh, setLiveRefresh, search, setSearch, regexMode, set
         <button className="icon-btn" onClick={exportHar} title="Export as HAR" aria-label="Export as HAR"><Icon name="download" size={14} /></button>
       </div>
 
-      <div className="tb-search">
-        <span className="ico-left"><Icon name="search" size={14} stroke={1.6} /></span>
-        <input
-          aria-label={regexMode ? 'Regex filter requests' : 'Filter requests'}
-          placeholder={regexMode ? 'Regex filter' : 'Filter requests by method, host, path, status, or tag'}
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
-        <button className={'regex-toggle' + (regexMode ? ' on' : '')}
-                onClick={() => setRegexMode(v => !v)}
-                title="Toggle regex search · ⌘/"
-                aria-label="Toggle regex search"
-                aria-pressed={regexMode}>.*</button>
-        <span className="ico-right">⌘F</span>
-      </div>
+      {activeRail === 'sessions' && (
+        <div className="tb-search">
+          <span className="ico-left"><Icon name="search" size={14} stroke={1.6} /></span>
+          <input
+            aria-label={regexMode ? 'Regex filter requests' : 'Filter requests'}
+            placeholder={regexMode ? 'Regex filter' : 'Filter requests by method, host, path, status, or tag'}
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+          <button className={'regex-toggle' + (regexMode ? ' on' : '')}
+                  onClick={() => setRegexMode(v => !v)}
+                  title="Toggle regex search · ⌘/"
+                  aria-label="Toggle regex search"
+                  aria-pressed={regexMode}>.*</button>
+          <span className="ico-right">⌘F</span>
+        </div>
+      )}
 
       <div className="tb-right">
         <button className="icon-btn" onClick={() => setActiveRail('rules')} title="Active rules · ⌘3" aria-label="Open active rules">
@@ -1380,7 +1442,7 @@ function FilterBar({ methodFilter, toggleMethod, statusFilter, toggleStatus, hos
       window.removeEventListener('keydown', onKey);
     };
   }, [hostMenuOpen]);
-  const sortActive = sort && !(sort.key === 'idx' && sort.dir === 'asc');
+  const sortActive = sort && !(sort.key === 'ts' && sort.dir === 'desc');
   return (
     <div className="filter-bar">
       <span className="filter-label">Method</span>
@@ -1397,7 +1459,7 @@ function FilterBar({ methodFilter, toggleMethod, statusFilter, toggleStatus, hos
         <button className={'chip' + (statusFilter.has('3') ? ' on' : '')} data-tone="3xx" onClick={() => toggleStatus('3')} aria-pressed={statusFilter.has('3')}>3xx</button>
         <button className={'chip' + (statusFilter.has('4') ? ' on' : '')} data-tone="4xx" onClick={() => toggleStatus('4')} aria-pressed={statusFilter.has('4')}>4xx</button>
         <button className={'chip' + (statusFilter.has('5') ? ' on' : '')} data-tone="5xx" onClick={() => toggleStatus('5')} aria-pressed={statusFilter.has('5')}>5xx</button>
-        <button className={'chip' + (statusFilter.has('-') ? ' on' : '')} onClick={() => toggleStatus('-')} aria-pressed={statusFilter.has('-')}>paused</button>
+        <button className={'chip' + (statusFilter.has('-') ? ' on' : '')} onClick={() => toggleStatus('-')} aria-pressed={statusFilter.has('-')}>pending</button>
       </div>
 
       <div className="host-filter" style={{ marginLeft: 8 }}>
@@ -1514,7 +1576,8 @@ function StatusBar({ counts, liveRefresh, t, runtime, setActiveRail }) {
         <div className="group"><span className="k">4xx</span><span className="v" style={{ color: 'var(--c-4xx)' }}>{counts.client}</span></div>
         <div className="group"><span className="k">5xx</span><span className="v" style={{ color: 'var(--c-5xx)' }}>{counts.server}</span></div>
         <div className="group"><span className="k">HELD</span><span className="v" style={{ color: 'var(--c-paused)' }}>{runtime?.breakpointHeld || 0}</span></div>
-        <div className="group"><span className="k">PAUSED</span><span className="v" style={{ color: 'var(--c-paused)' }}>{counts.paused}</span></div>
+        {counts.paused > 0 && <div className="group"><span className="k">PAUSED</span><span className="v" style={{ color: 'var(--c-paused)' }}>{counts.paused}</span></div>}
+        {counts.pending > 0 && <div className="group"><span className="k">PENDING</span><span className="v" style={{ color: 'var(--text-low)' }}>{counts.pending}</span></div>}
         <div className="group"><span className="k">BYTES</span><span className="v">{fmtBytes(counts.bytes)}</span></div>
       </div>
     </div>

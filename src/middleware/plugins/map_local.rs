@@ -31,6 +31,12 @@ pub struct MapLocalRule {
     pub location: Location,
     /// Absolute path to a file or directory on disk.
     pub file_path: String,
+    /// Transient: inline fixture content supplied on create/update. When set, the
+    /// API writes it to the managed `storage/map-local/` directory under
+    /// `file_path` (treated as a single file name) and clears this field. It is
+    /// never persisted to storage nor echoed back in API responses.
+    #[serde(default, skip_serializing)]
+    pub inline_body: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -45,9 +51,57 @@ impl MapLocalRule {
 
 pub type SharedMapLocalRules = Arc<RwLock<Vec<MapLocalRule>>>;
 
+/// Resolve a Map Local `file_path` to a concrete path on disk.
+///
+/// - Absolute paths are used verbatim.
+/// - Relative paths are resolved by trying, in order: the user-configured
+///   `base_path` (a mounted host directory) and then the managed `fixtures_dir`
+///   (`storage/map-local/`, where UI uploads land). The first candidate that
+///   exists wins, so both a mounted directory and managed uploads work without
+///   the user knowing which one a given name lives in.
+/// - If neither candidate exists yet, the managed `fixtures_dir` is preferred
+///   for the returned (non-existent) default so error messages point at the
+///   place new files should go.
+///
+/// This is a free function so the API validation layer and the middleware share
+/// identical resolution semantics.
+pub fn resolve_map_local_path(
+    file_path: &str,
+    base_path: Option<&Path>,
+    fixtures_dir: Option<&Path>,
+) -> PathBuf {
+    let path = Path::new(file_path);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    // Prefer an existing candidate: mounted base dir first, then managed fixtures.
+    if let Some(base) = base_path {
+        let candidate = base.join(file_path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    if let Some(fx) = fixtures_dir {
+        let candidate = fx.join(file_path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Nothing exists yet — pick a sensible default for error messages.
+    if let Some(fx) = fixtures_dir {
+        fx.join(file_path)
+    } else if let Some(base) = base_path {
+        base.join(file_path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 pub struct MapLocalMiddleware {
     pub rules: SharedMapLocalRules,
     pub base_path: Option<PathBuf>,
+    /// Managed fixtures directory (`storage/map-local/`) where UI uploads land.
+    pub fixtures_dir: Option<PathBuf>,
 }
 
 impl MapLocalMiddleware {
@@ -56,27 +110,37 @@ impl MapLocalMiddleware {
         Self {
             rules: Arc::new(RwLock::new(rules)),
             base_path: None,
+            fixtures_dir: None,
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_base_path(rules: Vec<MapLocalRule>, base_path: Option<PathBuf>) -> Self {
         Self {
             rules: Arc::new(RwLock::new(rules)),
             base_path,
+            fixtures_dir: None,
         }
     }
 
-    /// Resolve a file_path using the base_path if configured.
-    /// Relative paths are joined with base_path; absolute paths are used as-is.
-    fn resolve_path(&self, file_path: &str) -> PathBuf {
-        let path = Path::new(file_path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else if let Some(ref base) = self.base_path {
-            base.join(file_path)
-        } else {
-            path.to_path_buf()
+    pub fn with_dirs(
+        rules: Vec<MapLocalRule>,
+        base_path: Option<PathBuf>,
+        fixtures_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            rules: Arc::new(RwLock::new(rules)),
+            base_path,
+            fixtures_dir,
         }
+    }
+
+    fn resolve_path(&self, file_path: &str) -> PathBuf {
+        resolve_map_local_path(
+            file_path,
+            self.base_path.as_deref(),
+            self.fixtures_dir.as_deref(),
+        )
     }
 }
 
@@ -252,6 +316,7 @@ mod tests {
                 ..Default::default()
             },
             file_path: file_path.into(),
+            inline_body: None,
         }
     }
 
@@ -346,6 +411,70 @@ mod tests {
         let mock = ctx.mock_response.unwrap();
         assert_eq!(&mock.body[..], b"[1,2,3]");
         let _ = tokio::fs::remove_dir_all(&base_dir).await;
+    }
+
+    #[tokio::test]
+    async fn fixtures_dir_resolves_managed_uploads() {
+        let fx = std::env::temp_dir().join("map_local_fixtures_test");
+        tokio::fs::create_dir_all(&fx).await.unwrap();
+        tokio::fs::write(fx.join("users.json"), b"{\"u\":1}")
+            .await
+            .unwrap();
+
+        // No base path; relative name should resolve from the fixtures dir.
+        let mw = MapLocalMiddleware::with_dirs(
+            vec![rule("local.test", None, "users.json")],
+            None,
+            Some(fx.clone()),
+        );
+        let mut ctx = req("local.test", "/any");
+        let action = mw.on_request(&mut ctx).await;
+        assert_eq!(action, MiddlewareAction::StopAndReturn);
+        let mock = ctx.mock_response.unwrap();
+        assert_eq!(&mock.body[..], b"{\"u\":1}");
+        let _ = tokio::fs::remove_dir_all(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn base_path_takes_precedence_over_fixtures_when_present() {
+        let base = std::env::temp_dir().join("map_local_prec_base");
+        let fx = std::env::temp_dir().join("map_local_prec_fx");
+        tokio::fs::create_dir_all(&base).await.unwrap();
+        tokio::fs::create_dir_all(&fx).await.unwrap();
+        tokio::fs::write(base.join("same.json"), b"from-base")
+            .await
+            .unwrap();
+        tokio::fs::write(fx.join("same.json"), b"from-fixtures")
+            .await
+            .unwrap();
+
+        let mw = MapLocalMiddleware::with_dirs(
+            vec![rule("local.test", None, "same.json")],
+            Some(base.clone()),
+            Some(fx.clone()),
+        );
+        let mut ctx = req("local.test", "/any");
+        assert_eq!(
+            mw.on_request(&mut ctx).await,
+            MiddlewareAction::StopAndReturn
+        );
+        assert_eq!(&ctx.mock_response.unwrap().body[..], b"from-base");
+
+        // When the name only exists in fixtures, it falls back to fixtures.
+        let mw2 = MapLocalMiddleware::with_dirs(
+            vec![rule("local.test", None, "same.json")],
+            Some(std::env::temp_dir().join("map_local_prec_missing")),
+            Some(fx.clone()),
+        );
+        let mut ctx2 = req("local.test", "/any");
+        assert_eq!(
+            mw2.on_request(&mut ctx2).await,
+            MiddlewareAction::StopAndReturn
+        );
+        assert_eq!(&ctx2.mock_response.unwrap().body[..], b"from-fixtures");
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        let _ = tokio::fs::remove_dir_all(&fx).await;
     }
 
     #[tokio::test]

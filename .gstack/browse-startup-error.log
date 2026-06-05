@@ -1,4 +1,4 @@
-2026-06-05T01:20:04.330Z launch: Executable doesn't exist at /home/camo/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell
+2026-06-05T06:47:17.095Z launch: Executable doesn't exist at /home/camo/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell
 ╔═════════════════════════════════════════════════════════════════════════╗
 ║ Looks like Playwright Test or Playwright was just installed or updated. ║
 ║ Please run the following command to download new browsers:              ║

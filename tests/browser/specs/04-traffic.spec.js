@@ -65,7 +65,7 @@ test.describe('Traffic view', () => {
     await page.goto('/');
     await expect(page.locator('tbody tr')).toHaveCount(2, { timeout: 10000 });
 
-    await page.getByTitle(/Sort by METHOD/).click();
+    await page.getByTitle(/METHOD.*click to sort/).click();
     await expect(page.getByTitle('Reset sort to chronological')).toBeVisible();
     await page.getByRole('button', { name: 'Structure' }).click();
     await expect(page.getByRole('button', { name: 'Structure' })).toHaveClass(/on/);

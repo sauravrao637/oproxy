@@ -20,6 +20,7 @@ mod auth;
 mod breakpoints;
 mod extensions;
 mod forward;
+mod login;
 mod metrics;
 mod policy;
 mod sessions;
@@ -46,15 +47,17 @@ use extensions::{
     list_plugins, list_scripts, reset_mock_rule, start_playback, update_mock_rule, update_script,
 };
 use forward::forward_request;
+use login::{get_login, post_login};
 pub(crate) use metrics::{SharedEndpointMetrics, new_endpoint_metrics};
 use metrics::{build_metrics_payload, endpoint_timing_payload, record_endpoint_timing};
 use policy::{
     create_access_rule, create_map_local_rule, create_map_remote_rule, create_rule_set,
-    delete_access_rule, delete_dns, delete_map_local_rule, delete_map_remote_rule, delete_rule_set,
-    get_capture_filter, get_rule_set, get_throttling, list_access_rules, list_dns,
+    delete_access_rule, delete_dns, delete_map_local_fixture, delete_map_local_rule,
+    delete_map_remote_rule, delete_rule_set, get_capture_filter, get_map_local_fixture,
+    get_rule_set, get_throttling, list_access_rules, list_dns, list_map_local_fixtures,
     list_map_local_rules, list_map_remote_rules, list_rule_sets, update_access_rule,
     update_capture_filter, update_dns, update_map_local_rule, update_map_remote_rule,
-    update_rule_set, update_throttling,
+    update_rule_set, update_throttling, upload_map_local_fixture,
 };
 use sessions::{
     annotate_session, clear_sessions, diff_sessions, export_har, export_session, get_session,
@@ -74,6 +77,7 @@ use workspace::{execute_workspace_action, get_workspace, patch_workspace};
 pub fn control_plane_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(serve_index))
+        .route("/login", get(get_login).post(post_login))
         .route("/health", get(health))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/stream", get(sessions_stream))
@@ -146,6 +150,16 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
         .route(
             "/admin/map-local-rules",
             get(list_map_local_rules).post(create_map_local_rule),
+        )
+        .route(
+            "/admin/map-local-rules/fixtures",
+            get(list_map_local_fixtures),
+        )
+        .route(
+            "/admin/map-local-rules/fixtures/{name}",
+            get(get_map_local_fixture)
+                .post(upload_map_local_fixture)
+                .delete(delete_map_local_fixture),
         )
         .route(
             "/admin/map-local-rules/{id}",

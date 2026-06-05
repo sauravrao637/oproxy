@@ -395,6 +395,7 @@ mod tests {
                 ..Default::default()
             },
             file_path: "/tmp/fixtures".to_string(),
+            inline_body: None,
         }];
         save_map_local_rules(&dir, &rules).await.unwrap();
         let loaded = load_map_local_rules(&dir);

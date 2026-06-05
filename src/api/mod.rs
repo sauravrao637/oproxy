@@ -302,9 +302,7 @@ fn sort_sessions(sessions: &mut [Exchange], sort: &SessionSort) {
         _ => sessions.sort_by_key(|session| session.timestamp),
     }
 
-    if sort.dir == SessionSortDirection::Desc
-        || (sort.key == "idx" && sort.dir == SessionSortDirection::Asc)
-    {
+    if sort.dir == SessionSortDirection::Desc {
         sessions.reverse();
     }
 }

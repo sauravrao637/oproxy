@@ -1,5 +1,5 @@
 import React from 'react';
-/* Sessions list — table with column sorting, sticky header, status badges, mini waterfall */
+/* Sessions list — table with column sorting, drag-to-resize columns, sticky header */
 
 const fmtBytes = (n) => {
   if (n == null) return '—';
@@ -44,20 +44,113 @@ function MiniWaterfall({ timing, max }) {
 }
 function pct(n, total) { return ((n / total) * 100) + '%'; }
 
+// ── Column definitions ─────────────────────────────────────────────────────
+// key        → localStorage key + React key
+// label      → header text
+// sortKey    → sort.key value (matches SESSION_SORT_KEYS in app.jsx), null = not sortable
+// defaultWidth → px (null = flex: takes remaining space)
+// align      → text-align for header and cells
+// tooltip    → extra hint shown in th title attribute
+const COLUMN_DEFS = [
+  { key: 'method',    label: 'METHOD',    sortKey: 'method',  defaultWidth: 64,  align: 'left'   },
+  { key: 'status',    label: 'STATUS',    sortKey: 'status',  defaultWidth: 62,  align: 'left'   },
+  { key: 'host',      label: 'HOST',      sortKey: 'host',    defaultWidth: 180, align: 'left'   },
+  { key: 'path',      label: 'PATH',      sortKey: 'path',    defaultWidth: null, align: 'left'  }, // flex — gets remaining space
+  { key: 'type',      label: 'TYPE',      sortKey: 'type',    defaultWidth: 56,  align: 'left'   },
+  { key: 'tls',       label: 'TLS',       sortKey: null,      defaultWidth: 40,  align: 'center', tooltip: 'Transport security' },
+  { key: 'size',      label: 'SIZE',      sortKey: 'reqSize', defaultWidth: 68,  align: 'right'  },
+  { key: 'time',      label: 'TIME',      sortKey: 'total',   defaultWidth: 72,  align: 'right'  },
+  { key: 'waterfall', label: 'WATERFALL', sortKey: null,      defaultWidth: 170, align: 'left'   },
+  { key: 'when',      label: 'WHEN',      sortKey: 'ts',      defaultWidth: 90,  align: 'right'  },
+];
+
+const COL_STORAGE_KEY = 'oproxy_col_widths_v1';
+const COL_MIN_WIDTH = 36;
+
+function loadColWidths() {
+  try {
+    const raw = localStorage.getItem(COL_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+function saveColWidths(widths) {
+  try { localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(widths)); } catch {}
+}
+
 function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, onBulkToggle, onBulkToggleAll, emptyState }) {
   const maxTotal = Math.max(...sessions.map(s => s.total), 1);
   const hasBulk = !!onBulkToggle;
   const allChecked = hasBulk && sessions.length > 0 && sessions.every(s => bulkSel?.has(s.id));
 
-  const colHead = (key, label, align) => {
-    const dir = sort.key === key ? sort.dir : null;
-    const next = dir === 'asc' ? '↓ next' : dir === 'desc' ? 'clear next' : '↑ next';
+  // ── Column widths (localStorage-backed) ───────────────────────────────────
+  const [colWidths, setColWidths] = React.useState(() => {
+    const saved = loadColWidths();
+    const result = {};
+    COLUMN_DEFS.forEach(c => { result[c.key] = saved[c.key] ?? c.defaultWidth; });
+    return result;
+  });
+
+  const resizeRef = React.useRef(null); // { key, startX, startWidth }
+
+  const onResizeStart = React.useCallback((e, key) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const currentWidth = colWidths[key] ?? COLUMN_DEFS.find(c => c.key === key)?.defaultWidth ?? 100;
+    resizeRef.current = { key, startX: e.clientX, startWidth: currentWidth };
+
+    const onMove = (me) => {
+      if (!resizeRef.current) return;
+      const { key: k, startX, startWidth } = resizeRef.current;
+      const newWidth = Math.max(COL_MIN_WIDTH, startWidth + (me.clientX - startX));
+      setColWidths(prev => ({ ...prev, [k]: newWidth }));
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('col-resizing');
+      setColWidths(prev => { saveColWidths(prev); return prev; });
+      resizeRef.current = null;
+    };
+
+    document.body.classList.add('col-resizing');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [colWidths]);
+
+  // ── Column header renderer ─────────────────────────────────────────────────
+  const colHead = (colDef) => {
+    const { key, label, sortKey, align, tooltip } = colDef;
+    const dir = (sortKey && sort.key === sortKey) ? sort.dir : null;
+    const sortHint = sortKey
+      ? (dir === 'asc'  ? ' · click to sort descending'
+       : dir === 'desc' ? ' · click to clear sort'
+       :                  ' · click to sort ascending')
+      : '';
+    const title = [tooltip, label + sortHint].filter(Boolean).join(' — ');
+    const width = colWidths[key];
+
     return (
-      <th onClick={() => onSort(key)}
-          style={{ textAlign: align || 'left' }}
-          title={'Sort by ' + label + ' · click again to reverse · third click clears (' + next + ')'}>
+      <th
+        key={key}
+        onClick={sortKey ? () => onSort(sortKey) : undefined}
+        title={title}
+        style={{
+          textAlign: align || 'left',
+          width: width != null ? width + 'px' : undefined,
+          cursor: sortKey ? 'pointer' : 'default',
+          position: 'relative',
+          overflow: 'visible',
+        }}
+      >
         {label}
         {dir && <span className="sort">{dir === 'asc' ? '↑' : '↓'}</span>}
+        <span
+          className="col-resize-handle"
+          onMouseDown={(e) => onResizeStart(e, key)}
+          onClick={(e) => e.stopPropagation()}
+          title="Drag to resize column"
+        />
       </th>
     );
   };
@@ -67,22 +160,14 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
       <table className="t">
         <colgroup>
           {hasBulk && <col style={{ width: '28px' }} />}
-          <col style={{ width: '38px' }} />
-          <col style={{ width: '58px' }} />
-          <col style={{ width: '58px' }} />
-          <col style={{ width: '170px' }} />
-          <col />
-          <col style={{ width: '54px' }} />
-          <col style={{ width: '38px' }} />
-          <col style={{ width: '64px' }} />
-          <col style={{ width: '70px' }} />
-          <col style={{ width: '170px' }} />
-          <col style={{ width: '88px' }} />
+          {COLUMN_DEFS.map(c => (
+            <col key={c.key} style={colWidths[c.key] != null ? { width: colWidths[c.key] + 'px' } : {}} />
+          ))}
         </colgroup>
         <thead>
           <tr>
             {hasBulk && (
-              <th className="cell-check">
+              <th className="cell-check" style={{ position: 'relative', overflow: 'visible', width: '28px' }}>
                 <input type="checkbox"
                        aria-label="Select all visible sessions"
                        checked={allChecked}
@@ -90,17 +175,7 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
                        onClick={(e) => e.stopPropagation()} />
               </th>
             )}
-            {colHead('idx', '#')}
-            {colHead('method', 'METHOD')}
-            {colHead('status', 'STATUS')}
-            {colHead('host', 'HOST')}
-            {colHead('path', 'PATH')}
-            {colHead('type', 'TYPE')}
-            <th title="Transport security">TLS</th>
-            {colHead('reqSize', 'SIZE', 'right')}
-            {colHead('total', 'TIME', 'right')}
-            <th>WATERFALL</th>
-            {colHead('ts', 'WHEN', 'right')}
+            {COLUMN_DEFS.map(c => colHead(c))}
           </tr>
         </thead>
         <tbody>
@@ -113,8 +188,9 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
               <tr key={s.id}
                   className={[
                     selectedId === s.id ? 'selected' : '',
-                    s.paused ? 'paused' : ''
-                  ].join(' ')}
+                    s.paused  ? 'paused'  : '',
+                    s.pending ? 'pending' : '',
+                  ].filter(Boolean).join(' ')}
                   onClick={() => onSelect(s.id)}>
                 {hasBulk && (
                   <td className="cell-check" onClick={(e) => e.stopPropagation()}>
@@ -124,11 +200,10 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
                            onChange={() => onBulkToggle(s.id)} />
                   </td>
                 )}
-                <td className="dim" style={{ textAlign: 'right' }}>{s.idx}</td>
                 <td><span className="cell-method" data-m={s.method}>{s.method}</span></td>
                 <td>
-                  <span className="cell-status" data-c={bucket}>
-                    {s.paused ? '⏸' : (s.status || '—')}
+                  <span className="cell-status" data-c={s.paused ? 'bp' : bucket}>
+                    {s.paused ? '⏸' : s.pending ? '···' : (s.status || '—')}
                   </span>
                 </td>
                 <td className="cell-host" title={s.host}>{s.host}</td>
@@ -145,16 +220,16 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
                 <td className="cell-type">{s.type}</td>
                 <td><span className={'tls-cell ' + tls}>{tls === 'ok' ? '🔒' : tls === 'tunnel' ? '⇿' : '○'}</span></td>
                 <td className="cell-num">{fmtBytes(s.resSize || s.reqSize)}</td>
-                <td className="cell-num">{s.paused ? '—' : fmtMs(s.total)}</td>
+                <td className="cell-num">{(s.paused || s.pending) ? '—' : fmtMs(s.total)}</td>
                 <td>
-                  {!s.paused && <MiniWaterfall timing={s.timing} max={maxTotal} />}
+                  {!s.paused && !s.pending && <MiniWaterfall timing={s.timing} max={maxTotal} />}
                 </td>
                 <td className="cell-num" style={{ fontSize: '10.5px' }}>{fmtTime(s.ts)}</td>
               </tr>
             );
           })}
           {sessions.length === 0 && (
-            <tr><td colSpan={hasBulk ? 12 : 11}>
+            <tr><td colSpan={hasBulk ? COLUMN_DEFS.length + 1 : COLUMN_DEFS.length}>
               <div className="empty">
                 {emptyState?.title || 'No sessions match the current filters.'}
                 <br />
@@ -170,7 +245,6 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
 
 /* Structure view — host/path tree */
 function StructureView({ sessions, selectedId, onSelect, emptyState }) {
-  // build host -> first-segment -> leaves
   const tree = React.useMemo(() => {
     const t = {};
     sessions.forEach(s => {
@@ -239,6 +313,5 @@ function StructureView({ sessions, selectedId, onSelect, emptyState }) {
 }
 
 window.StructureView = StructureView;
-
 window.SessionsTable = SessionsTable;
 window.MiniWaterfall = MiniWaterfall;

@@ -77,7 +77,10 @@ test.describe('Compose', () => {
 
     await page.locator('.cmp-tab-new').click();
     await page.locator('.cmp-url').fill('https://persist.example.com/api');
+    // Save opens the collection picker bar for unsaved requests
     await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.locator('.cmp-save-bar')).toBeVisible();
+    await page.locator('.cmp-save-bar').getByRole('button', { name: 'Save' }).click();
     await expect(page.locator('.cmp-req-name', { hasText: 'Untitled' })).toBeVisible();
 
     await page.reload();

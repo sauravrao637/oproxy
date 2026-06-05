@@ -88,8 +88,8 @@ impl Middleware for JwtInspectorMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use crate::middleware::HeaderMap;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     fn make_jwt(header: &str, payload: &str) -> String {
         let h = URL_SAFE_NO_PAD.encode(header.as_bytes());

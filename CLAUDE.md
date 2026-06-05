@@ -73,8 +73,22 @@ pub trait Middleware: Send + Sync {
 
 `StopAndReturn` returns 403 by default. To return a custom response (mock, Lua abort), embed a JSON payload in `ctx.headers["x-oproxy-mock-response"]` before returning `StopAndReturn`. The engine reads and serves it.
 
-**Middleware chain insertion order** (main.rs):
-`CaptureFilter → DnsOverride → Routing → Throttling → Rewrite → HeaderMap → Breakpoint → JWT Inspector → GraphQL Inspector → gRPC Inspector → Inspection → Modification → Mock → Lua`
+**Middleware chain insertion order** (`runtime/state.rs`):
+1. AccessControl (block/allow rules)
+2. CaptureFilter (skip recording for filtered hosts)
+3. DnsOverride (rewrite upstream host)
+4. MapRemote (routing table)
+5. Throttling (latency/bandwidth)
+6. Rewrite (request/response mutations)
+7. Breakpoint (pause on match)
+8. JwtInspector / GraphQLInspector / GrpcInspector (payload inspection)
+9. Inspection (record session)
+10. MapLocal (serve local files) ← short-circuits to file instead of forwarding
+11. Mock (return canned responses)
+12. Lua (custom request/response logic)
+13. Inspection response-pass (record response)
+
+Plugins running before step 9 record the original request. Steps 10–12 can short-circuit with `StopAndReturn`, preventing upstream forwarding.
 
 ### Internal middleware ↔ engine side-channel
 
@@ -141,9 +155,11 @@ upstream_proxy.json, webhooks.json, mock_rules.json, lua_scripts.json
 
 Priority order: env vars > YAML (`OPROXY_CONFIG` → `./configs/default.yaml`) > defaults.
 
-Key env vars: `OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_STORAGE_PATH`, `OPROXY_LOG_LEVEL`, `RUST_LOG`.
+Key env vars: `OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_STORAGE_PATH`, `OPROXY_LOG_LEVEL`, `RUST_LOG`, `OPROXY_MAP_LOCAL_BASE_PATH`.
 
 `socks5_port` and `upstream_proxy` are config fields with no env var override — set via YAML or `POST /admin/upstream-proxy`.
+
+`map_local_base_path` (via `OPROXY_MAP_LOCAL_BASE_PATH` env var) configures the base directory for Map Local fixture files in containerized deployments. When set, relative paths in rules are resolved from it; absolute paths still work for backward compatibility.
 
 ### Session data model
 
@@ -163,7 +179,37 @@ Key env vars: `OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_
 
 `middleware/plugins/lua_engine.rs` creates a fresh sandboxed `Lua` state per request (no shared state). Globals `io`, `os`, `package`, `require`, `load`, `loadfile`, `dofile`, `debug` are removed. Scripts interact via `request`/`response` table globals. `abort(status, body)` sets `x-oproxy-mock-response` and returns `StopAndReturn`. mlua uses `vendored` feature (bundles Lua 5.4 — no system Lua needed).
 
+### Map Local (file mocking)
+
+`middleware/plugins/map_local.rs` serves static fixture files for matching requests instead of forwarding upstream. Key details:
+
+**Rule matching:** `MapLocalRule` uses full `Location`-based matching (host, path, method, protocol, query, mode). 
+
+**Path resolution:**
+- If `OPROXY_MAP_LOCAL_BASE_PATH` is set, relative paths are joined with it
+- Absolute paths (starting with `/`) bypass the base path
+- Backward compatible: existing deployments with absolute paths continue to work
+
+**File vs directory:**
+- **File mode:** serves the file's contents verbatim
+- **Directory mode:** appends the request path and serves the result (with path-traversal checks)
+
+**Validation:** 
+- API layer (`control_plane/policy.rs`): `validate_map_local_path()` checks at rule creation time using the base path
+- Returns 422 if file doesn't exist, with a helpful error message
+- Runtime checks (middleware): 502 if the file/directory becomes inaccessible
+
+**MIME detection:** `mime_for_path()` infers `Content-Type` from file extension (20+ types supported).
+
+**Storage:** Rules persisted in `./storage/map_local_rules.json` by `storage.rs`.
+
+**Docker pattern:** Set `OPROXY_MAP_LOCAL_BASE_PATH=/map-local` + `-v ./my-responses:/map-local`. Users then create rules with relative paths like `api/users.json`.
+
 ## UI
+
+The current app shell is built from `src/design` with Vite. `management.rs` serves the built files from `src/design/dist` via `include_str!`, so clean Rust builds need those assets. `build.rs` generates them automatically when missing; Docker and GitHub workflows build the UI explicitly before compiling Rust.
+
+The legacy static files under `src/index.html`, `src/app.css`, and `src/js/` are still present for older surfaces and compatibility, but `/` serves the built design app. The design app includes Sessions, Compose, Rules, Breakpoints, Mock, Lua, Inspectors, DNS, Capture Filter, Webhooks, Root CA, Map Local, and Settings surfaces.
 
 The current app shell is built from `src/design` with Vite. `management.rs` serves the built files from `src/design/dist` via `include_str!`, so clean Rust builds need those assets. `build.rs` generates them automatically when missing; Docker and GitHub workflows build the UI explicitly before compiling Rust.
 

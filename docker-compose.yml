@@ -2,18 +2,105 @@ services:
   oproxy:
     image: oproxy:latest
     build: .
+
+    # host networking lets the proxy see real client IPs and forward traffic without
+    # NAT. Switch to bridge + ports: if you prefer explicit port mapping.
     network_mode: host
+    # Uncomment for bridge networking instead:
+    # ports:
+    #   - "8080:8080"   # HTTP proxy + admin UI
+    #   - "8443:8443"   # HTTPS proxy listener (if OPROXY_HTTPS_PORT is set)
+    #   - "1080:1080"   # SOCKS5 listener (if socks5_port is set in YAML config)
+
     environment:
+      # ── Core ─────────────────────────────────────────────────────────────────
+      # Port the proxy listens on. (default: 8080)
+      OPROXY_PORT: "8080"
+      # IP to bind to. "0.0.0.0" accepts all interfaces; "127.0.0.1" localhost-only.
       OPROXY_BIND_HOST: "0.0.0.0"
+      # Enable MITM TLS interception. Clients must trust /app/certs/root.crt.
       OPROXY_MITM_ENABLED: "true"
+      # Directory where rules, hot config, and saved session snapshots are stored.
+      # OPROXY_STORAGE_PATH: "/app/storage"
+
+      # ── Additional listeners ──────────────────────────────────────────────────
+      # HTTPS proxy listener: accepts CONNECT and plain requests over TLS on this port.
+      # Clients must trust the generated root CA. Disabled when unset.
+      # OPROXY_HTTPS_PORT: "8443"
+      # SOCKS5 and upstream proxy chain have no env var override; configure them
+      # in the YAML config file mounted at /app/configs/default.yaml (see volumes).
+
+      # ── Admin security ────────────────────────────────────────────────────────
+      # Allow the admin UI/API to be reached from non-loopback clients (phones, VMs).
+      # When false (default), admin routes are only accessible from loopback.
       OPROXY_ALLOW_REMOTE_ADMIN: "false"
+      # Shared secret for the admin API. Strongly recommended when
+      # OPROXY_ALLOW_REMOTE_ADMIN is true or OPROXY_BIND_HOST is "0.0.0.0".
+      # Accepted via x-oproxy-admin-token header, Authorization: Bearer <token>,
+      # oproxy_admin_token cookie, or ?token=<token> query param.
+      # OPROXY_ADMIN_TOKEN: "change-me-to-a-strong-secret"
+      # Allow admin-initiated requests (/admin/forward, webhooks, replay) to reach
+      # private/local IPs. Disabled by default to reduce SSRF exposure.
+      # OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS: "false"
+
+      # ── Capture limits ────────────────────────────────────────────────────────
+      # Max body buffered per exchange in memory, bytes. (default: 10485760 = 10 MB)
+      # OPROXY_MAX_BODY_BYTES: "10485760"
+      # Session ring-buffer size; oldest entry evicted when full. (default: 10000)
+      # OPROXY_MAX_SESSIONS: "10000"
+      # Total body bytes kept across all sessions; old bodies are dropped when this
+      # budget is exceeded but session metadata is kept. (default: 67108864 = 64 MB)
+      # OPROXY_MAX_RETAINED_BODY_BYTES: "67108864"
+      # Max concurrent downstream connections across all listeners. (default: 1024)
+      # OPROXY_MAX_CONNECTIONS: "1024"
+      # Parse and record individual WebSocket frames. (default: true)
+      # OPROXY_INSPECT_WS_FRAMES: "true"
+
+      # ── Timeouts ──────────────────────────────────────────────────────────────
+      # TCP connect timeout for upstream dials, seconds. (default: 10)
+      # OPROXY_CONNECT_TIMEOUT_SECS: "10"
+      # SOCKS5/TLS handshake phase timeout, seconds. (default: 10)
+      # OPROXY_HANDSHAKE_TIMEOUT_SECS: "10"
+      # Graceful shutdown: time to drain active connections, seconds. (default: 10)
+      # OPROXY_SHUTDOWN_GRACE_SECS: "10"
+      # Per-request upstream read timeout has no env var; set timeout_secs in YAML.
+
+      # ── Logging ───────────────────────────────────────────────────────────────
+      # Log level: trace | debug | info | warn | error. (default: info)
+      # OPROXY_LOG_LEVEL: "info"
+      # Directory for rolling log files. (default: current working directory)
+      # OPROXY_LOG_DIR: "/var/log/oproxy"
+      # Fine-grained tracing filter; overrides OPROXY_LOG_LEVEL when set.
+      # Syntax: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html
+      # RUST_LOG: "oproxy=debug,tower_http=info"
+
+      # ── Map Local ─────────────────────────────────────────────────────────────
+      # Base directory for Map Local fixture files inside the container.
+      # Relative paths in rules resolve from here; absolute paths still work.
+      # Keep this in sync with the container path of the mock-responses volume.
+      OPROXY_MAP_LOCAL_BASE_PATH: "/map-local"
+
     volumes:
-      # Persist root CA key/cert across container replacements.
-      # Trust /app/certs/root.crt once; it never changes between restarts.
+      # ── Persistent data ───────────────────────────────────────────────────────
+      # Root CA key + cert. Trust root.crt once; it never rotates between restarts.
       - oproxy-certs:/app/certs
-      # Persist rules, hot config, and manually saved session files.
-      # The live session log is in memory unless you save it under /app/storage.
+      # Rules, hot config, and manually saved session snapshots.
       - oproxy-storage:/app/storage
+
+      # ── Map Local fixtures ────────────────────────────────────────────────────
+      # Host directory of static mock response files served by Map Local rules.
+      # Create rules with relative paths (e.g. "api/users.json"); they resolve to
+      # /map-local/api/users.json inside the container. Paste content directly in
+      # the UI to skip the volume mount for one-off fixtures.
+      - ./mock-responses:/map-local
+
+      # ── YAML config (optional) ────────────────────────────────────────────────
+      # Mount a YAML config file to set options that have no env var override:
+      #   socks5_port, upstream_proxy, timeout_secs, pool_max_idle_per_host,
+      #   pool_idle_timeout_secs, log.file
+      # OPROXY_CONFIG defaults to /app/configs/default.yaml.
+      # - ./configs/default.yaml:/app/configs/default.yaml:ro
+
     restart: unless-stopped
 
 volumes:

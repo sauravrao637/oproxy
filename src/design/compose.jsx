@@ -216,7 +216,15 @@ function ComposeSurface({ incomingRequest }) {
   };
 
   const openSaveBar = () => {
-    saveActive();
+    if (!active) return;
+    // Pre-fill name from current tab
+    setSaveName(active.name || `${active.method} ${active.url || '/'}`);
+    // Pre-fill collection: find the one that already holds this request, else first
+    const currentColl = active.savedId
+      ? state.collections.find(c => c.requests.some(r => r.id === active.savedId))
+      : null;
+    setSaveCollId(currentColl?.id || state.collections[0]?.id || '');
+    setSavingMode(true);
   };
 
   const doSave = () => {
@@ -519,14 +527,14 @@ function ComposeSurface({ incomingRequest }) {
             </div>
           )}
 
-          {active && <ComposeEditor tab={active} updateActive={updateActive} send={send} openSaveBar={openSaveBar} resolveVars={resolveVars} />}
+          {active && <ComposeEditor tab={active} updateActive={updateActive} send={send} saveActive={saveActive} openSaveBar={openSaveBar} resolveVars={resolveVars} />}
         </div>
       </div>
     </SurfaceShell>
   );
 }
 
-function ComposeEditor({ tab, updateActive, send, openSaveBar, resolveVars }) {
+function ComposeEditor({ tab, updateActive, send, saveActive, openSaveBar, resolveVars }) {
   const [bodyTab, setBodyTab] = React.useState('headers');
   const [resTab, setResTab] = React.useState('body');
   const resolved = resolveVars(tab.url);
@@ -577,7 +585,13 @@ function ComposeEditor({ tab, updateActive, send, openSaveBar, resolveVars }) {
           <Icon name="resume" size={10} /> Send
         </button>
         <button className="btn" onClick={() => copyText(buildComposeCurl(tab, resolveVars))}>cURL</button>
-        <button className="btn" onClick={openSaveBar}>Save</button>
+        {tab.savedId
+          ? <>
+              <button className="btn" onClick={saveActive} title="Save changes to current collection">Save</button>
+              <button className="btn" onClick={openSaveBar} title="Save to a different name or collection">Save as…</button>
+            </>
+          : <button className="btn" onClick={openSaveBar}>Save</button>
+        }
       </div>
       {showResolved && (
         <div className="cmp-resolved">

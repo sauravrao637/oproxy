@@ -522,6 +522,28 @@ body.resizing-split * {
   font-family: var(--font-mono);
   font-size: 10px;
 }
+/* Column resize handle — appears at the right edge of every th */
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 4;
+  border-radius: 2px;
+}
+.col-resize-handle:hover,
+body.col-resizing .col-resize-handle {
+  background: oklch(0.6 0.18 var(--accent-h, 215) / 0.45);
+}
+/* Suppress text selection and row hovers while dragging a column boundary */
+body.col-resizing {
+  cursor: col-resize !important;
+  user-select: none;
+}
+body.col-resizing * { user-select: none !important; }
+body.col-resizing .t tbody tr { background: inherit !important; }
 .t td {
   padding: 0 var(--pad-x);
   height: var(--row-h);
@@ -538,8 +560,12 @@ body.resizing-split * {
   background: var(--row-selected);
   box-shadow: inset 2px 0 0 var(--row-selected-border);
 }
+/* True breakpoint-held: purple tint + pause icon */
 .t tbody tr.paused { background: oklch(0.78 0.16 305 / 0.08); }
 .t tbody tr.paused td:first-child { color: var(--c-paused); }
+/* In-flight / pending response: subtle dim, no tint */
+.t tbody tr.pending { opacity: 0.7; }
+.t tbody tr.pending .cell-status { color: var(--text-low); letter-spacing: 0.1em; }
 
 .cell-method {
   font-weight: 600;

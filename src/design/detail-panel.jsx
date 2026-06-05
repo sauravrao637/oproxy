@@ -155,12 +155,13 @@ function OverviewTab({ s }) {
     </div>
   );
   const tone = s.status >= 500 ? 'bad' : s.status >= 400 ? 'warn' : s.status >= 200 ? 'ok' : '';
+  const incomplete = s.paused || s.pending;
   return (
     <>
       <div className="overview-grid">
-        {m('Status', s.paused ? 'PAUSED' : s.status, tone)}
-        {m('Latency', s.paused ? '—' : (s.total < 1000 ? s.total : (s.total / 1000).toFixed(2)), '', s.total < 1000 ? ' ms' : ' s')}
-        {m('TTFB', s.paused ? '—' : s.ttfb, '', ' ms')}
+        {m('Status', s.paused ? 'PAUSED' : s.pending ? '···' : s.status, tone)}
+        {m('Latency', incomplete ? '—' : (s.total < 1000 ? s.total : (s.total / 1000).toFixed(2)), '', s.total < 1000 ? ' ms' : ' s')}
+        {m('TTFB', incomplete ? '—' : s.ttfb, '', ' ms')}
         {m('Request',  fmtBytes(s.reqSize), '')}
         {m('Response', fmtBytes(s.resSize), '')}
         {m('Protocol', s.proto, '')}
@@ -511,7 +512,7 @@ function DetailPanel({ session: s, onClose, onResume, onAbort, onCopyCurl, onCop
             {s.method}
           </span>
           <span className="cell-status" data-c={statusBucket(s.status)} style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>
-            {s.status || 'PAUSED'} {STATUS_TEXT[s.status] && <span className="dim">{STATUS_TEXT[s.status]}</span>}
+            {s.paused ? 'PAUSED' : s.pending ? '···' : (s.status || '—')} {STATUS_TEXT[s.status] && <span className="dim">{STATUS_TEXT[s.status]}</span>}
           </span>
           <span className="url" title={s.url}>
             <span className="scheme">{u.protocol}//</span>
@@ -534,7 +535,7 @@ function DetailPanel({ session: s, onClose, onResume, onAbort, onCopyCurl, onCop
           <div className="item"><span className="k">PROTO</span><span className="v">{s.proto}</span></div>
           <div className="item"><span className="k">REMOTE</span><span className="v">{s.remote}</span></div>
           <div className="item"><span className="k">STARTED</span><span className="v">{fmtTime(s.ts)}</span></div>
-          <div className="item"><span className="k">TOTAL</span><span className="v">{s.paused ? '—' : fmtMs(s.total)}</span></div>
+          <div className="item"><span className="k">TOTAL</span><span className="v">{(s.paused || s.pending) ? '—' : fmtMs(s.total)}</span></div>
         </div>
         <div className="detail-tabs">
           {tabs.map(t => (
@@ -551,13 +552,15 @@ function DetailPanel({ session: s, onClose, onResume, onAbort, onCopyCurl, onCop
         </div>
       </div>
 
-      {s.paused && (
+      {(s.paused || s.pending) && (
         <div className="paused-banner">
-          <Icon name="pauseRail" size={16} stroke={1.6} />
+          <Icon name={s.paused ? 'pauseRail' : 'clock'} size={16} stroke={1.6} />
           <div>
-            <div className="label">Request pending</div>
+            <div className="label">{s.paused ? 'Request paused at breakpoint' : 'Request in progress'}</div>
             <div className="mute" style={{ fontSize: 11 }}>
-              {s.note || 'No response captured yet. If a breakpoint is active, use the Breakpoints panel to resume or abort.'}
+              {s.paused
+                ? (s.note || 'Use the Breakpoints panel to resume or abort this request.')
+                : 'Waiting for response — details will appear when the request completes.'}
             </div>
           </div>
         </div>

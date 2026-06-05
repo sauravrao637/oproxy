@@ -232,6 +232,7 @@ mod tests {
             note: None,
             tags: vec![],
             inspector_data: None,
+            paused_at: None,
         }
     }
 

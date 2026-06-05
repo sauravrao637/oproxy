@@ -441,6 +441,7 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
         note: entry.oproxy_note.clone(),
         tags: entry.oproxy_tags.clone(),
         inspector_data: None,
+        paused_at: None,
     }
 }
 
@@ -679,6 +680,7 @@ mod tests {
             note: None,
             tags: vec![],
             inspector_data: None,
+            paused_at: None,
         }
     }
 

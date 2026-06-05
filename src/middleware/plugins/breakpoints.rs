@@ -108,11 +108,18 @@ impl Default for BreakpointManager {
 
 pub struct BreakpointMiddleware {
     pub manager: Arc<BreakpointManager>,
+    pub session_manager: crate::session::SharedSessionManager,
 }
 
 impl BreakpointMiddleware {
-    pub fn new(manager: Arc<BreakpointManager>) -> Self {
-        Self { manager }
+    pub fn new(
+        manager: Arc<BreakpointManager>,
+        session_manager: crate::session::SharedSessionManager,
+    ) -> Self {
+        Self {
+            manager,
+            session_manager,
+        }
     }
 
     /// Returns the first matching enabled rule of the given type, releasing all
@@ -215,9 +222,16 @@ mod tests {
         });
     }
 
+    fn session_manager_for_tests() -> crate::session::SharedSessionManager {
+        Arc::new(crate::session::SessionManager::new(100))
+    }
+
     #[tokio::test]
     async fn no_rules_returns_continue() {
-        let mw = BreakpointMiddleware::new(Arc::new(BreakpointManager::new()));
+        let mw = BreakpointMiddleware::new(
+            Arc::new(BreakpointManager::new()),
+            session_manager_for_tests(),
+        );
         assert_eq!(
             mw.on_request(&mut req("/", "")).await,
             MiddlewareAction::Continue
@@ -228,7 +242,7 @@ mod tests {
     async fn disabled_rule_not_triggered_on_request() {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"/secret", false)).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_request(&mut req("/secret", "")).await,
             MiddlewareAction::Continue
@@ -239,7 +253,7 @@ mod tests {
     async fn non_matching_rule_passes_through() {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"^/admin", true)).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_request(&mut req("/api/users", "")).await,
             MiddlewareAction::Continue
@@ -251,7 +265,7 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"/secret", true)).await;
         auto_resolve(manager.clone(), BreakpointResolution::Continue).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_request(&mut req("/secret", "")).await,
             MiddlewareAction::Continue
@@ -263,7 +277,7 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"/drop-me", true)).await;
         auto_resolve(manager.clone(), BreakpointResolution::Drop).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_request(&mut req("/drop-me", "")).await,
             MiddlewareAction::StopAndReturn
@@ -298,7 +312,7 @@ mod tests {
                 tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
             }
         });
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         let mut ctx = req("/modify", "original");
         let action = mw.on_request(&mut ctx).await;
         assert_eq!(action, MiddlewareAction::Continue);
@@ -309,7 +323,7 @@ mod tests {
     async fn response_rule_does_not_fire_on_request() {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(res_rule(r"/res-only", true)).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_request(&mut req("/res-only", "")).await,
             MiddlewareAction::Continue
@@ -321,7 +335,7 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(res_rule(r"/watch", true)).await;
         auto_resolve(manager.clone(), BreakpointResolution::Continue).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_response(&mut res("/watch", "body")).await,
             MiddlewareAction::Continue
@@ -333,7 +347,7 @@ mod tests {
         let manager = Arc::new(BreakpointManager::new());
         // Invalid regex — Location::matches() returns false safely.
         manager.add_rule(req_rule("[invalid", true)).await;
-        let mw = BreakpointMiddleware::new(manager);
+        let mw = BreakpointMiddleware::new(manager, session_manager_for_tests());
         assert_eq!(
             mw.on_request(&mut req("/anything", "")).await,
             MiddlewareAction::Continue
@@ -355,7 +369,7 @@ mod tests {
     async fn pending_queue_contains_context_until_resolved() {
         let manager = Arc::new(BreakpointManager::new());
         manager.add_rule(req_rule(r"/hold", true)).await;
-        let mw = BreakpointMiddleware::new(manager.clone());
+        let mw = BreakpointMiddleware::new(manager.clone(), session_manager_for_tests());
         let mut ctx = req("/hold", "payload");
 
         let task = tokio::spawn(async move { mw.on_request(&mut ctx).await });
@@ -404,6 +418,20 @@ impl Middleware for BreakpointMiddleware {
             return MiddlewareAction::Continue;
         }
 
+        let session_id = ctx
+            .session_id
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        // Record the request immediately so it appears in the sessions list as paused
+        self.session_manager.record_request_with_source(
+            session_id.clone(),
+            ctx.clone(),
+            crate::session::SessionSource::Proxy,
+        );
+        self.session_manager.mark_paused(&session_id);
+
         let (tx, rx) = oneshot::channel();
         let bp_id = Uuid::new_v4().to_string();
         self.manager.pending.write().await.insert(
@@ -417,8 +445,12 @@ impl Middleware for BreakpointMiddleware {
         );
 
         match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
-            Ok(Ok(BreakpointResolution::Continue)) => MiddlewareAction::Continue,
+            Ok(Ok(BreakpointResolution::Continue)) => {
+                self.session_manager.clear_paused(&session_id);
+                MiddlewareAction::Continue
+            }
             Ok(Ok(BreakpointResolution::Modify(bc))) => {
+                self.session_manager.clear_paused(&session_id);
                 if let BreakpointContext::Request(new_ctx) = *bc {
                     *ctx = *new_ctx;
                     MiddlewareAction::Continue
@@ -426,10 +458,17 @@ impl Middleware for BreakpointMiddleware {
                     MiddlewareAction::StopAndReturn
                 }
             }
-            Ok(Ok(BreakpointResolution::Drop)) => MiddlewareAction::StopAndReturn,
-            Ok(Err(_)) => MiddlewareAction::StopAndReturn,
+            Ok(Ok(BreakpointResolution::Drop)) => {
+                self.session_manager.clear_paused(&session_id);
+                MiddlewareAction::StopAndReturn
+            }
+            Ok(Err(_)) => {
+                self.session_manager.clear_paused(&session_id);
+                MiddlewareAction::StopAndReturn
+            }
             Err(_) => {
                 self.manager.pending.write().await.remove(&bp_id);
+                self.session_manager.clear_paused(&session_id);
                 tracing::warn!(id = %bp_id, "Breakpoint request timed out, dropping");
                 let mut headers = crate::middleware::HeaderMap::new();
                 headers.insert("content-type".to_string(), "text/plain".to_string());
@@ -454,6 +493,11 @@ impl Middleware for BreakpointMiddleware {
             return MiddlewareAction::Continue;
         }
 
+        // For response breakpoints, mark the session as paused if it exists
+        if let Some(session_id) = &ctx.session_id {
+            self.session_manager.mark_paused(session_id);
+        }
+
         let (tx, rx) = oneshot::channel();
         let bp_id = Uuid::new_v4().to_string();
         self.manager.pending.write().await.insert(
@@ -467,8 +511,16 @@ impl Middleware for BreakpointMiddleware {
         );
 
         match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
-            Ok(Ok(BreakpointResolution::Continue)) => MiddlewareAction::Continue,
+            Ok(Ok(BreakpointResolution::Continue)) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                MiddlewareAction::Continue
+            }
             Ok(Ok(BreakpointResolution::Modify(bc))) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
                 if let BreakpointContext::Response(new_ctx) = *bc {
                     *ctx = *new_ctx;
                     MiddlewareAction::Continue
@@ -476,10 +528,23 @@ impl Middleware for BreakpointMiddleware {
                     MiddlewareAction::StopAndReturn
                 }
             }
-            Ok(Ok(BreakpointResolution::Drop)) => MiddlewareAction::StopAndReturn,
-            Ok(Err(_)) => MiddlewareAction::StopAndReturn,
+            Ok(Ok(BreakpointResolution::Drop)) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                MiddlewareAction::StopAndReturn
+            }
+            Ok(Err(_)) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                MiddlewareAction::StopAndReturn
+            }
             Err(_) => {
                 self.manager.pending.write().await.remove(&bp_id);
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
                 tracing::warn!(id = %bp_id, "Breakpoint response timed out, dropping");
                 MiddlewareAction::StopAndReturn
             }

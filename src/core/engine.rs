@@ -39,8 +39,6 @@ fn display_request_uri(
     format!("http://{}{}", host, path_and_query)
 }
 
-
-
 pub struct ProxyEngine {
     /// (http_client, streaming_client) — pair wrapped for upstream proxy hot-reload.
     clients: tokio::sync::RwLock<(Client, Client)>,

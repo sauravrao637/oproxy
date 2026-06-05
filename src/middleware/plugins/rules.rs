@@ -344,8 +344,6 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
     }
 }
 
-
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -465,8 +463,7 @@ mod tests {
             }],
         )]);
         let mut ctx = req("GET", "h", "/", "");
-        ctx.headers
-            .insert("accept", "application/json");
+        ctx.headers.insert("accept", "application/json");
         mw.on_request(&mut ctx).await;
         assert_eq!(
             ctx.headers.get("accept").map(String::as_str),
@@ -484,8 +481,7 @@ mod tests {
             }],
         )]);
         let mut ctx = req("GET", "h", "/", "");
-        ctx.headers
-            .insert("authorization", "Bearer s");
+        ctx.headers.insert("authorization", "Bearer s");
         mw.on_request(&mut ctx).await;
         assert!(!ctx.headers.contains_key("authorization"));
     }

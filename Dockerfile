@@ -54,6 +54,8 @@ RUN groupadd --system oproxy && \
 # saved session files survive container restarts.
 # Mount these with named volumes (-v oproxy-certs:/app/certs) to persist across
 # container replacements (docker rm + docker run).
+# Optionally mount OPROXY_MAP_LOCAL_BASE_PATH (e.g., -v ./my-responses:/map-local)
+# to serve mock response files for Map Local rules.
 VOLUME ["/app/certs", "/app/storage"]
 
 # Default ports - override with OPROXY_PORT / config if needed.
@@ -63,6 +65,8 @@ EXPOSE 8080 1080
 # OPROXY_PORT     - port override (takes precedence over the config file)
 # OPROXY_MITM_ENABLED - set to "true" to enable HTTPS interception
 # OPROXY_BIND_HOST - defaults to loopback; set 0.0.0.0 only with explicit port publishing
+# OPROXY_MAP_LOCAL_BASE_PATH - base directory for Map Local fixture files;
+#   when set, MapLocalRule paths are resolved relative to it (e.g., /map-local)
 ENV OPROXY_CONFIG=/app/configs/default.yaml
 ENV OPROXY_BIND_HOST=127.0.0.1
 

@@ -19,10 +19,7 @@ fn decode_deflate(bytes: &[u8]) -> Option<Vec<u8>> {
 /// Returns the canonical response body bytes, transparently decompressing
 /// gzip/deflate/br. On success the `content-encoding`/`content-length` headers
 /// are stripped so they match the decoded body.
-pub fn decoded_response_body(
-    res_headers: &mut HeaderMap,
-    res_bytes: &Bytes,
-) -> Bytes {
+pub fn decoded_response_body(res_headers: &mut HeaderMap, res_bytes: &Bytes) -> Bytes {
     let encoding = header_value(res_headers, "content-encoding")
         .unwrap_or_default()
         .to_lowercase();

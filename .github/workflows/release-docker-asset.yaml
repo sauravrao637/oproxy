@@ -8,6 +8,8 @@ on:
 jobs:
   build-and-push-ghcr:
     runs-on: ubuntu-24.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: read
       packages: write # Grants permission to push to the registry
@@ -16,21 +18,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.x'
           cache: yarn
           cache-dependency-path: src/design/yarn.lock
 
       - name: Build UI
         run: |
-          corepack enable
           yarn --cwd src/design install --frozen-lockfile
           yarn --cwd src/design build
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Rust tests
         run: RUSTFLAGS="-D warnings" cargo test
@@ -81,3 +88,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.image.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

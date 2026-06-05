@@ -329,18 +329,17 @@ impl Middleware for LuaEngineMiddleware {
         let body = ctx.body_text().into_owned();
         let headers: HashMap<String, String> = ctx.headers.clone().into();
 
-        let outcome =
-            match tokio::task::spawn_blocking(move || {
-                run_request_scripts(scripts, method, uri, body, headers)
-            })
-            .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::error!(error = %e, "Lua request task failed to join");
-                    return MiddlewareAction::Continue;
-                }
-            };
+        let outcome = match tokio::task::spawn_blocking(move || {
+            run_request_scripts(scripts, method, uri, body, headers)
+        })
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!(error = %e, "Lua request task failed to join");
+                return MiddlewareAction::Continue;
+            }
+        };
 
         if let Some((status, body)) = outcome.abort {
             let sc = axum::http::StatusCode::from_u16(status)

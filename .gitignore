@@ -25,6 +25,12 @@ tests/browser/certs/
 tests/browser/storage/
 tests/browser/capture.js
 
+# ── Yarn 4 (Berry) install state ───────────────────────────────────────────────
+# install-state.gz is a local build cache — never commit.
+.yarn/install-state.gz
+src/design/.yarn/install-state.gz
+tests/browser/.yarn/install-state.gz
+
 #MCPs
 .playwright-mcp
 

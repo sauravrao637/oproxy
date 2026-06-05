@@ -127,6 +127,9 @@ pub struct Exchange {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspector_data: Option<InspectorData>,
+    /// Timestamp when the request was paused at a breakpoint; None if not paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -138,6 +141,7 @@ pub enum SessionChangeKind {
     SessionsImported,
     SessionsCleared,
     WsFrameCaptured,
+    SessionPaused,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +185,12 @@ enum WriteOp {
     UpdateInspectorData {
         id: String,
         data: InspectorData,
+    },
+    MarkPaused {
+        id: String,
+    },
+    ClearPaused {
+        id: String,
     },
     /// Replace the entire store with a pre-parsed map (used by load_from_file).
     LoadData {
@@ -317,6 +327,16 @@ impl SessionManager {
         });
     }
 
+    /// Mark a session as paused at a breakpoint. Records the pause timestamp.
+    pub fn mark_paused(&self, id: &str) {
+        self.enqueue(WriteOp::MarkPaused { id: id.to_string() });
+    }
+
+    /// Clear the paused state from a session (called when breakpoint is resolved).
+    pub fn clear_paused(&self, id: &str) {
+        self.enqueue(WriteOp::ClearPaused { id: id.to_string() });
+    }
+
     // ── Write operations that need a reply ────────────────────────────────────
 
     /// Update the note and/or tags on an existing session.
@@ -430,6 +450,8 @@ pub trait ExchangeRecorder: Send + Sync {
     fn append_ws_frame(&self, id: &str, frame: WsFrame);
     fn clear_sessions(&self);
     fn update_inspector_data(&self, id: &str, data: InspectorData);
+    fn mark_paused(&self, id: &str);
+    fn clear_paused(&self, id: &str);
     async fn annotate(&self, id: &str, note: Option<String>, tags: Option<Vec<String>>) -> bool;
     async fn save_to_file(&self, path: &Path) -> Result<(), std::io::Error>;
     async fn load_from_file(&self, path: &Path) -> Result<(), std::io::Error>;
@@ -478,6 +500,12 @@ impl ExchangeRecorder for SessionManager {
     }
     fn update_inspector_data(&self, id: &str, data: InspectorData) {
         self.update_inspector_data(id, data)
+    }
+    fn mark_paused(&self, id: &str) {
+        self.mark_paused(id)
+    }
+    fn clear_paused(&self, id: &str) {
+        self.clear_paused(id)
     }
     async fn annotate(&self, id: &str, note: Option<String>, tags: Option<Vec<String>>) -> bool {
         self.annotate(id, note, tags).await
@@ -560,6 +588,7 @@ fn process_write_op(
                         note: None,
                         tags: Vec::new(),
                         inspector_data: None,
+                        paused_at: None,
                     },
                 );
                 if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
@@ -708,6 +737,30 @@ fn process_write_op(
             if let Some(ex) = store.get_mut(&id) {
                 ex.inspector_data = Some(data);
             }
+        }
+
+        WriteOp::MarkPaused { id } => {
+            let mut store = exchanges.write().unwrap();
+            if let Some(ex) = store.get_mut(&id) {
+                ex.paused_at = Some(Utc::now());
+                ex.updated_at = Some(Utc::now());
+            }
+            let _ = change_tx.send(SessionChange {
+                session_id: Some(id),
+                kind: SessionChangeKind::SessionPaused,
+            });
+        }
+
+        WriteOp::ClearPaused { id } => {
+            let mut store = exchanges.write().unwrap();
+            if let Some(ex) = store.get_mut(&id) {
+                ex.paused_at = None;
+                ex.updated_at = Some(Utc::now());
+            }
+            let _ = change_tx.send(SessionChange {
+                session_id: Some(id),
+                kind: SessionChangeKind::SessionUpdated,
+            });
         }
 
         WriteOp::LoadData { map, reply } => {
@@ -1311,6 +1364,7 @@ mod tests {
             note: None,
             tags: vec!["auth".to_string()],
             inspector_data: None,
+            paused_at: None,
         };
         assert!(terms[0].matches(&ex));
         let ex2 = Exchange { tags: vec![], ..ex };
@@ -1333,6 +1387,7 @@ mod tests {
             note: None,
             tags: vec![],
             inspector_data: None,
+            paused_at: None,
         };
         sm.import_sessions(vec![exchange]);
         sm.flush().await;
