@@ -13,6 +13,7 @@ pub struct MockResponse {
     pub status: u16,
     pub headers: HashMap<String, String>,
     pub body: String,
+    #[serde(default)]
     pub delay_ms: u64,
 }
 
