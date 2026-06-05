@@ -40,12 +40,13 @@ pub(super) async fn add_bp_rule(
         return err;
     }
     rule.id = uuid::Uuid::new_v4().to_string();
+    let saved = rule.clone();
     state.api_handler.add_breakpoint_rule(rule).await;
     let rules = state.api_handler.list_breakpoint_rules().await;
     if let Err(e) = storage::save_breakpoints(&state.storage_path, &rules).await {
         return storage_error_response(e);
     }
-    axum::http::StatusCode::CREATED.into_response()
+    (axum::http::StatusCode::CREATED, axum::Json(saved)).into_response()
 }
 
 pub(super) async fn delete_bp_rule(

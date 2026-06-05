@@ -19,6 +19,7 @@ pub struct MockResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MockRule {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub enabled: bool,

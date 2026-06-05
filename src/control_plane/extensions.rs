@@ -26,15 +26,14 @@ pub(super) async fn create_mock_rule(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(mut rule): axum::extract::Json<MockRule>,
 ) -> impl IntoResponse {
-    if rule.id.is_empty() {
-        rule.id = uuid::Uuid::new_v4().to_string();
-    }
+    rule.id = uuid::Uuid::new_v4().to_string();
+    let saved = rule.clone();
     let mut rules = state.mock_rules.write().await;
     rules.push(rule);
     if let Err(e) = storage::save_mock_rules(&state.storage_path, &rules).await {
         return storage_error_response(e);
     }
-    axum::Json(serde_json::json!({ "ok": true })).into_response()
+    (axum::http::StatusCode::CREATED, axum::Json(saved)).into_response()
 }
 
 pub(super) async fn update_mock_rule(
@@ -97,15 +96,14 @@ pub(super) async fn create_script(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(mut script): axum::extract::Json<LuaScript>,
 ) -> impl IntoResponse {
-    if script.id.is_empty() {
-        script.id = uuid::Uuid::new_v4().to_string();
-    }
+    script.id = uuid::Uuid::new_v4().to_string();
+    let saved = script.clone();
     let mut scripts = state.lua_scripts.write().await;
     scripts.push(script);
     if let Err(e) = storage::save_lua_scripts(&state.storage_path, &scripts).await {
         return storage_error_response(e);
     }
-    axum::Json(serde_json::json!({ "ok": true })).into_response()
+    (axum::http::StatusCode::CREATED, axum::Json(saved)).into_response()
 }
 
 pub(super) async fn update_script(
