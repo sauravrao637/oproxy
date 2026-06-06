@@ -24,11 +24,13 @@ jobs:
           node-version: '22.x'
 
       - name: Enable Corepack
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack prepare yarn@4.15.0 --activate
 
       - name: Build UI
         run: |
-          yarn --cwd src/design install --frozen-lockfile
+          yarn --cwd src/design install --immutable
           yarn --cwd src/design build
 
       - name: Set up Rust
