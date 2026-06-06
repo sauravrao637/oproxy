@@ -452,6 +452,33 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
+    fn configured_admin_token_treats_absent_empty_and_whitespace_as_no_token() {
+        // This is the function that drives the no-token bypass in admin_auth_layer.
+        // When it returns None, the middleware lets ALL admin requests through without
+        // authentication. Confirm all "empty" variants produce None so that operators
+        // who set admin_token: (no value) or admin_token: "" get the expected bypass,
+        // not a silent 401 caused by a partially-matched token.
+        let mut cfg = crate::config::Config::default();
+        assert!(configured_admin_token(&cfg).is_none(), "None → no-token");
+
+        cfg.admin_token = Some(String::new());
+        assert!(configured_admin_token(&cfg).is_none(), "\"\" → no-token");
+
+        cfg.admin_token = Some("   ".to_string());
+        assert!(
+            configured_admin_token(&cfg).is_none(),
+            "whitespace-only → no-token"
+        );
+
+        cfg.admin_token = Some("secret".to_string());
+        assert_eq!(
+            configured_admin_token(&cfg),
+            Some("secret"),
+            "non-empty → token returned"
+        );
+    }
+
+    #[test]
     fn management_host_accepts_localhost_and_configured_lan_bindings() {
         let loopback = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let remote = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)));

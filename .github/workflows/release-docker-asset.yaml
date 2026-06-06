@@ -18,15 +18,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Enable Corepack
-        run: corepack enable
-
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: '22.x'
-          cache: yarn
-          cache-dependency-path: src/design/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
 
       - name: Build UI
         run: |
