@@ -69,12 +69,10 @@ impl ProxyEngine {
         let mut http = Client::builder()
             .pool_max_idle_per_host(pool_max_idle)
             .pool_idle_timeout(pool_idle)
-            .redirect(request::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(timeout_secs));
         let mut streaming = Client::builder()
             .pool_max_idle_per_host(pool_max_idle)
-            .pool_idle_timeout(pool_idle)
-            .redirect(request::redirect::Policy::none());
+            .pool_idle_timeout(pool_idle);
         if let Some(url) = upstream_proxy {
             if let Ok(p) = reqwest::Proxy::all(url) {
                 http = http.proxy(p);
