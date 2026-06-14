@@ -16,6 +16,99 @@ use crate::transport::tls::mitm_intercept;
 /// a real TLS connection from a cleartext CONNECT tunnel (e.g. `ws://`).
 const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 
+struct ConnectTarget {
+    authority: String,
+    hostname: String,
+    address: String,
+}
+
+enum TunnelOutcome {
+    Connected { bytes_up: u64, bytes_down: u64 },
+    Unreachable(String),
+    TimedOut,
+}
+
+impl ConnectTarget {
+    async fn resolve(req: &Request<Incoming>, context: &TransportContext) -> Self {
+        let authority = req
+            .uri()
+            .authority()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let raw_address = if authority.contains(':') {
+            authority.clone()
+        } else {
+            format!("{authority}:443")
+        };
+        let (hostname, port) = raw_address.split_once(':').unwrap_or((&raw_address, "443"));
+        let hostname = hostname.to_string();
+        let port = port.to_string();
+        let address = context
+            .dns_overrides
+            .read()
+            .await
+            .get(&hostname)
+            .filter(|entry| entry.enabled)
+            .map_or(raw_address, |entry| format!("{}:{port}", entry.ip));
+        Self {
+            hostname,
+            authority,
+            address,
+        }
+    }
+}
+
+fn connect_request_context(
+    target: &ConnectTarget,
+    scheme: &str,
+) -> crate::middleware::RequestContext {
+    crate::middleware::RequestContext {
+        method: "CONNECT".to_string(),
+        uri: format!("{scheme}://{}", target.authority),
+        host: target.authority.clone(),
+        ..Default::default()
+    }
+}
+
+fn record_tunnel_outcome(
+    session_manager: &crate::session::SharedSessionManager,
+    session_id: String,
+    target: &ConnectTarget,
+    started_at: std::time::Instant,
+    outcome: TunnelOutcome,
+) {
+    let (status, body, bytes_up, bytes_down) = match outcome {
+        TunnelOutcome::Connected {
+            bytes_up,
+            bytes_down,
+        } => (
+            200,
+            format!("↑{} ↓{}", fmt_bytes(bytes_up), fmt_bytes(bytes_down)),
+            bytes_up,
+            bytes_down,
+        ),
+        TunnelOutcome::Unreachable(error) => (502, format!("upstream unreachable: {error}"), 0, 0),
+        TunnelOutcome::TimedOut => (504, "upstream connect timed out".to_string(), 0, 0),
+    };
+    session_manager.record_response_with_metrics(
+        session_id.clone(),
+        crate::middleware::ResponseContext {
+            status,
+            body: bytes::Bytes::from(body),
+            request_uri: format!("https://{}", target.authority),
+            session_id: Some(session_id),
+            ..Default::default()
+        },
+        crate::session::InspectionMetrics {
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            request_size_bytes: bytes_up as usize,
+            response_size_bytes: bytes_down as usize,
+            status_code: status,
+            ..Default::default()
+        },
+    );
+}
+
 /// Wraps a stream so that a previously-read prefix is replayed before the inner
 /// bytes. Lets us peek the first byte to detect TLS and then hand the *whole*
 /// stream (prefix included) to either the MITM interceptor or a plain tunnel.
@@ -76,49 +169,18 @@ pub async fn handle_connect(
 ) -> Response<Body> {
     let sm = context.session_manager.clone();
     let engine = context.engine.clone();
-    let dns_overrides = context.dns_overrides.clone();
     let connections = context.connections.clone();
     let connect_timeout = context.connect_timeout;
     let handshake_timeout = context.handshake_timeout;
 
-    let host = req
-        .uri()
-        .authority()
-        .map(|a| a.to_string())
-        .unwrap_or_default();
-    let addr = {
-        let raw = if host.contains(':') {
-            host.clone()
-        } else {
-            format!("{}:443", host)
-        };
-        let ovr = dns_overrides.read().await;
-        if !ovr.is_empty() {
-            let (hostname, port_part) = raw.split_once(':').unwrap_or((&raw, "443"));
-            if let Some(entry) = ovr.get(hostname).filter(|e| e.enabled) {
-                format!("{}:{}", entry.ip, port_part)
-            } else {
-                raw
-            }
-        } else {
-            raw
-        }
-    };
-    let hostname = host.split(':').next().unwrap_or(&host).to_string();
+    let target = ConnectTarget::resolve(&req, &context).await;
 
     let is_mitm = engine.mitm_enabled && engine.ca.is_some();
     let session_id = uuid::Uuid::new_v4().to_string();
     if !is_mitm {
         sm.record_request(
             session_id.clone(),
-            crate::middleware::RequestContext {
-                method: "CONNECT".to_string(),
-                uri: format!("https://{}", host),
-                headers: crate::middleware::HeaderMap::new(),
-                body: bytes::Bytes::new(),
-                host: host.clone(),
-                ..Default::default()
-            },
+            connect_request_context(&target, "https"),
         );
     }
 
@@ -155,8 +217,8 @@ pub async fn handle_connect(
                             if is_tls && let Some(ca) = engine.ca.clone() {
                                 mitm_intercept(
                                     prefixed,
-                                    hostname.clone(),
-                                    host.clone(),
+                                    target.hostname.clone(),
+                                    target.authority.clone(),
                                     engine.clone(),
                                     ca,
                                     handshake_timeout,
@@ -170,99 +232,40 @@ pub async fn handle_connect(
                             // http:// — this tunnel is explicitly NOT TLS.
                             sm.record_request(
                                 session_id.clone(),
-                                crate::middleware::RequestContext {
-                                    method: "CONNECT".to_string(),
-                                    uri: format!("http://{}", host),
-                                    headers: crate::middleware::HeaderMap::new(),
-                                    body: bytes::Bytes::new(),
-                                    host: host.clone(),
-                                    ..Default::default()
-                                },
+                                connect_request_context(&target, "http"),
                             );
-                            tracing::debug!(host=%hostname, "CONNECT tunnel is not TLS; tunnelling without MITM");
+                            tracing::debug!(host=%target.hostname, "CONNECT tunnel is not TLS; tunnelling without MITM");
                             prefixed
                         } else {
                             PrefixedIo::new(Vec::new(), io)
                         }
                     };
-                    match timeout(connect_timeout, tokio::net::TcpStream::connect(&addr)).await {
+                    let outcome = match timeout(
+                        connect_timeout,
+                        tokio::net::TcpStream::connect(&target.address),
+                    )
+                    .await
+                    {
                         Ok(Ok(mut upstream)) => {
                             let mut io = stream;
                             let result =
                                 tokio::io::copy_bidirectional(&mut io, &mut upstream).await;
                             let (to_server, to_client) = result.unwrap_or((0, 0));
-                            sm.record_response_with_metrics(
-                                session_id.clone(),
-                                crate::middleware::ResponseContext {
-                                    status: 200,
-                                    headers: crate::middleware::HeaderMap::new(),
-                                    body: bytes::Bytes::from(format!(
-                                        "↑{} ↓{}",
-                                        fmt_bytes(to_server),
-                                        fmt_bytes(to_client)
-                                    )),
-                                    request_uri: format!("https://{}", host),
-                                    session_id: Some(session_id),
-                                    ..Default::default()
-                                },
-                                crate::session::InspectionMetrics {
-                                    latency_ms: start.elapsed().as_millis() as u64,
-                                    request_size_bytes: to_server as usize,
-                                    response_size_bytes: to_client as usize,
-                                    status_code: 200,
-                                    ttfb_ms: 0,
-                                    body_ms: 0,
-                                    ..Default::default()
-                                },
-                            );
+                            TunnelOutcome::Connected {
+                                bytes_up: to_server,
+                                bytes_down: to_client,
+                            }
                         }
                         Ok(Err(e)) => {
-                            tracing::error!(error=%e, addr=%addr, "CONNECT upstream unreachable");
-                            sm.record_response_with_metrics(
-                                session_id.clone(),
-                                crate::middleware::ResponseContext {
-                                    status: 502,
-                                    headers: crate::middleware::HeaderMap::new(),
-                                    body: bytes::Bytes::from(format!("upstream unreachable: {}", e)),
-                                    request_uri: format!("https://{}", host),
-                                    session_id: Some(session_id),
-                                    ..Default::default()
-                                },
-                                crate::session::InspectionMetrics {
-                                    latency_ms: start.elapsed().as_millis() as u64,
-                                    request_size_bytes: 0,
-                                    response_size_bytes: 0,
-                                    status_code: 502,
-                                    ttfb_ms: 0,
-                                    body_ms: 0,
-                                    ..Default::default()
-                                },
-                            );
+                            tracing::error!(error=%e, addr=%target.address, "CONNECT upstream unreachable");
+                            TunnelOutcome::Unreachable(e.to_string())
                         }
                         Err(_) => {
-                            tracing::error!(addr=%addr, timeout_secs=connect_timeout.as_secs(), "CONNECT upstream timed out");
-                            sm.record_response_with_metrics(
-                                session_id.clone(),
-                                crate::middleware::ResponseContext {
-                                    status: 504,
-                                    headers: crate::middleware::HeaderMap::new(),
-                                    body: bytes::Bytes::from_static(b"upstream connect timed out"),
-                                    request_uri: format!("https://{}", host),
-                                    session_id: Some(session_id),
-                                    ..Default::default()
-                                },
-                                crate::session::InspectionMetrics {
-                                    latency_ms: start.elapsed().as_millis() as u64,
-                                    request_size_bytes: 0,
-                                    response_size_bytes: 0,
-                                    status_code: 504,
-                                    ttfb_ms: 0,
-                                    body_ms: 0,
-                                    ..Default::default()
-                                },
-                            );
+                            tracing::error!(addr=%target.address, timeout_secs=connect_timeout.as_secs(), "CONNECT upstream timed out");
+                            TunnelOutcome::TimedOut
                         }
-                    }
+                    };
+                    record_tunnel_outcome(&sm, session_id.clone(), &target, start, outcome);
                 }
                 Err(e) => tracing::error!(error=%e, "CONNECT upgrade failed"),
             }
@@ -271,12 +274,15 @@ pub async fn handle_connect(
         tokio::select! {
             _ = &mut tunnel => {}
             _ = wait_for_shutdown(&mut shutdown) => {
-                tracing::debug!(host=%host, "CONNECT tunnel stopped by shutdown");
+                tracing::debug!(host=%target.authority, "CONNECT tunnel stopped by shutdown");
             }
         }
     });
 
-    Response::builder().status(200).body(Body::empty()).unwrap()
+    Response::builder()
+        .status(200)
+        .body(Body::empty())
+        .expect("static 200 response is always valid")
 }
 
 fn fmt_bytes(n: u64) -> String {

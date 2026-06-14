@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tracing::{info, warn};
 
 fn default_timeout_secs() -> u64 {
@@ -44,6 +46,17 @@ fn default_max_connections() -> usize {
 
 fn default_bind_host() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_mitm_config() -> MitmConfig {
+    MitmConfig {
+        enabled: false,
+        root_ca_path: PathBuf::from("./certs"),
+    }
+}
+
+fn default_storage_path() -> PathBuf {
+    PathBuf::from("./storage")
 }
 
 fn default_log_level() -> String {
@@ -107,7 +120,11 @@ pub struct Config {
     /// IP address the proxy binds to. Use "127.0.0.1" to restrict to localhost only.
     #[serde(default = "default_bind_host")]
     pub bind_host: String,
+    /// Enable Man-in-the-Middle (MITM) interception and decryption of HTTPS traffic.
+    #[serde(default = "default_mitm_config")]
     pub mitm: MitmConfig,
+    /// Path to the storage directory.
+    #[serde(default = "default_storage_path")]
     pub storage_path: PathBuf,
     /// Upstream request timeout in seconds.
     #[serde(default = "default_timeout_secs")]
@@ -169,8 +186,7 @@ pub struct Config {
     #[serde(default)]
     pub socks5_port: Option<u16>,
     /// Enable the HTTP/3 (QUIC) listener. Requires the `http3` build feature and
-    /// `http3_port` to be set. Disabled by default (research preview). See the
-    /// protocol-support RFC §12.1 — h3 binds its own UDP port, never shared.
+    /// `http3_port`. HTTP/3 uses a dedicated UDP port.
     #[serde(default)]
     pub http3_enabled: bool,
     /// UDP port for the HTTP/3 (QUIC) listener. Kept distinct from the TCP `port`
@@ -178,7 +194,7 @@ pub struct Config {
     /// explicitly (`alt-svc: h3=":<http3_port>"`). Disabled when None.
     #[serde(default)]
     pub http3_port: Option<u16>,
-    /// Export per-exchange protocol spans over OpenTelemetry (Phase 11). Requires
+    /// Export per-exchange protocol spans over OpenTelemetry. Requires
     /// the `otel` build feature and `otel_endpoint`. Disabled by default.
     #[serde(default)]
     pub otel_enabled: bool,
@@ -213,11 +229,8 @@ impl Default for Config {
         Self {
             port: 8080,
             bind_host: default_bind_host(),
-            mitm: MitmConfig {
-                enabled: false,
-                root_ca_path: PathBuf::from("./certs"),
-            },
-            storage_path: PathBuf::from("./storage"),
+            mitm: default_mitm_config(),
+            storage_path: default_storage_path(),
             timeout_secs: default_timeout_secs(),
             connect_timeout_secs: default_connect_timeout_secs(),
             handshake_timeout_secs: default_handshake_timeout_secs(),
@@ -254,51 +267,175 @@ impl Config {
     ///   2. Fields in the config file
     ///   3. Built-in defaults
     ///
-    /// Config file path: `OPROXY_CONFIG` env var -> `./configs/default.yaml` -> built-in defaults.
+    /// Config file path: `OPROXY_CONFIG` env var -> `./configs/default.yaml`.
+    /// Loading panics if the selected file cannot be read or parsed.
+    pub fn load() -> Self {
+        let path =
+            env_value("OPROXY_CONFIG").unwrap_or_else(|| "./configs/default.yaml".to_string());
+
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to read config file '{path}': {e}"));
+
+        let mut config = serde_yaml::from_str::<Config>(&contents)
+            .unwrap_or_else(|e| panic!("Failed to parse config file '{path}': {e}"));
+
+        info!(path = %path, "Loaded config from file");
+
+        config.apply_env_overrides();
+
+        for w in config.validate() {
+            warn!(warning = %w, "Config validation");
+        }
+
+        config
+    }
+
+    /// Override config values from environment variables
+    fn apply_env_overrides(&mut self) {
+        self.apply_network_env();
+        self.apply_runtime_env();
+        self.apply_security_env();
+        self.apply_observability_env();
+        self.apply_path_env();
+    }
+
+    fn apply_network_env(&mut self) {
+        if let Some(value) = env_value("OPROXY_PORT") {
+            self.port = parse_env("OPROXY_PORT", &value);
+            info!(port = self.port, "OPROXY_PORT override applied");
+        }
+        if let Some(value) = env_value("OPROXY_BIND_HOST") {
+            self.bind_host = value;
+        }
+        if let Some(value) = env_value("OPROXY_HTTPS_PORT") {
+            self.https_port = Some(parse_env("OPROXY_HTTPS_PORT", &value));
+        }
+        if let Some(value) = env_value("OPROXY_HTTP3_ENABLED") {
+            self.http3_enabled = parse_env_bool("OPROXY_HTTP3_ENABLED", &value);
+        }
+        if let Some(value) = env_value("OPROXY_HTTP3_PORT") {
+            self.http3_port = Some(parse_env("OPROXY_HTTP3_PORT", &value));
+        }
+        if let Some(value) = env_value("OPROXY_SOCKS5_PORT") {
+            self.socks5_port = parse_optional_port("OPROXY_SOCKS5_PORT", &value);
+        }
+    }
+
+    fn apply_runtime_env(&mut self) {
+        if let Some(value) = env_value("OPROXY_MAX_BODY_BYTES") {
+            self.max_body_bytes = parse_env("OPROXY_MAX_BODY_BYTES", &value);
+        }
+        if let Some(value) = env_value("OPROXY_MAX_SESSIONS") {
+            self.max_sessions = parse_env("OPROXY_MAX_SESSIONS", &value);
+        }
+        if let Some(value) = env_value("OPROXY_MAX_RETAINED_BODY_BYTES") {
+            self.max_retained_body_bytes = parse_env("OPROXY_MAX_RETAINED_BODY_BYTES", &value);
+        }
+        if let Some(value) = env_value("OPROXY_MAX_CONNECTIONS") {
+            self.max_connections = parse_env("OPROXY_MAX_CONNECTIONS", &value);
+        }
+        if let Some(value) = env_value("OPROXY_CONNECT_TIMEOUT_SECS") {
+            self.connect_timeout_secs = parse_env("OPROXY_CONNECT_TIMEOUT_SECS", &value);
+        }
+        if let Some(value) = env_value("OPROXY_HANDSHAKE_TIMEOUT_SECS") {
+            self.handshake_timeout_secs = parse_env("OPROXY_HANDSHAKE_TIMEOUT_SECS", &value);
+        }
+        if let Some(value) = env_value("OPROXY_SHUTDOWN_GRACE_SECS") {
+            self.shutdown_grace_secs = parse_env("OPROXY_SHUTDOWN_GRACE_SECS", &value);
+        }
+        if let Some(value) = env_value("OPROXY_INSPECT_WS_FRAMES") {
+            self.inspect_ws_frames = parse_env_bool("OPROXY_INSPECT_WS_FRAMES", &value);
+        }
+    }
+
+    fn apply_security_env(&mut self) {
+        if let Some(value) = env_value("OPROXY_MITM_ENABLED") {
+            self.mitm.enabled = parse_env_bool("OPROXY_MITM_ENABLED", &value);
+        }
+        if let Some(value) = env_value("OPROXY_ALLOW_REMOTE_ADMIN") {
+            self.allow_remote_admin = parse_env_bool("OPROXY_ALLOW_REMOTE_ADMIN", &value);
+        }
+        if let Some(value) = env_value("OPROXY_ADMIN_TOKEN") {
+            self.admin_token = non_empty(value);
+        }
+        if let Some(value) = env_value("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS") {
+            self.allow_private_admin_egress =
+                parse_env_bool("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS", &value);
+        }
+    }
+
+    fn apply_observability_env(&mut self) {
+        if let Some(value) = env_value("OPROXY_LOG_LEVEL") {
+            self.log.level = value;
+        }
+        if let Some(value) = env_value("OPROXY_LOG_DIR") {
+            self.log.dir = PathBuf::from(value);
+        }
+        if let Some(value) = env_value("OPROXY_OTEL_ENABLED") {
+            self.otel_enabled = parse_env_bool("OPROXY_OTEL_ENABLED", &value);
+        }
+        if let Some(value) = env_value("OPROXY_OTEL_ENDPOINT") {
+            self.otel_endpoint = non_empty(value);
+        }
+        if let Some(value) = env_value("OPROXY_UPDATE_CHECK") {
+            self.update_check = parse_env_bool("OPROXY_UPDATE_CHECK", &value);
+        }
+    }
+
+    fn apply_path_env(&mut self) {
+        if let Some(value) = env_value("OPROXY_STORAGE_PATH") {
+            self.storage_path = PathBuf::from(value);
+        }
+        if let Some(value) = env_value("OPROXY_MAP_LOCAL_BASE_PATH") {
+            self.map_local_base_path = non_empty(value).map(PathBuf::from);
+        }
+    }
+
     /// Returns a list of human-readable validation warnings (non-fatal).
-    /// Callers should log these at startup so operators see them early.
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
+        self.validate_limits(&mut warnings);
+        self.validate_paths(&mut warnings);
+        self.validate_optional_features(&mut warnings);
+        self.validate_admin_security(&mut warnings);
+        warnings
+    }
 
+    fn validate_limits(&self, warnings: &mut Vec<String>) {
         if self.port == 0 {
             warnings.push("port is 0 - OS will assign an ephemeral port".to_string());
         }
-
         if self.timeout_secs == 0 {
             warnings.push("timeout_secs is 0 - upstream requests will never time out".to_string());
         }
-
         if self.connect_timeout_secs == 0 {
             warnings.push(
                 "connect_timeout_secs is 0 - TCP connect attempts time out immediately".to_string(),
             );
         }
-
         if self.handshake_timeout_secs == 0 {
             warnings.push(
                 "handshake_timeout_secs is 0 - protocol handshakes time out immediately"
                     .to_string(),
             );
         }
-
         if self.shutdown_grace_secs == 0 {
             warnings
                 .push("shutdown_grace_secs is 0 - active connections are not drained".to_string());
         }
-
         if self.max_body_bytes == 0 {
             warnings.push(
                 "max_body_bytes is 0 - request/response bodies will not be buffered".to_string(),
             );
         }
-
         if self.max_connections == 0 {
             warnings.push(
                 "max_connections is 0 - all downstream connections will be rejected".to_string(),
             );
         }
+    }
 
-        // Check storage path is writable by attempting a temp file.
+    fn validate_paths(&self, warnings: &mut Vec<String>) {
         if !self.storage_path.exists() {
             warnings.push(format!(
                 "storage_path '{}' does not exist - it will be created on startup",
@@ -313,14 +450,30 @@ impl Config {
                 self.storage_path.display()
             ));
         }
+        if self.mitm.enabled && !self.mitm.root_ca_path.exists() {
+            warnings.push(format!(
+                "mitm.root_ca_path '{}' does not exist - CA will be generated on first start",
+                self.mitm.root_ca_path.display()
+            ));
+        }
+        if let Some(path) = &self.map_local_base_path
+            && !path.exists()
+        {
+            warnings.push(format!(
+                "map_local_base_path '{}' does not exist - map_local rules will fail at runtime",
+                path.display()
+            ));
+        }
+    }
 
-        // HTTP/3 requires a dedicated UDP port (RFC §12.1).
+    fn validate_optional_features(&self, warnings: &mut Vec<String>) {
         if self.http3_enabled && self.http3_port.is_none() {
             warnings.push(
                 "http3_enabled is true but http3_port is not set - the HTTP/3 listener will not start"
                     .to_string(),
             );
         }
+
         if let Some(h3) = self.http3_port {
             if h3 == self.port {
                 warnings.push(
@@ -335,8 +488,6 @@ impl Config {
                 );
             }
         }
-
-        // OpenTelemetry export (Phase 11).
         if self.otel_enabled {
             if self.otel_endpoint.is_none() {
                 warnings.push(
@@ -351,35 +502,20 @@ impl Config {
                 );
             }
         }
+    }
 
-        // Check CA path when MITM is enabled.
-        if self.mitm.enabled && !self.mitm.root_ca_path.exists() {
-            warnings.push(format!(
-                "mitm.root_ca_path '{}' does not exist - CA will be generated on first start",
-                self.mitm.root_ca_path.display()
-            ));
-        }
-
-        if self.allow_remote_admin
-            && self
-                .admin_token
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or_default()
-                .is_empty()
-        {
+    fn validate_admin_security(&self, warnings: &mut Vec<String>) {
+        let admin_token_missing = self
+            .admin_token
+            .as_deref()
+            .is_none_or(|token| token.trim().is_empty());
+        if self.allow_remote_admin && admin_token_missing {
             warnings.push(
                 "allow_remote_admin is enabled without admin_token - management APIs are exposed"
                     .to_string(),
             );
         }
 
-        let admin_token_missing = self
-            .admin_token
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty();
         if matches!(self.bind_host.trim(), "0.0.0.0" | "::" | "[::]") && admin_token_missing {
             warnings.push(
                 "bind_host is wildcard without admin_token - use OPROXY_ADMIN_TOKEN when exposing the proxy to untrusted clients"
@@ -393,191 +529,48 @@ impl Config {
                     .to_string(),
             );
         }
-
-        if let Some(ref path) = self.map_local_base_path
-            && !path.exists()
-        {
-            warnings.push(format!(
-                "map_local_base_path '{}' does not exist - map_local rules will fail at runtime",
-                path.display()
-            ));
-        }
-
-        warnings
     }
+}
 
-    pub fn load() -> Self {
-        let path =
-            std::env::var("OPROXY_CONFIG").unwrap_or_else(|_| "./configs/default.yaml".to_string());
+fn env_value(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => panic!("Environment variable {name} is invalid: {e}"),
+    }
+}
 
-        let mut config = match std::fs::read_to_string(&path) {
-            Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
-                Ok(cfg) => {
-                    info!(path = %path, "Loaded config from file");
-                    cfg
-                }
-                Err(e) => {
-                    warn!(path = %path, error = %e, "Failed to parse config file, using defaults");
-                    Self::default()
-                }
-            },
-            Err(_) => {
-                info!(path = %path, "Config file not found, using defaults");
-                Self::default()
-            }
-        };
+fn parse_env<T>(name: &str, value: &str) -> T
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    value
+        .parse()
+        .unwrap_or_else(|e| panic!("Environment variable {name} has invalid value '{value}': {e}"))
+}
 
-        // Environment variable overrides
-        if let Ok(port_str) = std::env::var("OPROXY_PORT") {
-            match port_str.parse::<u16>() {
-                Ok(port) => {
-                    info!(port = port, "OPROXY_PORT override applied");
-                    config.port = port;
-                }
-                Err(_) => {
-                    warn!(value = %port_str, "OPROXY_PORT is not a valid port number, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_MITM_ENABLED") {
-            config.mitm.enabled = matches!(val.to_lowercase().as_str(), "1" | "true" | "yes");
-        }
-        if let Ok(val) = std::env::var("OPROXY_STORAGE_PATH") {
-            config.storage_path = PathBuf::from(val);
-        }
-        if let Ok(val) = std::env::var("OPROXY_BIND_HOST") {
-            config.bind_host = val;
-        }
-        if let Ok(val) = std::env::var("OPROXY_LOG_LEVEL") {
-            config.log.level = val;
-        }
-        if let Ok(val) = std::env::var("OPROXY_LOG_DIR") {
-            config.log.dir = PathBuf::from(val);
-        }
-        if let Ok(val) = std::env::var("OPROXY_HTTPS_PORT") {
-            match val.parse::<u16>() {
-                Ok(p) => config.https_port = Some(p),
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_HTTPS_PORT is not a valid port number, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_INSPECT_WS_FRAMES") {
-            config.inspect_ws_frames = !matches!(val.to_lowercase().as_str(), "0" | "false" | "no");
-        }
-        if let Ok(val) = std::env::var("OPROXY_HTTP3_ENABLED") {
-            config.http3_enabled = matches!(val.to_lowercase().as_str(), "1" | "true" | "yes");
-        }
-        if let Ok(val) = std::env::var("OPROXY_HTTP3_PORT") {
-            match val.parse::<u16>() {
-                Ok(p) => config.http3_port = Some(p),
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_HTTP3_PORT is not a valid port number, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_OTEL_ENABLED") {
-            config.otel_enabled = matches!(val.to_lowercase().as_str(), "1" | "true" | "yes");
-        }
-        if let Ok(val) = std::env::var("OPROXY_UPDATE_CHECK") {
-            config.update_check = !matches!(val.to_lowercase().as_str(), "0" | "false" | "no");
-        }
-        if let Ok(val) = std::env::var("OPROXY_OTEL_ENDPOINT") {
-            let v = val.trim().to_string();
-            config.otel_endpoint = (!v.is_empty()).then_some(v);
-        }
-        if let Ok(val) = std::env::var("OPROXY_ALLOW_REMOTE_ADMIN") {
-            config.allow_remote_admin = matches!(val.to_lowercase().as_str(), "1" | "true" | "yes");
-        }
-        if let Ok(val) = std::env::var("OPROXY_ADMIN_TOKEN") {
-            let token = val.trim().to_string();
-            config.admin_token = (!token.is_empty()).then_some(token);
-        }
-        if let Ok(val) = std::env::var("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS") {
-            config.allow_private_admin_egress =
-                matches!(val.to_lowercase().as_str(), "1" | "true" | "yes");
-        }
-        if let Ok(val) = std::env::var("OPROXY_MAX_BODY_BYTES") {
-            match val.parse::<usize>() {
-                Ok(v) => config.max_body_bytes = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_MAX_BODY_BYTES is not a valid byte count, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_MAX_SESSIONS") {
-            match val.parse::<usize>() {
-                Ok(v) => config.max_sessions = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_MAX_SESSIONS is not a valid session count, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_MAX_RETAINED_BODY_BYTES") {
-            match val.parse::<usize>() {
-                Ok(v) => config.max_retained_body_bytes = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_MAX_RETAINED_BODY_BYTES is not a valid byte count, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_MAX_CONNECTIONS") {
-            match val.parse::<usize>() {
-                Ok(v) => config.max_connections = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_MAX_CONNECTIONS is not a valid connection count, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_CONNECT_TIMEOUT_SECS") {
-            match val.parse::<u64>() {
-                Ok(v) => config.connect_timeout_secs = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_CONNECT_TIMEOUT_SECS is not a valid timeout, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_HANDSHAKE_TIMEOUT_SECS") {
-            match val.parse::<u64>() {
-                Ok(v) => config.handshake_timeout_secs = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_HANDSHAKE_TIMEOUT_SECS is not a valid timeout, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_SHUTDOWN_GRACE_SECS") {
-            match val.parse::<u64>() {
-                Ok(v) => config.shutdown_grace_secs = v,
-                Err(_) => {
-                    warn!(value = %val, "OPROXY_SHUTDOWN_GRACE_SECS is not a valid timeout, ignoring")
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_MAP_LOCAL_BASE_PATH") {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                config.map_local_base_path = Some(PathBuf::from(trimmed));
-            }
-        }
-        if let Ok(val) = std::env::var("OPROXY_SOCKS5_PORT") {
-            let trimmed = val.trim();
-            if trimmed.is_empty() || trimmed == "0" {
-                config.socks5_port = None;
-            } else {
-                match trimmed.parse::<u16>() {
-                    Ok(v) => config.socks5_port = Some(v),
-                    Err(_) => {
-                        warn!(value = %val, "OPROXY_SOCKS5_PORT is not a valid port, ignoring")
-                    }
-                }
-            }
-        }
+fn parse_env_bool(name: &str, value: &str) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => true,
+        "0" | "false" | "no" => false,
+        _ => panic!(
+            "Environment variable {name} has invalid boolean value '{value}'; expected true/false, 1/0, or yes/no"
+        ),
+    }
+}
 
-        for w in config.validate() {
-            warn!(warning = %w, "Config validation");
-        }
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
 
-        config
+fn parse_optional_port(name: &str, value: &str) -> Option<u16> {
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        None
+    } else {
+        Some(parse_env(name, value))
     }
 }
 
@@ -589,6 +582,65 @@ mod tests {
 
     // Env-var tests mutate global process state; serialize them to avoid races.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    const DEFAULT_CONFIG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/configs/default.yaml");
+
+    /// Test-only RAII guard for process environment variables.
+    ///
+    /// Constructing it locks [`ENV_MUTEX`], serialising env-mutating tests.
+    /// [`set`](EnvGuard::set)/[`remove`](EnvGuard::remove) record the previous
+    /// value; on drop the originals are restored (even on panic). Centralising
+    /// the `unsafe` env calls here keeps the test bodies clean and safe.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let lock = ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Self {
+                _lock: lock,
+                saved: Vec::new(),
+            }
+        }
+
+        fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+            self.saved.push((key.to_string(), std::env::var(key).ok()));
+            // SAFETY: env access in these tests is serialised by the guard's lock.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            self
+        }
+
+        fn remove(&mut self, key: &str) -> &mut Self {
+            self.saved.push((key.to_string(), std::env::var(key).ok()));
+            // SAFETY: env access in these tests is serialised by the guard's lock.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::remove_var(key);
+            }
+            self
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in self.saved.drain(..).rev() {
+                // SAFETY: the guard's lock is still held during drop.
+                #[allow(unsafe_code)]
+                unsafe {
+                    match prev {
+                        Some(value) => std::env::set_var(&key, value),
+                        None => std::env::remove_var(&key),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn default_values() {
@@ -617,61 +669,45 @@ mod tests {
     }
 
     #[test]
-    fn load_returns_usable_defaults_when_no_file() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::remove_var("OPROXY_PORT");
-            std::env::remove_var("OPROXY_MITM_ENABLED");
-            std::env::remove_var("OPROXY_STORAGE_PATH");
-            std::env::remove_var("OPROXY_ALLOW_REMOTE_ADMIN");
-            std::env::remove_var("OPROXY_ADMIN_TOKEN");
-            std::env::remove_var("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS");
-        }
-        let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-        }
-        assert_eq!(cfg.port, 8080);
-        assert!(!cfg.mitm.enabled);
-        assert_eq!(cfg.timeout_secs, 30);
-        assert_eq!(cfg.connect_timeout_secs, 10);
-        assert_eq!(cfg.handshake_timeout_secs, 10);
-        assert_eq!(cfg.shutdown_grace_secs, 10);
-        assert_eq!(cfg.max_sessions, 10_000);
-        assert_eq!(cfg.max_retained_body_bytes, 64 * 1024 * 1024);
-        assert_eq!(cfg.max_connections, 1024);
+    fn load_panics_when_file_does_not_exist() {
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
+
+        let result = std::panic::catch_unwind(Config::load);
+
+        env.remove("OPROXY_CONFIG");
+
+        let panic = result.expect_err("missing config should panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(message.contains("Failed to read config file"));
+        assert!(message.contains("/tmp/oproxy_no_such_file.yaml"));
     }
 
     #[test]
     fn oproxy_port_env_var_overrides_port() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_PORT", "9090");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_PORT", "9090");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_PORT");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_PORT");
         assert_eq!(cfg.port, 9090);
     }
 
     #[test]
     fn http3_env_vars_override_enabled_and_port() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_HTTP3_ENABLED", "true");
-            std::env::set_var("OPROXY_HTTP3_PORT", "8443");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_HTTP3_ENABLED", "true");
+        env.set("OPROXY_HTTP3_PORT", "8443");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_HTTP3_ENABLED");
-            std::env::remove_var("OPROXY_HTTP3_PORT");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_HTTP3_ENABLED");
+        env.remove("OPROXY_HTTP3_PORT");
         assert!(cfg.http3_enabled);
         assert_eq!(cfg.http3_port, Some(8443));
     }
@@ -700,18 +736,14 @@ mod tests {
 
     #[test]
     fn otel_env_vars_override_enabled_and_endpoint() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_OTEL_ENABLED", "true");
-            std::env::set_var("OPROXY_OTEL_ENDPOINT", "http://localhost:4317");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_OTEL_ENABLED", "true");
+        env.set("OPROXY_OTEL_ENDPOINT", "http://localhost:4317");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_OTEL_ENABLED");
-            std::env::remove_var("OPROXY_OTEL_ENDPOINT");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_OTEL_ENABLED");
+        env.remove("OPROXY_OTEL_ENDPOINT");
         assert!(cfg.otel_enabled);
         assert_eq!(cfg.otel_endpoint.as_deref(), Some("http://localhost:4317"));
     }
@@ -739,83 +771,94 @@ mod tests {
     }
 
     #[test]
-    fn invalid_oproxy_port_is_ignored() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_PORT", "not_a_number");
-        }
-        let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_PORT");
-        }
-        assert_eq!(cfg.port, 8080);
+    fn invalid_oproxy_port_panics() {
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_PORT", "not_a_number");
+
+        let result = std::panic::catch_unwind(Config::load);
+
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_PORT");
+
+        let panic = result.expect_err("invalid environment variable should panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(message.contains("OPROXY_PORT"));
+        assert!(message.contains("not_a_number"));
+    }
+
+    #[test]
+    fn invalid_boolean_env_var_panics() {
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_MITM_ENABLED", "sometimes");
+
+        let result = std::panic::catch_unwind(Config::load);
+
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_MITM_ENABLED");
+
+        let panic = result.expect_err("invalid boolean environment variable should panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(message.contains("OPROXY_MITM_ENABLED"));
+        assert!(message.contains("sometimes"));
     }
 
     #[test]
     fn oproxy_mitm_enabled_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut env = EnvGuard::new();
         for val in ["1", "true", "yes", "TRUE", "YES"] {
-            unsafe {
-                std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-                std::env::set_var("OPROXY_MITM_ENABLED", val);
-            }
+            env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+            env.set("OPROXY_MITM_ENABLED", val);
             let cfg = Config::load();
-            unsafe {
-                std::env::remove_var("OPROXY_CONFIG");
-                std::env::remove_var("OPROXY_MITM_ENABLED");
-            }
+            env.remove("OPROXY_CONFIG");
+            env.remove("OPROXY_MITM_ENABLED");
             assert!(cfg.mitm.enabled, "expected mitm enabled for value '{val}'");
         }
     }
 
     #[test]
     fn oproxy_storage_path_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_STORAGE_PATH", "/tmp/my_storage");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_STORAGE_PATH", "/tmp/my_storage");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_STORAGE_PATH");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_STORAGE_PATH");
         assert_eq!(cfg.storage_path, PathBuf::from("/tmp/my_storage"));
     }
 
     #[test]
     fn oproxy_bind_host_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_BIND_HOST", "127.0.0.1");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_BIND_HOST", "127.0.0.1");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_BIND_HOST");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_BIND_HOST");
         assert_eq!(cfg.bind_host, "127.0.0.1");
     }
 
     #[test]
     fn admin_security_env_vars_override_defaults() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_ALLOW_REMOTE_ADMIN", "true");
-            std::env::set_var("OPROXY_ADMIN_TOKEN", "secret-token");
-            std::env::set_var("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS", "true");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_ALLOW_REMOTE_ADMIN", "true");
+        env.set("OPROXY_ADMIN_TOKEN", "secret-token");
+        env.set("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS", "true");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_ALLOW_REMOTE_ADMIN");
-            std::env::remove_var("OPROXY_ADMIN_TOKEN");
-            std::env::remove_var("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_ALLOW_REMOTE_ADMIN");
+        env.remove("OPROXY_ADMIN_TOKEN");
+        env.remove("OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS");
         assert!(cfg.allow_remote_admin);
         assert_eq!(cfg.admin_token.as_deref(), Some("secret-token"));
         assert!(cfg.allow_private_admin_egress);
@@ -853,28 +896,24 @@ mod tests {
 
     #[test]
     fn capture_limit_env_vars_override_defaults() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_MAX_BODY_BYTES", "4096");
-            std::env::set_var("OPROXY_MAX_SESSIONS", "123");
-            std::env::set_var("OPROXY_MAX_RETAINED_BODY_BYTES", "8192");
-            std::env::set_var("OPROXY_MAX_CONNECTIONS", "44");
-            std::env::set_var("OPROXY_CONNECT_TIMEOUT_SECS", "3");
-            std::env::set_var("OPROXY_HANDSHAKE_TIMEOUT_SECS", "4");
-            std::env::set_var("OPROXY_SHUTDOWN_GRACE_SECS", "5");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_MAX_BODY_BYTES", "4096");
+        env.set("OPROXY_MAX_SESSIONS", "123");
+        env.set("OPROXY_MAX_RETAINED_BODY_BYTES", "8192");
+        env.set("OPROXY_MAX_CONNECTIONS", "44");
+        env.set("OPROXY_CONNECT_TIMEOUT_SECS", "3");
+        env.set("OPROXY_HANDSHAKE_TIMEOUT_SECS", "4");
+        env.set("OPROXY_SHUTDOWN_GRACE_SECS", "5");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_MAX_BODY_BYTES");
-            std::env::remove_var("OPROXY_MAX_SESSIONS");
-            std::env::remove_var("OPROXY_MAX_RETAINED_BODY_BYTES");
-            std::env::remove_var("OPROXY_MAX_CONNECTIONS");
-            std::env::remove_var("OPROXY_CONNECT_TIMEOUT_SECS");
-            std::env::remove_var("OPROXY_HANDSHAKE_TIMEOUT_SECS");
-            std::env::remove_var("OPROXY_SHUTDOWN_GRACE_SECS");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_MAX_BODY_BYTES");
+        env.remove("OPROXY_MAX_SESSIONS");
+        env.remove("OPROXY_MAX_RETAINED_BODY_BYTES");
+        env.remove("OPROXY_MAX_CONNECTIONS");
+        env.remove("OPROXY_CONNECT_TIMEOUT_SECS");
+        env.remove("OPROXY_HANDSHAKE_TIMEOUT_SECS");
+        env.remove("OPROXY_SHUTDOWN_GRACE_SECS");
         assert_eq!(cfg.max_body_bytes, 4096);
         assert_eq!(cfg.max_sessions, 123);
         assert_eq!(cfg.max_retained_body_bytes, 8192);
@@ -886,31 +925,23 @@ mod tests {
 
     #[test]
     fn oproxy_log_level_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_LOG_LEVEL", "debug");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_LOG_LEVEL", "debug");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_LOG_LEVEL");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_LOG_LEVEL");
         assert_eq!(cfg.log.level, "debug");
     }
 
     #[test]
     fn oproxy_log_dir_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_LOG_DIR", "/var/log/oproxy");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_LOG_DIR", "/var/log/oproxy");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_LOG_DIR");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_LOG_DIR");
         assert_eq!(cfg.log.dir, PathBuf::from("/var/log/oproxy"));
     }
 
@@ -959,11 +990,13 @@ mod tests {
 
     #[test]
     fn yaml_partial_fields_use_defaults() {
-        // Only core fields specified; bind_host and log should fall back to defaults.
-        let yaml = "port: 7777\nmitm:\n  enabled: false\n  root_ca_path: ./certs\nstorage_path: ./storage\n";
+        let yaml = "port: 7777\n";
         let cfg: Config = serde_yaml::from_str(yaml).expect("deserialize failed");
         assert_eq!(cfg.port, 7777);
         assert_eq!(cfg.bind_host, "127.0.0.1");
+        assert!(!cfg.mitm.enabled);
+        assert_eq!(cfg.mitm.root_ca_path, PathBuf::from("./certs"));
+        assert_eq!(cfg.storage_path, PathBuf::from("./storage"));
         assert_eq!(cfg.timeout_secs, 30);
         assert_eq!(cfg.connect_timeout_secs, 10);
         assert_eq!(cfg.handshake_timeout_secs, 10);
@@ -981,20 +1014,38 @@ mod tests {
 
     #[test]
     fn load_from_valid_yaml_file() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut env = EnvGuard::new();
         let path = std::env::temp_dir().join("oproxy_test_config.yaml");
         std::fs::write(&path, "port: 7777\nmitm:\n  enabled: true\n  root_ca_path: ./certs\nstorage_path: ./storage\n").unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", path.to_str().unwrap());
-            std::env::remove_var("OPROXY_PORT");
-        }
+        env.set("OPROXY_CONFIG", path.to_str().unwrap());
+        env.remove("OPROXY_PORT");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-        }
+        env.remove("OPROXY_CONFIG");
         let _ = std::fs::remove_file(&path);
         assert_eq!(cfg.port, 7777);
         assert!(cfg.mitm.enabled);
+    }
+
+    #[test]
+    fn load_panics_when_yaml_file_is_invalid() {
+        let mut env = EnvGuard::new();
+        let path = std::env::temp_dir().join("oproxy_test_invalid_config.yaml");
+        std::fs::write(&path, "port: not-a-number\n").unwrap();
+        env.set("OPROXY_CONFIG", &path);
+
+        let result = std::panic::catch_unwind(Config::load);
+
+        env.remove("OPROXY_CONFIG");
+        let _ = std::fs::remove_file(&path);
+
+        let panic = result.expect_err("invalid config should panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(message.contains("Failed to parse config file"));
+        assert!(message.contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -1026,16 +1077,12 @@ mod tests {
 
     #[test]
     fn oproxy_map_local_base_path_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("OPROXY_CONFIG", "/tmp/oproxy_no_such_file.yaml");
-            std::env::set_var("OPROXY_MAP_LOCAL_BASE_PATH", "/fixtures");
-        }
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_MAP_LOCAL_BASE_PATH", "/fixtures");
         let cfg = Config::load();
-        unsafe {
-            std::env::remove_var("OPROXY_CONFIG");
-            std::env::remove_var("OPROXY_MAP_LOCAL_BASE_PATH");
-        }
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_MAP_LOCAL_BASE_PATH");
         assert_eq!(cfg.map_local_base_path, Some(PathBuf::from("/fixtures")));
     }
 }

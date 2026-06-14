@@ -426,7 +426,7 @@ fn session_filter_haystack(session: &Exchange) -> String {
 
 /// Pretty-print a body string based on its content-type.
 /// Returns the original string unchanged if it cannot be pretty-printed.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn pretty_body(body: &str, content_type: &str) -> String {
     if (content_type.contains("application/json") || content_type.contains("/json"))
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
@@ -821,8 +821,6 @@ mod tests {
             .await;
         assert_eq!(empty_selection.filtered_total, 0);
     }
-
-    // ── get_session_details ──────────────────────────────────────────────────
 
     #[tokio::test]
     async fn get_session_details_returns_some_for_known_id() {

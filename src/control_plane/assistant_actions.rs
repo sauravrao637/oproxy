@@ -60,6 +60,63 @@ pub(crate) struct AssistantActionPrecondition {
     pub message: String,
 }
 
+enum DirectActionRoute {
+    Throttling,
+    CaptureFilter,
+    Dns,
+    UpstreamProxy,
+    ClearSessions,
+    Playback,
+    Forward,
+    ForwardWebSocket,
+}
+
+enum CollectionActionRoute {
+    Dns,
+    RuleSets,
+    MapRemote,
+    MapLocal,
+    Access,
+    Breakpoints,
+    Mock,
+    Scripts,
+    Webhooks,
+}
+
+impl CollectionActionRoute {
+    fn classify(action: &AssistantAction) -> Result<Self, String> {
+        let route = action_route_contract(&action.method, &action.endpoint)?;
+        match route.kind.as_str() {
+            "dns" => Ok(Self::Dns),
+            "rule-sets" => Ok(Self::RuleSets),
+            "map-remote-rules" => Ok(Self::MapRemote),
+            "map-local-rules" => Ok(Self::MapLocal),
+            "access-rules" => Ok(Self::Access),
+            "breakpoints" => Ok(Self::Breakpoints),
+            "mock" => Ok(Self::Mock),
+            "scripts" => Ok(Self::Scripts),
+            "webhooks" => Ok(Self::Webhooks),
+            _ => Err("assistant action endpoint is not executable".to_string()),
+        }
+    }
+}
+
+impl DirectActionRoute {
+    fn classify(method: &str, endpoint: &str) -> Option<Self> {
+        match (method, endpoint) {
+            ("POST", "/admin/throttling") => Some(Self::Throttling),
+            ("POST", "/admin/capture-filter") => Some(Self::CaptureFilter),
+            ("POST", "/admin/dns") => Some(Self::Dns),
+            ("POST", "/admin/upstream-proxy") => Some(Self::UpstreamProxy),
+            ("DELETE", "/admin/sessions") => Some(Self::ClearSessions),
+            ("POST", "/admin/playback") => Some(Self::Playback),
+            ("POST", "/admin/forward") => Some(Self::Forward),
+            ("POST", "/admin/forward/websocket") => Some(Self::ForwardWebSocket),
+            _ => None,
+        }
+    }
+}
+
 pub(super) fn propose_action(args: Value) -> Result<AssistantAction, String> {
     let method = args
         .get("method")
@@ -384,8 +441,8 @@ pub(super) async fn execute_action_payload(
         &action.summary,
     )?;
     validate_action_payload_shape(&action.method, &action.endpoint, &action.payload)?;
-    match (action.method.as_str(), action.endpoint.as_str()) {
-        ("POST", "/admin/throttling") => {
+    match DirectActionRoute::classify(&action.method, &action.endpoint) {
+        Some(DirectActionRoute::Throttling) => {
             let cfg: ThrottlingConfig = from_payload(&action.payload)?;
             *state.throttling_config.write().await = cfg;
             let snapshot = state.throttling_config.read().await.clone();
@@ -397,7 +454,7 @@ pub(super) async fn execute_action_payload(
                 action_refresh_resources(&action, &["throttling"]),
             ))
         }
-        ("POST", "/admin/capture-filter") => {
+        Some(DirectActionRoute::CaptureFilter) => {
             let cfg: CaptureFilterConfig = from_payload(&action.payload)?;
             *state.capture_filter.write().await = cfg;
             let snapshot = state.capture_filter.read().await.clone();
@@ -409,7 +466,7 @@ pub(super) async fn execute_action_payload(
                 action_refresh_resources(&action, &["capture_filter"]),
             ))
         }
-        ("POST", "/admin/dns") => {
+        Some(DirectActionRoute::Dns) => {
             let map: HashMap<String, crate::middleware::plugins::dns_override::DnsEntry> =
                 from_payload(&action.payload)?;
             *state.dns_overrides.write().await = map;
@@ -422,7 +479,7 @@ pub(super) async fn execute_action_payload(
                 action_refresh_resources(&action, &["dns"]),
             ))
         }
-        ("POST", "/admin/upstream-proxy") => {
+        Some(DirectActionRoute::UpstreamProxy) => {
             let url = action
                 .payload
                 .get("upstream_proxy")
@@ -444,25 +501,25 @@ pub(super) async fn execute_action_payload(
                 action_refresh_resources(&action, &["upstream_proxy"]),
             ))
         }
-        ("DELETE", "/admin/sessions") => {
+        Some(DirectActionRoute::ClearSessions) => {
             state.api_handler.clear_sessions().await;
             Ok((
                 json!({ "ok": true }),
                 action_refresh_resources(&action, &["sessions"]),
             ))
         }
-        ("POST", "/admin/playback") => {
+        Some(DirectActionRoute::Playback) => {
             state.api_handler.start_playback().await;
             Ok((
                 json!({ "ok": true }),
                 action_refresh_resources(&action, &["sessions"]),
             ))
         }
-        ("POST", "/admin/forward") => execute_forward_action(state, &action).await,
-        ("POST", "/admin/forward/websocket") => {
+        Some(DirectActionRoute::Forward) => execute_forward_action(state, &action).await,
+        Some(DirectActionRoute::ForwardWebSocket) => {
             execute_forward_websocket_action(state, &action).await
         }
-        _ => execute_collection_action(state, &action).await,
+        None => execute_collection_action(state, &action).await,
     }
 }
 
@@ -470,7 +527,11 @@ async fn execute_collection_action(
     state: &Arc<AppState>,
     action: &AssistantAction,
 ) -> Result<(Value, Vec<String>), String> {
-    if let Some(id) = action.endpoint.strip_prefix("/admin/dns/") {
+    let route = CollectionActionRoute::classify(action)?;
+    if matches!(route, CollectionActionRoute::Dns) {
+        let Some(id) = action.endpoint.strip_prefix("/admin/dns/") else {
+            return Err("DNS collection replacement is handled as a direct action".to_string());
+        };
         if action.method != "DELETE" {
             return Err("DNS item endpoint supports DELETE only".to_string());
         }
@@ -487,83 +548,155 @@ async fn execute_collection_action(
         ));
     }
 
-    macro_rules! collection {
-        ($prefix:literal, $field:ident, $ty:ty, $save:ident, $resource:literal, $new_id:path) => {{
-            if action.endpoint == $prefix && action.method == "POST" {
-                let mut item: $ty = from_payload(&action.payload)?;
-                item.id = $new_id();
-                let saved = item.clone();
-                let mut items = state.$field.write().await;
-                items.push(item);
-                storage::$save(&state.storage_path, &items)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                return Ok((json!(saved), action_refresh_resources(action, &[$resource])));
-            }
-            if let Some(id) = path_id(&action.endpoint, $prefix) {
-                if action.method == "PUT" {
-                    let mut item: $ty = from_payload(&action.payload)?;
-                    item.id = id.to_string();
-                    let mut items = state.$field.write().await;
-                    let Some(slot) = items.iter_mut().find(|r| r.id == id) else {
-                        return Err(format!("{} item not found", $resource));
-                    };
-                    *slot = item;
-                    storage::$save(&state.storage_path, &items)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    return Ok((json!({ "ok": true }), action_refresh_resources(action, &[$resource])));
-                }
-                if action.method == "DELETE" {
-                    let mut items = state.$field.write().await;
-                    let before = items.len();
-                    items.retain(|r| r.id != id);
-                    if items.len() == before {
-                        return Err(format!("{} item not found", $resource));
-                    }
-                    storage::$save(&state.storage_path, &items)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    return Ok((json!({ "ok": true }), action_refresh_resources(action, &[$resource])));
-                }
-            }
-        }};
+    match route {
+        CollectionActionRoute::RuleSets => {
+            let mut items = state.rule_sets.write().await;
+            let result = mutate_collection(
+                action,
+                "/admin/rule-sets",
+                "rule_sets",
+                &mut items,
+                RewriteRuleSet::new_id,
+            )?;
+            storage::save_rule_sets(&state.storage_path, &items)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        CollectionActionRoute::MapRemote => {
+            let mut items = state.map_remote_rules.write().await;
+            let result = mutate_collection(
+                action,
+                "/admin/map-remote-rules",
+                "map_remote",
+                &mut items,
+                MapRemoteRule::new_id,
+            )?;
+            storage::save_map_remote_rules(&state.storage_path, &items)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        CollectionActionRoute::MapLocal => {
+            let mut items = state.map_local_rules.write().await;
+            let result = mutate_collection(
+                action,
+                "/admin/map-local-rules",
+                "map_local",
+                &mut items,
+                MapLocalRule::new_id,
+            )?;
+            storage::save_map_local_rules(&state.storage_path, &items)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        CollectionActionRoute::Access => {
+            let mut items = state.access_rules.write().await;
+            let result = mutate_collection(
+                action,
+                "/admin/access-rules",
+                "access",
+                &mut items,
+                AccessRule::new_id,
+            )?;
+            storage::save_access_rules(&state.storage_path, &items)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        CollectionActionRoute::Breakpoints => {
+            return execute_breakpoint_action(state, action).await;
+        }
+        CollectionActionRoute::Mock => return execute_mock_action(state, action).await,
+        CollectionActionRoute::Scripts => return execute_script_action(state, action).await,
+        CollectionActionRoute::Webhooks => return execute_webhook_action(state, action).await,
+        CollectionActionRoute::Dns => unreachable!("DNS actions return above"),
     }
+}
 
-    collection!(
-        "/admin/rule-sets",
-        rule_sets,
-        RewriteRuleSet,
-        save_rule_sets,
-        "rule_sets",
-        RewriteRuleSet::new_id
-    );
-    collection!(
-        "/admin/map-remote-rules",
-        map_remote_rules,
-        MapRemoteRule,
-        save_map_remote_rules,
-        "map_remote",
-        MapRemoteRule::new_id
-    );
-    collection!(
-        "/admin/map-local-rules",
-        map_local_rules,
-        MapLocalRule,
-        save_map_local_rules,
-        "map_local",
-        MapLocalRule::new_id
-    );
-    collection!(
-        "/admin/access-rules",
-        access_rules,
-        AccessRule,
-        save_access_rules,
-        "access",
-        AccessRule::new_id
-    );
+trait CollectionItem {
+    fn id(&self) -> &str;
+    fn set_id(&mut self, id: String);
+}
 
-    execute_breakpoint_mock_script_or_webhook(state, action).await
+impl CollectionItem for RewriteRuleSet {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+}
+
+impl CollectionItem for MapRemoteRule {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+}
+
+impl CollectionItem for MapLocalRule {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+}
+
+impl CollectionItem for AccessRule {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+}
+
+fn mutate_collection<T>(
+    action: &AssistantAction,
+    base_path: &str,
+    resource: &str,
+    items: &mut Vec<T>,
+    new_id: fn() -> String,
+) -> Result<(Value, Vec<String>), String>
+where
+    T: CollectionItem + Clone + Serialize + for<'de> Deserialize<'de>,
+{
+    if action.endpoint == base_path && action.method == "POST" {
+        let mut item: T = from_payload(&action.payload)?;
+        item.set_id(new_id());
+        items.push(item.clone());
+        return Ok((json!(item), action_refresh_resources(action, &[resource])));
+    }
+    let id = path_id(&action.endpoint, base_path)
+        .ok_or_else(|| format!("{resource} item endpoint is invalid"))?;
+    match action.method.as_str() {
+        "PUT" => {
+            let mut replacement: T = from_payload(&action.payload)?;
+            replacement.set_id(id.to_string());
+            let slot = items
+                .iter_mut()
+                .find(|item| item.id() == id)
+                .ok_or_else(|| format!("{resource} item not found"))?;
+            *slot = replacement;
+        }
+        "DELETE" => {
+            let before = items.len();
+            items.retain(|item| item.id() != id);
+            if items.len() == before {
+                return Err(format!("{resource} item not found"));
+            }
+        }
+        _ => return Err(format!("unsupported {resource} method")),
+    }
+    Ok((
+        json!({ "ok": true }),
+        action_refresh_resources(action, &[resource]),
+    ))
 }
 
 async fn validate_action_preconditions(
@@ -596,7 +729,7 @@ async fn validate_action_preconditions(
     Ok(())
 }
 
-async fn execute_breakpoint_mock_script_or_webhook(
+async fn execute_breakpoint_action(
     state: &Arc<AppState>,
     action: &AssistantAction,
 ) -> Result<(Value, Vec<String>), String> {
@@ -639,6 +772,13 @@ async fn execute_breakpoint_mock_script_or_webhook(
         ));
     }
 
+    Err("unsupported breakpoint action".to_string())
+}
+
+async fn execute_mock_action(
+    state: &Arc<AppState>,
+    action: &AssistantAction,
+) -> Result<(Value, Vec<String>), String> {
     if action.endpoint == "/admin/mock/rules" && action.method == "POST" {
         let mut rule: MockRule = from_payload(&action.payload)?;
         if rule.id.is_empty() {
@@ -681,6 +821,13 @@ async fn execute_breakpoint_mock_script_or_webhook(
         ));
     }
 
+    Err("unsupported mock action".to_string())
+}
+
+async fn execute_script_action(
+    state: &Arc<AppState>,
+    action: &AssistantAction,
+) -> Result<(Value, Vec<String>), String> {
     if action.endpoint == "/admin/scripts" && action.method == "POST" {
         let mut script: LuaScript = from_payload(&action.payload)?;
         if script.id.is_empty() {
@@ -724,7 +871,7 @@ async fn execute_breakpoint_mock_script_or_webhook(
         ));
     }
 
-    execute_webhook_action(state, action).await
+    Err("unsupported script action".to_string())
 }
 
 async fn execute_webhook_action(
@@ -818,61 +965,30 @@ async fn execute_forward_action(
     action: &AssistantAction,
 ) -> Result<(Value, Vec<String>), String> {
     let req: AssistantForwardReq = from_payload(&action.payload)?;
-    let is_grpc = req.kind == AssistantForwardKind::Grpc;
-    // gRPC is always POST over HTTP/2; the body is one length-prefixed frame.
-    let method = if is_grpc {
-        reqwest::Method::POST
-    } else {
-        reqwest::Method::from_bytes(req.method.as_bytes())
-            .map_err(|_| format!("invalid HTTP method: {}", req.method))?
+    let kind = match req.kind {
+        AssistantForwardKind::Http => super::forward::ForwardKind::Http,
+        AssistantForwardKind::Grpc => super::forward::ForwardKind::Grpc,
     };
-    let url = reqwest::Url::parse(&req.url).map_err(|e| format!("invalid URL: {e}"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("unsupported URL scheme: {}", url.scheme()));
-    }
-    enforce_admin_egress_policy(&url, AdminEgressPolicy::from_config(&state.config)).await?;
-
-    let mut builder = state
-        .proxy_engine
-        .http_client()
-        .await
-        .request(method, &req.url);
-    for (name, value) in &req.headers {
-        builder = builder.header(name, value);
-    }
-    if is_grpc {
-        if !req
-            .headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("content-type"))
-        {
-            builder = builder.header("content-type", "application/grpc+proto");
-        }
-        builder = builder.body(crate::core::forward::encode_grpc_frame(
-            false,
-            req.body.unwrap_or_default().as_bytes(),
-        ));
-    } else if let Some(body) = req.body {
-        builder = builder.body(body);
-    }
-    let response = builder
-        .send()
-        .await
-        .map_err(|e| format!("forward request failed: {}", redact_string(&e.to_string())))?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect::<HashMap<_, _>>();
-    let bytes = response.bytes().await.unwrap_or_default();
+    let response = super::forward::forward_http_exchange(
+        state,
+        super::forward::ForwardReq {
+            kind,
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+            note: None,
+            tags: None,
+        },
+    )
+    .await
+    .map_err(|failure| match failure {
+        super::forward::ForwardFailure::BadRequest(error)
+        | super::forward::ForwardFailure::EgressBlocked(error)
+        | super::forward::ForwardFailure::Upstream(error) => redact_string(&error),
+    })?;
     Ok((
-        json!({
-            "status": status,
-            "headers": redact_value(&json!(headers)),
-            "body_bytes": bytes.len(),
-            "body_preview": redact_string(&String::from_utf8_lossy(&bytes).chars().take(500).collect::<String>()),
-        }),
+        redact_value(&serde_json::to_value(response).map_err(|error| error.to_string())?),
         action_refresh_resources(action, &["sessions"]),
     ))
 }

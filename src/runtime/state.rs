@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 
 use crate::api::ApiHandler;
 use crate::control_plane;
-use crate::core::engine::ProxyEngine;
+use crate::core::engine::{ProxyEngine, ProxyEngineConfig};
 use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::plugins::access_control::{AccessControlMiddleware, SharedAccessRules};
 use crate::middleware::plugins::breakpoints::{BreakpointManager, BreakpointMiddleware};
@@ -59,6 +59,153 @@ pub(super) struct RuntimeServices {
     pub(super) ca: Arc<crate::certs::CertificateAuthority>,
 }
 
+struct RuntimeComponents {
+    throttling: Arc<RwLock<ThrottlingConfig>>,
+    dns: Arc<RwLock<crate::middleware::plugins::dns_override::DnsOverrides>>,
+    capture_filter: Arc<RwLock<CaptureFilterConfig>>,
+    access_rules: SharedAccessRules,
+    rule_sets: SharedRuleSets,
+    map_local_rules: SharedMapLocalRules,
+    map_remote_rules: SharedMapRemoteRules,
+    breakpoints: Arc<BreakpointManager>,
+}
+
+impl RuntimeComponents {
+    async fn load(storage_path: &std::path::Path) -> Self {
+        let breakpoints = Arc::new(BreakpointManager::new());
+        for rule in storage::load_breakpoints(storage_path) {
+            breakpoints.add_rule(rule).await;
+        }
+        Self {
+            throttling: Arc::new(RwLock::new(storage::load_throttle(storage_path))),
+            dns: Arc::new(RwLock::new(storage::load_dns_overrides(storage_path))),
+            capture_filter: Arc::new(RwLock::new(storage::load_capture_filter(storage_path))),
+            access_rules: Arc::new(RwLock::new(storage::load_access_rules(storage_path))),
+            rule_sets: Arc::new(RwLock::new(storage::load_rule_sets(storage_path))),
+            map_local_rules: Arc::new(RwLock::new(storage::load_map_local_rules(storage_path))),
+            map_remote_rules: Arc::new(RwLock::new(storage::load_map_remote_rules(storage_path))),
+            breakpoints,
+        }
+    }
+
+    fn build_request_chain(
+        &self,
+        session_manager: crate::session::SharedSessionManager,
+    ) -> MiddlewareChain {
+        let mut chain = MiddlewareChain::new();
+
+        let mut access = AccessControlMiddleware::new(vec![]);
+        access.rules = self.access_rules.clone();
+        chain.add_middleware(Arc::new(access));
+        chain.add_middleware(Arc::new(CaptureFilterMiddleware::new(
+            self.capture_filter.clone(),
+        )));
+        chain.add_middleware(Arc::new(DnsOverrideMiddleware {
+            overrides: self.dns.clone(),
+        }));
+
+        let mut map_remote = MapRemoteMiddleware::new(vec![]);
+        map_remote.rules = self.map_remote_rules.clone();
+        chain.add_middleware(Arc::new(map_remote));
+        chain.add_middleware(Arc::new(ThrottlingMiddleware {
+            config: self.throttling.clone(),
+        }));
+
+        let mut rewrite = UnifiedRewriteMiddleware::new(vec![]);
+        rewrite.rules = self.rule_sets.clone();
+        chain.add_middleware(Arc::new(rewrite));
+        chain.add_middleware(Arc::new(BreakpointMiddleware::new(
+            self.breakpoints.clone(),
+            session_manager.clone(),
+        )));
+        chain.add_middleware(Arc::new(JwtInspectorMiddleware));
+        chain.add_middleware(Arc::new(GraphQLInspectorMiddleware));
+        chain.add_middleware(Arc::new(GrpcInspectorMiddleware {
+            session_manager: session_manager.clone(),
+            breakpoint_manager: self.breakpoints.clone(),
+        }));
+        chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager)));
+        chain
+    }
+}
+
+fn prepare_storage(storage_path: &std::path::Path) {
+    for (path, purpose) in [
+        (
+            storage_path.to_path_buf(),
+            "configuration changes will not persist across restarts",
+        ),
+        (
+            storage_path.join("map-local"),
+            "Map Local file uploads will not work",
+        ),
+    ] {
+        if let Err(error) = std::fs::create_dir_all(&path) {
+            eprintln!(
+                "WARN: could not create directory '{}': {error}; {purpose}.",
+                path.display()
+            );
+        }
+    }
+}
+
+async fn build_proxy_engine(
+    config: &crate::config::Config,
+    storage_path: &std::path::Path,
+    middleware_chain: Arc<RwLock<MiddlewareChain>>,
+    ca: Arc<crate::certs::CertificateAuthority>,
+    session_manager: crate::session::SharedSessionManager,
+) -> Arc<ProxyEngine> {
+    let hot_config = storage::load_hot_config(storage_path);
+    let max_body_bytes = hot_config.max_body_bytes.unwrap_or(config.max_body_bytes);
+    let stored_proxy = storage::load_upstream_proxy(storage_path);
+    let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+        middleware_chain,
+        ca: Some(ca),
+        mitm_enabled: config.mitm.enabled,
+        bind_port: config.port,
+        bind_host: config.bind_host.clone(),
+        timeout_secs: config.timeout_secs,
+        max_body_bytes,
+        pool_max_idle_per_host: config.pool_max_idle_per_host,
+        pool_idle_timeout_secs: config.pool_idle_timeout_secs,
+        upstream_proxy: stored_proxy.or_else(|| config.upstream_proxy.clone()),
+    }));
+    engine
+        .set_short_circuit_session_manager(session_manager)
+        .await;
+    if config.http3_enabled
+        && let Some(port) = config.http3_port
+    {
+        engine.set_alt_svc_header(format!("h3=\":{port}\"; ma=86400"));
+    }
+    engine
+}
+
+async fn add_short_circuit_middlewares(
+    chain: &Arc<RwLock<MiddlewareChain>>,
+    config: &crate::config::Config,
+    storage_path: &std::path::Path,
+    map_local_rules: SharedMapLocalRules,
+    mock_rules: crate::middleware::plugins::mock::SharedMockRules,
+    lua_scripts: crate::middleware::plugins::lua_engine::SharedLuaScripts,
+    session_manager: crate::session::SharedSessionManager,
+) {
+    let mut chain = chain.write().await;
+    let mut map_local = MapLocalMiddleware::with_dirs(
+        vec![],
+        config.map_local_base_path.clone(),
+        Some(storage_path.join("map-local")),
+    );
+    map_local.rules = map_local_rules;
+    chain.add_middleware(Arc::new(map_local));
+    chain.add_middleware(Arc::new(MockMiddleware::new(mock_rules)));
+    chain.add_middleware(Arc::new(LuaEngineMiddleware::new(lua_scripts)));
+    chain.add_middleware(Arc::new(InspectionMiddleware::new_response_pass(
+        session_manager,
+    )));
+}
+
 pub(super) async fn build_runtime_services(
     config: &crate::config::Config,
 ) -> Result<RuntimeServices, StartupError> {
@@ -69,141 +216,33 @@ pub(super) async fn build_runtime_services(
 
     let storage_path = config.storage_path.clone();
 
-    if let Err(e) = std::fs::create_dir_all(&storage_path) {
-        eprintln!(
-            "WARN: could not create storage directory '{}': {}. \
-             Configuration changes will not be persisted across restarts. \
-             Ensure the process has write access to this path.",
-            storage_path.display(),
-            e
-        );
-    }
-    // Managed Map Local fixtures live here; UI uploads land in this directory and
-    // are served without a restart (reads happen at request time).
-    if let Err(e) = std::fs::create_dir_all(storage_path.join("map-local")) {
-        eprintln!(
-            "WARN: could not create map-local fixtures directory '{}': {}. \
-             Map Local file uploads will not work until this directory is accessible.",
-            storage_path.join("map-local").display(),
-            e
-        );
-    }
+    prepare_storage(&storage_path);
 
-    // First install: seed disabled example rules for every modification feature
-    // so each surface demonstrates a use case. Per-file and non-destructive —
-    // a feature whose storage file already exists is never touched.
     crate::examples::seed_first_run_examples(&storage_path).await;
 
-    let throttling_config = Arc::new(RwLock::new(storage::load_throttle(&storage_path)));
-    let dns_overrides = Arc::new(RwLock::new(storage::load_dns_overrides(&storage_path)));
-    let capture_filter = Arc::new(RwLock::new(storage::load_capture_filter(&storage_path)));
-    let access_rules = Arc::new(RwLock::new(storage::load_access_rules(&storage_path)));
+    let components = RuntimeComponents::load(&storage_path).await;
+    let middleware_chain = Arc::new(RwLock::new(
+        components.build_request_chain(session_manager.clone()),
+    ));
 
-    // Unified rule sets (replaces rewrite + header_map + modification middlewares).
-    let rule_sets = Arc::new(RwLock::new(storage::load_rule_sets(&storage_path)));
-    let rewrite_mw = Arc::new({
-        let mut mw = UnifiedRewriteMiddleware::new(vec![]);
-        mw.rules = rule_sets.clone();
-        mw
-    });
-
-    // Map Remote: Location-based upstream routing (replaces crude host→URL routing table).
-    let map_remote_rules = Arc::new(RwLock::new(storage::load_map_remote_rules(&storage_path)));
-    let map_remote_mw = Arc::new({
-        let mut mw = MapRemoteMiddleware::new(vec![]);
-        mw.rules = map_remote_rules.clone();
-        mw
-    });
-
-    // Map Local: Location-based file serving (replaces old host→file HashMap).
-    let map_local_rules = Arc::new(RwLock::new(storage::load_map_local_rules(&storage_path)));
-
-    let mut chain = MiddlewareChain::new();
-    // AccessControl runs first: blocks/allows before any recording or processing.
-    chain.add_middleware(Arc::new({
-        let mut mw = AccessControlMiddleware::new(vec![]);
-        mw.rules = access_rules.clone();
-        mw
-    }));
-    // CaptureFilter: injects skip-recording flag for filtered hosts.
-    chain.add_middleware(Arc::new(CaptureFilterMiddleware::new(
-        capture_filter.clone(),
-    )));
-    // DNS override must run before MapRemote so the host rewrite is visible to it.
-    chain.add_middleware(Arc::new(DnsOverrideMiddleware {
-        overrides: dns_overrides.clone(),
-    }));
-    // MapRemote: sets ctx.destination so the engine forwards to the right upstream.
-    chain.add_middleware(map_remote_mw);
-    chain.add_middleware(Arc::new(ThrottlingMiddleware {
-        config: throttling_config.clone(),
-    }));
-
-    // Unified rewrite engine: runs early (before Breakpoint) so rewritten requests
-    // can still hit breakpoints.
-    chain.add_middleware(rewrite_mw);
-
-    let breakpoint_manager = Arc::new(BreakpointManager::new());
-    for rule in storage::load_breakpoints(&storage_path) {
-        breakpoint_manager.add_rule(rule).await;
-    }
-    chain.add_middleware(Arc::new(BreakpointMiddleware::new(
-        breakpoint_manager.clone(),
-        session_manager.clone(),
-    )));
-    // Inspector plugins run BEFORE InspectionMiddleware so they can set inspector data
-    // that InspectionMiddleware reads on the same on_request pass.
-    chain.add_middleware(Arc::new(JwtInspectorMiddleware));
-    chain.add_middleware(Arc::new(GraphQLInspectorMiddleware));
-    chain.add_middleware(Arc::new(GrpcInspectorMiddleware {
-        session_manager: session_manager.clone(),
-        breakpoint_manager: breakpoint_manager.clone(),
-    }));
-    chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager.clone())));
-    // MapLocal, Mock and Lua come after InspectionMiddleware so the request is
-    // recorded before they short-circuit it (StopAndReturn). The session captures
-    // the original request.
-
-    let middleware_chain = Arc::new(RwLock::new(chain));
-
-    // CA is always initialised so the cert is downloadable regardless of mitm_enabled.
     let ca = Arc::new(
         crate::certs::CertificateAuthority::new(&config.mitm.root_ca_path)
             .await
             .map_err(|e| StartupError::CaInit(e.to_string()))?,
     );
 
-    let hot_cfg = storage::load_hot_config(&storage_path);
-    let effective_max_body = hot_cfg.max_body_bytes.unwrap_or(config.max_body_bytes);
-    let upstream_proxy = storage::load_upstream_proxy(&storage_path);
-    let proxy_engine = Arc::new(ProxyEngine::new(
+    let proxy_engine = build_proxy_engine(
+        config,
+        &storage_path,
         middleware_chain.clone(),
-        Some(ca.clone()),
-        config.mitm.enabled,
-        config.port,
-        config.bind_host.clone(),
-        config.timeout_secs,
-        effective_max_body,
-        config.pool_max_idle_per_host,
-        config.pool_idle_timeout_secs,
-        upstream_proxy
-            .as_deref()
-            .or(config.upstream_proxy.as_deref()),
-    ));
-    proxy_engine
-        .set_short_circuit_session_manager(session_manager.clone())
-        .await;
-
-    // Inject Alt-Svc header on all forwarded responses when HTTP/3 is enabled.
-    if config.http3_enabled
-        && let Some(h3_port) = config.http3_port
-    {
-        proxy_engine.set_alt_svc_header(format!("h3=\":{}\"; ma=86400", h3_port));
-    }
+        ca.clone(),
+        session_manager.clone(),
+    )
+    .await;
 
     let api_handler = Arc::new(ApiHandler::new(
         session_manager.clone(),
-        breakpoint_manager.clone(),
+        components.breakpoints.clone(),
         crate::security::AdminEgressPolicy::from_config(config),
     ));
 
@@ -225,40 +264,26 @@ pub(super) async fn build_runtime_services(
         &storage_path,
     )));
 
-    // Wire MapLocal, Mock and Lua into the middleware chain now that their shared state is ready.
-    {
-        let mut chain = middleware_chain.write().await;
-        chain.add_middleware(Arc::new({
-            let mw = MapLocalMiddleware::with_dirs(
-                vec![],
-                config.map_local_base_path.clone(),
-                Some(storage_path.join("map-local")),
-            );
-            let mut mw = mw;
-            mw.rules = map_local_rules.clone();
-            mw
-        }));
-        chain.add_middleware(Arc::new(MockMiddleware::new(mock_rules_shared.clone())));
-        chain.add_middleware(Arc::new(LuaEngineMiddleware::new(
-            lua_scripts_shared.clone(),
-        )));
-        // A second idempotent inspection pass records responses from short-circuit
-        // middlewares above (Map Local, Mock, Lua) that stop request execution after
-        // the primary inspection pass has recorded the request.
-        chain.add_middleware(Arc::new(InspectionMiddleware::new_response_pass(
-            session_manager.clone(),
-        )));
-    }
+    add_short_circuit_middlewares(
+        &middleware_chain,
+        config,
+        &storage_path,
+        components.map_local_rules.clone(),
+        mock_rules_shared.clone(),
+        lua_scripts_shared.clone(),
+        session_manager.clone(),
+    )
+    .await;
 
     let state = Arc::new(AppState {
         socks5_bound: std::sync::atomic::AtomicBool::new(false),
         proxy_engine,
         middleware_chain,
-        throttling_config,
-        dns_overrides,
-        capture_filter,
+        throttling_config: components.throttling,
+        dns_overrides: components.dns,
+        capture_filter: components.capture_filter,
         session_manager,
-        breakpoint_manager,
+        breakpoint_manager: components.breakpoints,
         api_handler,
         storage_path,
         started_at: std::time::Instant::now(),
@@ -270,10 +295,10 @@ pub(super) async fn build_runtime_services(
         webhooks: webhooks_shared,
         mock_rules: mock_rules_shared,
         lua_scripts: lua_scripts_shared,
-        rule_sets,
-        map_local_rules,
-        map_remote_rules,
-        access_rules,
+        rule_sets: components.rule_sets,
+        map_local_rules: components.map_local_rules,
+        map_remote_rules: components.map_remote_rules,
+        access_rules: components.access_rules,
     });
 
     Ok(RuntimeServices { state, ca })

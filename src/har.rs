@@ -218,10 +218,30 @@ pub struct HarCookie {
 // ── Conversion: Exchange → HarEntry ──────────────────────────────────────────
 
 pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
-    let req = &ex.request;
+    let request = exchange_request_to_har(&ex.request);
+    let (response, time, timings) = exchange_response_to_har(ex);
 
-    // Headers → HAR list
-    let har_req_headers: Vec<HarNameValue> = req
+    HarEntry {
+        started_date_time: ex.timestamp.to_rfc3339(),
+        time,
+        request,
+        response,
+        timings,
+        server_ip_address: None,
+        connection: ex.connection_id.clone(),
+        cache: HarCache::default(),
+        oproxy_id: Some(ex.id.clone()),
+        oproxy_note: ex.note.clone(),
+        oproxy_tags: ex.tags.clone(),
+        oproxy_updated_at: ex.updated_at.map(|time| time.to_rfc3339()),
+        oproxy_stream_id: ex.stream_id,
+        oproxy_downstream_protocol: ex.downstream_protocol.clone(),
+        oproxy_protocol_context: ex.protocol_context.clone(),
+    }
+}
+
+fn exchange_request_to_har(request: &RequestContext) -> HarRequest {
+    let headers = request
         .headers
         .iter()
         .filter(|(k, _)| !should_skip_har_header(k))
@@ -230,137 +250,114 @@ pub fn exchange_to_har_entry(ex: &Exchange) -> HarEntry {
             value: v.clone(),
         })
         .collect();
-
-    // Extract query string from URI
-    let query_string = parse_query_string(&req.uri);
-
-    let body_size = req.body.len() as i64;
-    let post_data = if req.body.is_empty() {
+    let post_data = if request.body.is_empty() {
         None
     } else {
-        let mime_type = req
+        let mime_type = request
             .headers
             .get("content-type")
             .cloned()
             .unwrap_or_else(|| "application/octet-stream".to_string());
         Some(HarPostData {
             mime_type,
-            text: req.body_text().into_owned(),
+            text: request.body_text().into_owned(),
         })
     };
-
-    let har_request = HarRequest {
-        method: req.method.clone(),
-        url: req.uri.clone(),
+    HarRequest {
+        method: request.method.clone(),
+        url: request.uri.clone(),
         http_version: "HTTP/1.1".to_string(),
-        cookies: extract_request_cookies(req),
-        headers: har_req_headers,
-        query_string,
+        cookies: extract_request_cookies(request),
+        headers,
+        query_string: parse_query_string(&request.uri),
         post_data,
         headers_size: -1,
-        body_size,
+        body_size: request.body.len() as i64,
+    }
+}
+
+fn exchange_response_to_har(ex: &Exchange) -> (HarResponse, f64, HarTimings) {
+    let Some(response) = &ex.response else {
+        return (empty_har_response(), 0.0, HarTimings::default());
     };
-
-    let (har_response, total_ms, timings) = if let Some(res) = &ex.response {
-        let har_res_headers: Vec<HarNameValue> = res
-            .headers
-            .iter()
-            .filter(|(k, _)| !should_skip_har_header(k))
-            .map(|(k, v)| HarNameValue {
-                name: k.clone(),
-                value: v.clone(),
-            })
-            .collect();
-        let mime_type = res
-            .headers
-            .get("content-type")
-            .cloned()
-            .unwrap_or_else(|| "text/plain".to_string());
-        let status_text = http_status_text(res.status);
-
-        let resp = HarResponse {
-            status: res.status,
-            status_text,
-            // Emit the captured negotiated protocol when known, else default.
-            http_version: ex
-                .metrics
-                .as_ref()
-                .and_then(|m| m.protocol.clone())
-                .unwrap_or_else(|| "HTTP/1.1".to_string()),
-            cookies: extract_response_cookies(res),
-            headers: har_res_headers,
-            content: HarContent {
-                size: res.body.len() as i64,
-                mime_type: mime_type.clone(),
-                text: if res.body.is_empty() {
-                    None
-                } else {
-                    Some(har_body_text(&res.body, &mime_type))
-                },
+    let headers = response
+        .headers
+        .iter()
+        .filter(|(k, _)| !should_skip_har_header(k))
+        .map(|(k, v)| HarNameValue {
+            name: k.clone(),
+            value: v.clone(),
+        })
+        .collect();
+    let mime_type = response
+        .headers
+        .get("content-type")
+        .cloned()
+        .unwrap_or_else(|| "text/plain".to_string());
+    let har_response = HarResponse {
+        status: response.status,
+        status_text: http_status_text(response.status),
+        http_version: ex
+            .metrics
+            .as_ref()
+            .and_then(|m| m.protocol.clone())
+            .unwrap_or_else(|| "HTTP/1.1".to_string()),
+        cookies: extract_response_cookies(response),
+        headers,
+        content: HarContent {
+            size: response.body.len() as i64,
+            mime_type: mime_type.clone(),
+            text: if response.body.is_empty() {
+                None
+            } else {
+                Some(har_body_text(&response.body, &mime_type))
             },
-            redirect_url: res.headers.get("location").cloned().unwrap_or_default(),
-            headers_size: -1,
-            body_size: res.body.len() as i64,
-        };
-
-        let (total_ms, timings) = if let Some(m) = &ex.metrics {
-            let known =
-                m.dns_ms.unwrap_or(0) + m.tcp_connect_ms.unwrap_or(0) + m.tls_ms.unwrap_or(0);
-            let wait = m.ttfb_ms.saturating_sub(known) as f64;
+        },
+        redirect_url: response
+            .headers
+            .get("location")
+            .cloned()
+            .unwrap_or_default(),
+        headers_size: -1,
+        body_size: response.body.len() as i64,
+    };
+    let (time, timings) = ex.metrics.as_ref().map_or_else(
+        || (0.0, HarTimings::default()),
+        |metrics| {
+            let setup = metrics.dns_ms.unwrap_or(0)
+                + metrics.tcp_connect_ms.unwrap_or(0)
+                + metrics.tls_ms.unwrap_or(0);
             (
-                m.latency_ms as f64,
+                metrics.latency_ms as f64,
                 HarTimings {
-                    dns: m.dns_ms.map(|v| v as f64),
-                    connect: m.tcp_connect_ms.map(|v| v as f64),
-                    ssl: m.tls_ms.map(|v| v as f64),
-                    wait,
-                    receive: m.body_ms as f64,
+                    dns: metrics.dns_ms.map(|value| value as f64),
+                    connect: metrics.tcp_connect_ms.map(|value| value as f64),
+                    ssl: metrics.tls_ms.map(|value| value as f64),
+                    wait: metrics.ttfb_ms.saturating_sub(setup) as f64,
+                    receive: metrics.body_ms as f64,
                     send: 0.0,
                 },
             )
-        } else {
-            (0.0, HarTimings::default())
-        };
+        },
+    );
+    (har_response, time, timings)
+}
 
-        (resp, total_ms, timings)
-    } else {
-        (
-            HarResponse {
-                status: 0,
-                status_text: String::new(),
-                http_version: "HTTP/1.1".to_string(),
-                cookies: vec![],
-                headers: vec![],
-                content: HarContent {
-                    size: 0,
-                    mime_type: "application/octet-stream".to_string(),
-                    text: None,
-                },
-                redirect_url: String::new(),
-                headers_size: -1,
-                body_size: -1,
-            },
-            0.0,
-            HarTimings::default(),
-        )
-    };
-
-    HarEntry {
-        started_date_time: ex.timestamp.to_rfc3339(),
-        time: total_ms,
-        request: har_request,
-        response: har_response,
-        timings,
-        server_ip_address: None,
-        connection: ex.connection_id.clone(),
-        cache: HarCache::default(),
-        oproxy_id: Some(ex.id.clone()),
-        oproxy_note: ex.note.clone(),
-        oproxy_tags: ex.tags.clone(),
-        oproxy_updated_at: ex.updated_at.map(|t| t.to_rfc3339()),
-        oproxy_stream_id: ex.stream_id,
-        oproxy_downstream_protocol: ex.downstream_protocol.clone(),
-        oproxy_protocol_context: ex.protocol_context.clone(),
+fn empty_har_response() -> HarResponse {
+    HarResponse {
+        status: 0,
+        status_text: String::new(),
+        http_version: "HTTP/1.1".to_string(),
+        cookies: vec![],
+        headers: vec![],
+        content: HarContent {
+            size: 0,
+            mime_type: "application/octet-stream".to_string(),
+            text: None,
+        },
+        redirect_url: String::new(),
+        headers_size: -1,
+        body_size: -1,
     }
 }
 
@@ -398,66 +395,8 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
         .as_deref()
         .and_then(|s| s.parse::<DateTime<Utc>>().ok());
 
-    let ttfb_ms = full_ttfb_ms(&entry.timings);
-
-    let response = if entry.response.status > 0 {
-        let res_headers: crate::middleware::HeaderMap = entry
-            .response
-            .headers
-            .iter()
-            .map(|nv| (nv.name.clone(), nv.value.clone()))
-            .collect();
-        let res_mime = entry
-            .response
-            .content
-            .mime_type
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let body = har_body_bytes(
-            entry.response.content.text.clone().unwrap_or_default(),
-            &res_mime,
-        );
-        Some(ResponseContext {
-            status: entry.response.status,
-            headers: res_headers,
-            body,
-            request_uri: entry.request.url.clone(),
-            session_id: Some(id.clone()),
-            ttfb_ms,
-            body_ms: entry.timings.receive as u64,
-            ..Default::default()
-        })
-    } else {
-        None
-    };
-
-    let metrics = if entry.time > 0.0 || entry.response.status > 0 {
-        let latency_ms = entry.time as u64;
-        Some(InspectionMetrics {
-            latency_ms,
-            request_size_bytes: entry.request.body_size.max(0) as usize,
-            response_size_bytes: entry.response.body_size.max(0) as usize,
-            status_code: entry.response.status,
-            ttfb_ms,
-            body_ms: entry.timings.receive as u64,
-            dns_ms: entry.timings.dns.map(|v| v as u64),
-            tcp_connect_ms: entry.timings.connect.map(|v| v as u64),
-            tls_ms: entry.timings.ssl.map(|v| v as u64),
-            protocol: {
-                let v = entry.response.http_version.trim();
-                if v.is_empty() {
-                    None
-                } else {
-                    Some(v.to_string())
-                }
-            },
-        })
-    } else {
-        None
-    };
+    let response = har_response_to_context(entry, &id);
+    let metrics = har_entry_metrics(entry);
 
     Exchange {
         id,
@@ -487,7 +426,61 @@ pub fn har_entry_to_exchange(entry: &HarEntry) -> Exchange {
     }
 }
 
-// ── Bulk conversion helpers ───────────────────────────────────────────────────
+fn har_response_to_context(entry: &HarEntry, session_id: &str) -> Option<ResponseContext> {
+    if entry.response.status == 0 {
+        return None;
+    }
+    let headers = entry
+        .response
+        .headers
+        .iter()
+        .map(|value| (value.name.clone(), value.value.clone()))
+        .collect();
+    let mime_type = entry
+        .response
+        .content
+        .mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    Some(ResponseContext {
+        status: entry.response.status,
+        headers,
+        body: har_body_bytes(
+            entry.response.content.text.clone().unwrap_or_default(),
+            mime_type,
+        ),
+        request_uri: entry.request.url.clone(),
+        session_id: Some(session_id.to_string()),
+        ttfb_ms: full_ttfb_ms(&entry.timings),
+        body_ms: entry.timings.receive as u64,
+        ..Default::default()
+    })
+}
+
+fn har_entry_metrics(entry: &HarEntry) -> Option<InspectionMetrics> {
+    if entry.time <= 0.0 && entry.response.status == 0 {
+        return None;
+    }
+    Some(InspectionMetrics {
+        latency_ms: entry.time as u64,
+        request_size_bytes: entry.request.body_size.max(0) as usize,
+        response_size_bytes: entry.response.body_size.max(0) as usize,
+        status_code: entry.response.status,
+        ttfb_ms: full_ttfb_ms(&entry.timings),
+        body_ms: entry.timings.receive as u64,
+        dns_ms: entry.timings.dns.map(|value| value as u64),
+        tcp_connect_ms: entry.timings.connect.map(|value| value as u64),
+        tls_ms: entry.timings.ssl.map(|value| value as u64),
+        protocol: non_empty_string(&entry.response.http_version),
+    })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
 
 pub fn exchanges_to_har(exchanges: &IndexMap<String, Exchange>) -> Har {
     Har {
@@ -881,7 +874,7 @@ mod tests {
 
     #[test]
     fn har_entry_uses_captured_protocol_for_http_version() {
-        // Phase 0: the negotiated upstream protocol is surfaced on export.
+        // The negotiated upstream protocol is surfaced on export.
         let mut ex = make_exchange("GET", "https://example.com/", 200, "ok", "");
         if let Some(m) = &mut ex.metrics {
             m.protocol = Some("HTTP/2".to_string());

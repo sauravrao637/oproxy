@@ -1,11 +1,20 @@
 [package]
 name = "oproxy"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 build = "build.rs"
 license = "MIT"
 description = "Programmable HTTP/HTTPS proxy for inspecting, debugging, and manipulating network traffic"
 repository = "https://github.com/sauravrao637/oproxy"
+
+# Lint policy lives here so every contributor gets the same bar locally, not
+# only in CI. `unsafe_code = "warn"` forces a documented `#[allow(unsafe_code)]`
+# (with a SAFETY note) at each genuine unsafe site.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
 
 [[bin]]
 name = "oproxy"
@@ -16,9 +25,9 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# HTTP/3 (QUIC) support. Phase 5 of the protocol-support RFC.
+# HTTP/3 (QUIC) support.
 http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:webpki-roots"]
-# OpenTelemetry export of per-exchange protocol spans (Phase 11). Gates the
+# OpenTelemetry export of per-exchange protocol spans. Gates the
 # per-exchange emission; the OTLP exporter layer (opentelemetry-otlp /
 # tracing-opentelemetry) is attached at the logging layer when enabled.
 otel = []

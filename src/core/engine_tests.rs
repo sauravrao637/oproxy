@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::engine::ProxyEngine;
+    use crate::core::engine::{ProxyEngine, ProxyEngineConfig};
     use crate::middleware::chain::MiddlewareChain;
     use crate::middleware::matcher::Location;
     use crate::middleware::plugins::inspection::InspectionMiddleware;
@@ -28,54 +28,36 @@ mod tests {
 
     #[tokio::test]
     async fn engine_created_with_mitm_disabled() {
-        let engine = ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        );
+        let engine = ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        });
         assert!(!engine.mitm_enabled);
         assert!(engine.ca.is_none());
     }
 
     #[tokio::test]
     async fn engine_created_with_mitm_enabled_flag() {
-        let engine = ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            true,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        );
+        let engine = ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: true,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        });
         assert!(engine.mitm_enabled);
     }
 
     #[tokio::test]
     async fn socks5_tunnel_close_completes_session_with_metrics() {
         let session_manager = Arc::new(SessionManager::new(10_000));
-        let engine = ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        );
+        let engine = ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        });
         engine
             .set_short_circuit_session_manager(session_manager.clone())
             .await;
@@ -300,18 +282,12 @@ mod tests {
             axum::serve(listener, upstream_app).await.unwrap();
         });
 
-        let engine = Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
 
         let req = Request::builder()
             .method("GET")
@@ -335,18 +311,12 @@ mod tests {
 
     #[tokio::test]
     async fn engine_detects_self_proxy_loops() {
-        let engine = Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "0.0.0.0".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "0.0.0.0".to_string(),
+            ..Default::default()
+        }));
 
         // Target: http://0.0.0.0:8080/
         let req = Request::builder()

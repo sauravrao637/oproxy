@@ -27,8 +27,7 @@ It is for developers testing browsers, CLIs, mobile apps, API clients, services,
 ```bash
 docker run --rm \
   --name oproxy \
-  -p 127.0.0.1:8080:8080 \
-  -p 127.0.0.1:1080:1080 \
+  --network host \
   -e OPROXY_BIND_HOST=0.0.0.0 \
   -e OPROXY_MITM_ENABLED=true \
   -v oproxy-certs:/app/certs \

@@ -12,8 +12,171 @@ use tokio_tungstenite::{
 };
 
 use crate::middleware::plugins::mock::{MockBehavior, SharedMockRules, WsFrameAction};
+use crate::session::SharedSessionManager;
 use crate::transport::TransportContext;
-use crate::transport::lifecycle::wait_for_shutdown;
+use crate::transport::lifecycle::{ConnectionSupervisor, wait_for_shutdown};
+
+struct WebSocketRequest {
+    headers: hyper::HeaderMap,
+    host: String,
+    port: u16,
+    scheme: &'static str,
+    url: String,
+    connection_id: Option<String>,
+    stream_id: Option<u64>,
+    downstream_protocol: Option<String>,
+}
+
+struct MockWebSocketContext {
+    session_manager: SharedSessionManager,
+    connections: ConnectionSupervisor,
+    session_id: String,
+    peer: Option<std::net::SocketAddr>,
+    shutdown: watch::Receiver<bool>,
+}
+
+type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+impl WebSocketRequest {
+    fn prepare(req: &Request<Incoming>) -> Self {
+        let uri = req.uri();
+        let headers = req.headers().clone();
+        let header_host = headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let host = uri.host().map(str::to_string).unwrap_or_else(|| {
+            header_host
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+        let requested_scheme = uri.scheme_str().unwrap_or("ws");
+        let default_port = if matches!(requested_scheme, "wss" | "https") {
+            443
+        } else {
+            80
+        };
+        let port = uri.port_u16().unwrap_or(default_port);
+        let scheme = if matches!(requested_scheme, "wss" | "https") || port == 443 {
+            "wss"
+        } else {
+            "ws"
+        };
+        let path = uri
+            .path_and_query()
+            .map(hyper::http::uri::PathAndQuery::as_str)
+            .unwrap_or("/");
+        let connection = req
+            .extensions()
+            .get::<crate::transport::http::DownstreamConn>();
+
+        Self {
+            headers,
+            host: host.clone(),
+            port,
+            scheme,
+            url: format!("{scheme}://{host}:{port}{path}"),
+            connection_id: connection.map(|value| value.id.clone()),
+            stream_id: connection.map(|value| value.next_stream()),
+            downstream_protocol: Some(
+                crate::core::engine::protocol_label(req.version()).to_string(),
+            ),
+        }
+    }
+
+    fn request_context(&self) -> crate::middleware::RequestContext {
+        ws_request_context(
+            &self.url,
+            &self.headers,
+            &self.host,
+            self.connection_id.clone(),
+            self.stream_id,
+            self.downstream_protocol.clone(),
+            self.scheme,
+        )
+    }
+
+    fn response_context(&self, subprotocol: Option<&str>) -> crate::middleware::ResponseContext {
+        ws_response_context(
+            &self.url,
+            &self.headers,
+            &self.host,
+            self.connection_id.clone(),
+            self.stream_id,
+            self.scheme,
+            subprotocol,
+        )
+    }
+
+    fn upstream_request(
+        &self,
+    ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
+        let mut request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(&self.url)
+            .header("host", format!("{}:{}", self.host, self.port))
+            .header("upgrade", "websocket")
+            .header("connection", "Upgrade")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", generate_key());
+
+        for (name, value) in &self.headers {
+            if is_websocket_handshake_header(name.as_str()) {
+                continue;
+            }
+            if let Ok(value) = value.to_str() {
+                request = request.header(name.as_str(), value);
+            }
+        }
+        request.body(()).map_err(|error| error.to_string())
+    }
+}
+
+fn is_websocket_handshake_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "upgrade"
+            | "connection"
+            | "sec-websocket-key"
+            | "sec-websocket-version"
+            | "sec-websocket-accept"
+            | "sec-websocket-extensions"
+    )
+}
+
+async fn connect_upstream(
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    timeout: std::time::Duration,
+) -> Result<(UpstreamWebSocket, Option<String>), Response<Body>> {
+    match tokio::time::timeout(
+        timeout,
+        connect_async_tls_with_config(request, None, false, None),
+    )
+    .await
+    {
+        Ok(Ok((socket, response))) => {
+            let subprotocol = response
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            Ok((socket, subprotocol))
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "WS upstream connect failed");
+            Err(Response::builder()
+                .status(502)
+                .body(Body::from("WebSocket upstream connect failed"))
+                .expect("static 502 response is always valid"))
+        }
+        Err(_) => Err(Response::builder()
+            .status(504)
+            .body(Body::from("WebSocket upstream connect timed out"))
+            .expect("static 504 response is always valid")),
+    }
+}
 
 pub fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
     req.headers()
@@ -21,22 +184,6 @@ pub fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false)
-}
-
-/// Returns `true` when the request is an RFC 8441 extended-CONNECT (h2
-/// WebSocket upgrade via `:protocol = websocket`).
-// RFC 8441 extended-CONNECT detection — not yet wired to a handler, stub kept
-// for the upcoming WebSocket-over-h2 path. Suppress the binary dead_code lint.
-#[allow(dead_code)]
-pub fn is_h2_websocket_upgrade<B>(req: &Request<B>) -> bool {
-    req.method() == hyper::Method::from_bytes(b"CONNECT").unwrap_or(hyper::Method::GET)
-        && req
-            .headers()
-            .get("protocol")
-            .or_else(|| req.headers().get(":protocol"))
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.eq_ignore_ascii_case("websocket"))
-            .unwrap_or(false)
 }
 
 fn map_tungstenite_message_to_record(
@@ -79,204 +226,49 @@ pub async fn handle_websocket(
     let connect_timeout = context.connect_timeout;
     let handshake_timeout = context.handshake_timeout;
 
-    let uri = req.uri().clone();
-    let headers = req.headers().clone();
-    // Downstream connection identity (Phase 7) — the upgrade request carries the
-    // DownstreamConn extension inserted by the accept loop.
-    let (ws_connection_id, ws_stream_id) = {
-        let conn = req
-            .extensions()
-            .get::<crate::transport::http::DownstreamConn>();
-        (conn.map(|c| c.id.clone()), conn.map(|c| c.next_stream()))
-    };
-    let ws_downstream_protocol =
-        Some(crate::core::engine::protocol_label(req.version()).to_string());
-
-    let host_header = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    let target_host = uri
-        .host()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| host_header.split(':').next().unwrap_or("").to_string());
-
-    // Determine scheme: if the proxy is in MITM mode and the original scheme was
-    // https/wss, use wss; otherwise fall back to port heuristic.
-    let scheme = uri.scheme_str().unwrap_or("ws");
-    let default_port: u16 = if scheme == "wss" || scheme == "https" {
-        443
-    } else {
-        80
-    };
-    let port: u16 = uri.port_u16().unwrap_or(default_port);
-    let use_tls = scheme == "wss" || scheme == "https" || port == 443;
-
-    let path_and_query = uri
-        .path_and_query()
-        .map(|pq| pq.as_str().to_string())
-        .unwrap_or_else(|| "/".to_string());
-
-    let upstream_scheme = if use_tls { "wss" } else { "ws" };
-    let upstream_url = format!(
-        "{}://{}:{}{}",
-        upstream_scheme, target_host, port, path_and_query
-    );
-    let record_uri = upstream_url.clone();
-
-    let request_context = ws_request_context(
-        &record_uri,
-        &headers,
-        &target_host,
-        ws_connection_id.clone(),
-        ws_stream_id,
-        ws_downstream_protocol.clone(),
-        upstream_scheme,
-    );
+    let prepared = WebSocketRequest::prepare(&req);
+    let request_context = prepared.request_context();
 
     if let Some(script) = select_ws_mock_script(&mock_rules, &request_context).await {
-        // oproxy terminates the handshake itself for mock scripts; accept the
-        // client's first offered subprotocol so subprotocol clients proceed.
-        let mock_subprotocol = first_offered_subprotocol(&headers);
-        sm.record_request(session_id.clone(), request_context);
-        sm.record_response_with_metrics(
-            session_id.clone(),
-            ws_response_context(
-                &record_uri,
-                &headers,
-                &target_host,
-                ws_connection_id.clone(),
-                ws_stream_id,
-                upstream_scheme,
-                mock_subprotocol.as_deref(),
-            ),
-            ws_upgrade_metrics(),
-        );
-        sm.append_event(
-            &session_id,
-            crate::session::SessionEvent::MockServed {
-                rule_id: script.rule_id.clone(),
-                behavior: "websocket_script".to_string(),
+        return handle_mock_websocket(
+            req,
+            prepared,
+            request_context,
+            script,
+            MockWebSocketContext {
+                session_manager: sm,
+                connections,
+                session_id,
+                peer,
+                shutdown,
             },
-        );
-
-        let on_upgrade = hyper::upgrade::on(req);
-        connections.spawn_tracked("websocket-mock", peer, async move {
-            let upgraded = tokio::select! {
-                upgraded = on_upgrade => upgraded,
-                _ = wait_for_shutdown(&mut shutdown) => {
-                    tracing::debug!("WS mock stopped before client upgrade");
-                    return;
-                }
-            };
-            let upgraded = match upgraded {
-                Ok(u) => u,
-                Err(e) => {
-                    tracing::debug!(error=%e, "WS mock client upgrade failed");
-                    return;
-                }
-            };
-            let client_io = hyper_util::rt::TokioIo::new(upgraded);
-            let client_ws = WebSocketStream::from_raw_socket(client_io, Role::Server, None).await;
-            run_ws_mock_script(client_ws, sm, session_id, script.frames, &mut shutdown).await;
-        });
-
-        return websocket_upgrade_response(&headers, mock_subprotocol.as_deref());
+        )
+        .await;
     }
 
-    // Build the upstream WebSocket request, forwarding the client's headers.
-    let mut ws_req = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(&upstream_url)
-        .header("host", format!("{}:{}", target_host, port))
-        .header("upgrade", "websocket")
-        .header("connection", "Upgrade")
-        .header("sec-websocket-version", "13")
-        .header("sec-websocket-key", generate_key());
-
-    for (name, value) in &headers {
-        let name_str = name.as_str().to_lowercase();
-        // Forward application headers; skip WS protocol-negotiation headers we set above.
-        if matches!(
-            name_str.as_str(),
-            "host"
-                | "upgrade"
-                | "connection"
-                | "sec-websocket-key"
-                | "sec-websocket-version"
-                | "sec-websocket-accept"
-                // The relay re-frames messages through tungstenite, which does not
-                // implement WS extensions (e.g. permessage-deflate). Advertising the
-                // client's extensions upstream could negotiate compressed frames the
-                // relay cannot parse, so extension negotiation is suppressed.
-                | "sec-websocket-extensions"
-        ) {
-            continue;
-        }
-        if let Ok(v) = value.to_str() {
-            ws_req = ws_req.header(name.as_str(), v);
-        }
-    }
-
-    let ws_req = match ws_req.body(()) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error=%e, "WS request build failed");
+    let ws_req = match prepared.upstream_request() {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%error, "WS request build failed");
             return Response::builder()
                 .status(502)
                 .body(Body::from("WebSocket request build failed"))
-                .unwrap();
+                .expect("static 502 response is always valid");
         }
     };
 
     // Connect to the upstream WebSocket server (with TLS if required).
-    let (upstream_ws, negotiated_subprotocol) = match tokio::time::timeout(
-        connect_timeout + handshake_timeout,
-        connect_async_tls_with_config(ws_req, None, false, None),
-    )
-    .await
-    {
-        Ok(Ok((ws, response))) => {
-            // RFC 6455 §4.1: if the client offered subprotocols, the accepted one
-            // arrives in the upstream 101 and MUST be relayed to the client, or
-            // subprotocol clients (graphql-ws, STOMP, MQTT) fail the handshake.
-            let negotiated_subprotocol = response
-                .headers()
-                .get("sec-websocket-protocol")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-            (ws, negotiated_subprotocol)
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(error=%e, url=%upstream_url, "WS upstream connect failed");
-            return Response::builder()
-                .status(502)
-                .body(Body::from("WebSocket upstream connect failed"))
-                .unwrap();
-        }
-        Err(_) => {
-            tracing::warn!(url=%upstream_url, "WS upstream connect timed out");
-            return Response::builder()
-                .status(504)
-                .body(Body::from("WebSocket upstream connect timed out"))
-                .unwrap();
-        }
-    };
+    let (upstream_ws, negotiated_subprotocol) =
+        match connect_upstream(ws_req, connect_timeout + handshake_timeout).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
 
     // Record the session request head.
     sm.record_request(session_id.clone(), request_context);
     sm.record_response_with_metrics(
         session_id.clone(),
-        ws_response_context(
-            &record_uri,
-            &headers,
-            &target_host,
-            ws_connection_id.clone(),
-            ws_stream_id,
-            upstream_scheme,
-            negotiated_subprotocol.as_deref(),
-        ),
+        prepared.response_context(negotiated_subprotocol.as_deref()),
         ws_upgrade_metrics(),
     );
 
@@ -308,8 +300,8 @@ pub async fn handle_websocket(
                 session_manager: sm,
                 breakpoint_manager,
                 session_id,
-                frame_uri: upstream_url,
-                frame_host: target_host,
+                frame_uri: prepared.url,
+                frame_host: prepared.host,
                 inspect_frames,
             },
             &mut shutdown,
@@ -317,7 +309,67 @@ pub async fn handle_websocket(
         .await;
     });
 
-    websocket_upgrade_response(&headers, negotiated_subprotocol.as_deref())
+    websocket_upgrade_response(&prepared.headers, negotiated_subprotocol.as_deref())
+}
+
+async fn handle_mock_websocket(
+    req: Request<Incoming>,
+    prepared: WebSocketRequest,
+    request_context: crate::middleware::RequestContext,
+    script: WsMockScript,
+    context: MockWebSocketContext,
+) -> Response<Body> {
+    let MockWebSocketContext {
+        session_manager,
+        connections,
+        session_id,
+        peer,
+        mut shutdown,
+    } = context;
+    let subprotocol = first_offered_subprotocol(&prepared.headers);
+    session_manager.record_request(session_id.clone(), request_context);
+    session_manager.record_response_with_metrics(
+        session_id.clone(),
+        prepared.response_context(subprotocol.as_deref()),
+        ws_upgrade_metrics(),
+    );
+    session_manager.append_event(
+        &session_id,
+        crate::session::SessionEvent::MockServed {
+            rule_id: script.rule_id,
+            behavior: "websocket_script".to_string(),
+        },
+    );
+
+    let response = websocket_upgrade_response(&prepared.headers, subprotocol.as_deref());
+    let on_upgrade = hyper::upgrade::on(req);
+    connections.spawn_tracked("websocket-mock", peer, async move {
+        let upgraded = tokio::select! {
+            upgraded = on_upgrade => upgraded,
+            _ = wait_for_shutdown(&mut shutdown) => {
+                tracing::debug!("WS mock stopped before client upgrade");
+                return;
+            }
+        };
+        let upgraded = match upgraded {
+            Ok(upgraded) => upgraded,
+            Err(error) => {
+                tracing::debug!(%error, "WS mock client upgrade failed");
+                return;
+            }
+        };
+        let client_io = hyper_util::rt::TokioIo::new(upgraded);
+        let client_ws = WebSocketStream::from_raw_socket(client_io, Role::Server, None).await;
+        run_ws_mock_script(
+            client_ws,
+            session_manager,
+            session_id,
+            script.frames,
+            &mut shutdown,
+        )
+        .await;
+    });
+    response
 }
 
 #[derive(Debug, Clone)]
@@ -409,9 +461,12 @@ fn websocket_upgrade_response(
     if let Some(proto) = subprotocol.filter(|p| !p.is_empty()) {
         builder = builder.header("sec-websocket-protocol", proto);
     }
-    builder
-        .body(Body::empty())
-        .unwrap_or_else(|_| Response::builder().status(500).body(Body::empty()).unwrap())
+    builder.body(Body::empty()).unwrap_or_else(|_| {
+        Response::builder()
+            .status(500)
+            .body(Body::empty())
+            .expect("static 500 response is always valid")
+    })
 }
 
 /// First subprotocol the client offered, used when oproxy itself terminates the

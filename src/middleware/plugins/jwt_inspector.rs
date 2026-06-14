@@ -181,7 +181,6 @@ mod tests {
 
     #[test]
     fn decode_jwt_not_expired_for_future() {
-        // exp far in the future
         let token = make_jwt(r#"{"alg":"HS256"}"#, r#"{"exp":9999999999}"#);
         let info = JwtInspectorMiddleware::decode_jwt(&token).unwrap();
         assert!(!info.expired);

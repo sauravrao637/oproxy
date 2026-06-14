@@ -106,7 +106,7 @@ pub struct MapLocalMiddleware {
 }
 
 impl MapLocalMiddleware {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn new(rules: Vec<MapLocalRule>) -> Self {
         Self {
             rules: Arc::new(RwLock::new(rules)),
@@ -115,7 +115,7 @@ impl MapLocalMiddleware {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn with_base_path(rules: Vec<MapLocalRule>, base_path: Option<PathBuf>) -> Self {
         Self {
             rules: Arc::new(RwLock::new(rules)),
@@ -143,6 +143,37 @@ impl MapLocalMiddleware {
             self.fixtures_dir.as_deref(),
         )
     }
+
+    fn path_for_request(&self, root: &Path, request_path: &str) -> Result<Option<PathBuf>, String> {
+        if !root.exists() {
+            return Err(format!("root path '{}' does not exist", root.display()));
+        }
+        if root.is_dir() {
+            let candidate = root.join(request_path.trim_start_matches('/'));
+            let Ok(resolved) = candidate.canonicalize() else {
+                return Ok(None);
+            };
+            let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            return Ok(
+                (resolved.starts_with(canonical_root) && resolved.is_file()).then_some(resolved)
+            );
+        }
+        match root.canonicalize() {
+            Ok(path) if path.is_file() => Ok(Some(path)),
+            Ok(_) => Err(format!("'{}' is not a regular file", root.display())),
+            Err(error) => Err(format!("'{}' is not accessible: {error}", root.display())),
+        }
+    }
+}
+
+fn map_local_error(message: String) -> InterceptedResponse {
+    InterceptedResponse {
+        status: 502,
+        headers: error_headers(),
+        body: Bytes::from(format!("map_local: {message}")),
+        tags: vec!["map-local-error".to_string()],
+        served_mock: None,
+    }
 }
 
 #[async_trait]
@@ -159,84 +190,13 @@ impl Middleware for MapLocalMiddleware {
                 continue;
             }
             let file_path = self.resolve_path(&rule.file_path);
-            // Verify the root exists before trying to serve from it.
-            if !file_path.exists() {
-                tracing::warn!(
-                    path=%file_path.display(),
-                    "map_local: root path does not exist — \
-                     in containers ensure the path is mounted inside the container"
-                );
-                ctx.mock_response = Some(InterceptedResponse {
-                    status: 502,
-                    headers: error_headers(),
-                    body: bytes::Bytes::from(format!(
-                        "map_local: root path '{}' does not exist",
-                        file_path.display()
-                    )),
-                    tags: vec!["map-local-error".to_string()],
-                    served_mock: None,
-                });
-                return MiddlewareAction::StopAndReturn;
-            }
-            let path_to_serve = if file_path.is_dir() {
-                // Strip leading '?' or '#' from uri, take the path component only.
-                let req_path = target.path.trim_start_matches('/');
-                let candidate = file_path.join(req_path);
-                // Path-traversal guard: the resolved path must remain inside file_path.
-                match candidate.canonicalize() {
-                    Ok(resolved) => {
-                        let root = file_path
-                            .canonicalize()
-                            .unwrap_or_else(|_| file_path.to_path_buf());
-                        if !resolved.starts_with(&root) || !resolved.is_file() {
-                            tracing::warn!(
-                                candidate = %candidate.display(),
-                                "map_local: path traversal or missing file, skipping"
-                            );
-                            continue;
-                        }
-                        resolved
-                    }
-                    Err(_) => {
-                        // File doesn't exist at this path within the directory — fall
-                        // through to the next rule (correct behaviour: the directory may
-                        // serve some paths but not all).
-                        continue;
-                    }
-                }
-            } else {
-                match file_path.canonicalize() {
-                    Ok(p) if p.is_file() => p,
-                    Ok(p) => {
-                        tracing::warn!(path=%p.display(), "map_local: resolved path is not a file");
-                        ctx.mock_response = Some(InterceptedResponse {
-                            status: 502,
-                            headers: error_headers(),
-                            body: bytes::Bytes::from(format!(
-                                "map_local: '{}' is not a regular file",
-                                file_path.display()
-                            )),
-                            tags: vec!["map-local-error".to_string()],
-                            served_mock: None,
-                        });
-                        return MiddlewareAction::StopAndReturn;
-                    }
-                    Err(e) => {
-                        tracing::warn!(path=%file_path.display(), error=%e,
-                            "map_local: file_path inaccessible — \
-                             in containers ensure the path is mounted inside the container");
-                        ctx.mock_response = Some(InterceptedResponse {
-                            status: 502,
-                            headers: error_headers(),
-                            body: bytes::Bytes::from(format!(
-                                "map_local: '{}' is not accessible: {e}",
-                                file_path.display()
-                            )),
-                            tags: vec!["map-local-error".to_string()],
-                            served_mock: None,
-                        });
-                        return MiddlewareAction::StopAndReturn;
-                    }
+            let path_to_serve = match self.path_for_request(&file_path, &target.path) {
+                Ok(Some(path)) => path,
+                Ok(None) => continue,
+                Err(message) => {
+                    tracing::warn!(path=%file_path.display(), %message, "map_local resolution failed");
+                    ctx.mock_response = Some(map_local_error(message));
+                    return MiddlewareAction::StopAndReturn;
                 }
             };
             match tokio::fs::read(&path_to_serve).await {

@@ -1,4 +1,4 @@
-//! OpenTelemetry export of per-exchange protocol metrics (Phase 11).
+//! OpenTelemetry export of per-exchange protocol metrics.
 //!
 //! Decision §4: **one span per exchange**, carrying `connection_id` / `stream_id`
 //! and protocol attributes — no long-lived connection-parent span. The

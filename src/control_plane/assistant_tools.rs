@@ -29,6 +29,62 @@ pub(super) enum ToolOutcome {
     Proposed(AssistantAction),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum StaticAssistantTool {
+    ListSessions,
+    GetSession,
+    GetConfig,
+    GetFeatureCatalog,
+    GetRules,
+    GetProtocolMetrics,
+    GetConnections,
+    GetBreakpointDiagnostics,
+    GetThrottling,
+    GetDns,
+    GetCaptureFilter,
+    GetWebhooks,
+    GetUpstreamProxy,
+    ProposeMapRemote,
+    ProposeDnsOverride,
+    ProposeThrottling,
+    ProposeRewriteRule,
+    ProposeMockRule,
+    ProposeAccessRule,
+    ProposeCaptureFilter,
+    ProposeUpstreamProxy,
+    ProposeAction,
+}
+
+impl StaticAssistantTool {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "list_sessions" => Self::ListSessions,
+            "get_session" => Self::GetSession,
+            "get_config" => Self::GetConfig,
+            "get_feature_catalog" => Self::GetFeatureCatalog,
+            "get_rules" => Self::GetRules,
+            "get_protocol_metrics" => Self::GetProtocolMetrics,
+            "get_connections" => Self::GetConnections,
+            "get_breakpoint_diagnostics" => Self::GetBreakpointDiagnostics,
+            "get_throttling" => Self::GetThrottling,
+            "get_dns" => Self::GetDns,
+            "get_capture_filter" => Self::GetCaptureFilter,
+            "get_webhooks" => Self::GetWebhooks,
+            "get_upstream_proxy" => Self::GetUpstreamProxy,
+            "propose_map_remote" => Self::ProposeMapRemote,
+            "propose_dns_override" => Self::ProposeDnsOverride,
+            "propose_throttling" => Self::ProposeThrottling,
+            "propose_rewrite_rule" => Self::ProposeRewriteRule,
+            "propose_mock_rule" => Self::ProposeMockRule,
+            "propose_access_rule" => Self::ProposeAccessRule,
+            "propose_capture_filter" => Self::ProposeCaptureFilter,
+            "propose_upstream_proxy" => Self::ProposeUpstreamProxy,
+            "propose_action" => Self::ProposeAction,
+            _ => return None,
+        })
+    }
+}
+
 pub(super) async fn execute_assistant_tool(
     state: &Arc<AppState>,
     name: &str,
@@ -53,57 +109,72 @@ pub(super) async fn execute_assistant_tool(
         .map(ToolOutcome::Workspace);
     }
 
-    match name {
-        "list_sessions" => read_list_sessions(state, args).await.map(ToolOutcome::Read),
-        "get_session" => read_get_session(state, args).await.map(ToolOutcome::Read),
-        "get_config" => read_config(state).await.map(ToolOutcome::Read),
-        "get_feature_catalog" => read_feature_catalog(args).map(ToolOutcome::Read),
-        "get_rules" => read_rules(state, args).await.map(ToolOutcome::Read),
-        "get_protocol_metrics" => Ok(ToolOutcome::Read(json!(
-            super::sessions::aggregate_protocol_metrics(state.session_manager.get_all_sessions())
-        ))),
-        "get_connections" => read_connections(state, args).map(ToolOutcome::Read),
-        "get_breakpoint_diagnostics" => Ok(ToolOutcome::Read(json!({
-            "diagnostics": state.api_handler.list_breakpoint_diagnostics().await,
-        }))),
-        "get_throttling" => Ok(ToolOutcome::Read(json!(
-            state.throttling_config.read().await.clone()
-        ))),
-        "get_dns" => Ok(ToolOutcome::Read(json!(
-            state.dns_overrides.read().await.clone()
-        ))),
-        "get_capture_filter" => Ok(ToolOutcome::Read(json!(
-            state.capture_filter.read().await.clone()
-        ))),
-        "get_webhooks" => Ok(ToolOutcome::Read(json!(redact_value(&json!(
-            state.webhooks.read().await.clone()
-        ))))),
-        "get_upstream_proxy" => Ok(ToolOutcome::Read(json!({
-            "upstream_proxy": storage::load_upstream_proxy(&state.storage_path)
-                .or_else(|| state.config.upstream_proxy.clone())
-        }))),
-        "propose_map_remote" => propose_map_remote_action(args).map(ToolOutcome::Proposed),
-        "propose_dns_override" => propose_dns_override_action(state, args)
-            .await
-            .map(ToolOutcome::Proposed),
-        "propose_throttling" => propose_throttling_action(state, args)
-            .await
-            .map(ToolOutcome::Proposed),
-        "propose_rewrite_rule" => propose_rewrite_rule_action(args).map(ToolOutcome::Proposed),
-        "propose_mock_rule" => propose_mock_rule_action(args).map(ToolOutcome::Proposed),
-        "propose_access_rule" => propose_access_rule_action(args).map(ToolOutcome::Proposed),
-        "propose_capture_filter" => propose_capture_filter_action(state, args)
-            .await
-            .map(ToolOutcome::Proposed),
-        "propose_upstream_proxy" => propose_upstream_proxy_action(state, args)
-            .await
-            .map(ToolOutcome::Proposed),
-        "propose_action" => propose_action(args).map(ToolOutcome::Proposed),
-        _ => Err(format!(
+    let Some(tool) = StaticAssistantTool::from_name(name) else {
+        return Err(format!(
             "assistant tool '{name}' is declared as {} ({}) but has no executor",
             execution_kind_label(contract.execution_kind),
             risk_label(contract.risk)
-        )),
+        ));
+    };
+
+    match tool {
+        StaticAssistantTool::ListSessions => {
+            read_list_sessions(state, args).await.map(ToolOutcome::Read)
+        }
+        StaticAssistantTool::GetSession => {
+            read_get_session(state, args).await.map(ToolOutcome::Read)
+        }
+        StaticAssistantTool::GetConfig => read_config(state).await.map(ToolOutcome::Read),
+        StaticAssistantTool::GetFeatureCatalog => read_feature_catalog(args).map(ToolOutcome::Read),
+        StaticAssistantTool::GetRules => read_rules(state, args).await.map(ToolOutcome::Read),
+        StaticAssistantTool::GetProtocolMetrics => Ok(ToolOutcome::Read(json!(
+            super::sessions::aggregate_protocol_metrics(state.session_manager.get_all_sessions())
+        ))),
+        StaticAssistantTool::GetConnections => read_connections(state, args).map(ToolOutcome::Read),
+        StaticAssistantTool::GetBreakpointDiagnostics => Ok(ToolOutcome::Read(json!({
+            "diagnostics": state.api_handler.list_breakpoint_diagnostics().await,
+        }))),
+        StaticAssistantTool::GetThrottling => Ok(ToolOutcome::Read(json!(
+            state.throttling_config.read().await.clone()
+        ))),
+        StaticAssistantTool::GetDns => Ok(ToolOutcome::Read(json!(
+            state.dns_overrides.read().await.clone()
+        ))),
+        StaticAssistantTool::GetCaptureFilter => Ok(ToolOutcome::Read(json!(
+            state.capture_filter.read().await.clone()
+        ))),
+        StaticAssistantTool::GetWebhooks => Ok(ToolOutcome::Read(json!(redact_value(&json!(
+            state.webhooks.read().await.clone()
+        ))))),
+        StaticAssistantTool::GetUpstreamProxy => Ok(ToolOutcome::Read(json!({
+            "upstream_proxy": storage::load_upstream_proxy(&state.storage_path)
+                .or_else(|| state.config.upstream_proxy.clone())
+        }))),
+        StaticAssistantTool::ProposeMapRemote => {
+            propose_map_remote_action(args).map(ToolOutcome::Proposed)
+        }
+        StaticAssistantTool::ProposeDnsOverride => propose_dns_override_action(state, args)
+            .await
+            .map(ToolOutcome::Proposed),
+        StaticAssistantTool::ProposeThrottling => propose_throttling_action(state, args)
+            .await
+            .map(ToolOutcome::Proposed),
+        StaticAssistantTool::ProposeRewriteRule => {
+            propose_rewrite_rule_action(args).map(ToolOutcome::Proposed)
+        }
+        StaticAssistantTool::ProposeMockRule => {
+            propose_mock_rule_action(args).map(ToolOutcome::Proposed)
+        }
+        StaticAssistantTool::ProposeAccessRule => {
+            propose_access_rule_action(args).map(ToolOutcome::Proposed)
+        }
+        StaticAssistantTool::ProposeCaptureFilter => propose_capture_filter_action(state, args)
+            .await
+            .map(ToolOutcome::Proposed),
+        StaticAssistantTool::ProposeUpstreamProxy => propose_upstream_proxy_action(state, args)
+            .await
+            .map(ToolOutcome::Proposed),
+        StaticAssistantTool::ProposeAction => propose_action(args).map(ToolOutcome::Proposed),
     }
 }
 

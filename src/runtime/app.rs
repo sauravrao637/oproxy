@@ -30,8 +30,7 @@ pub(crate) async fn run() -> Result<(), StartupError> {
     let services = super::state::build_runtime_services(&config).await?;
     let timeouts = build_timeouts(&config);
 
-    // Best-effort, non-blocking update check (notify only). Opt out with
-    // OPROXY_UPDATE_CHECK=false.
+    // Best-effort, non-blocking update check (notify only).
     if config.update_check {
         tokio::spawn(control_plane::refresh_update_status(
             services.state.update_status.clone(),
@@ -75,7 +74,11 @@ fn url_host(bind_host: &str) -> &str {
 /// are reported correctly).
 fn log_startup_summary(config: &crate::config::Config, listeners: &BoundListeners) {
     let ui_host = url_host(&config.bind_host);
+    log_listener_summary(listeners, ui_host);
+    log_security_summary(config, ui_host);
+}
 
+fn log_listener_summary(listeners: &BoundListeners, ui_host: &str) {
     if let Ok(addr) = listeners.http.local_addr() {
         tracing::info!("HTTP proxy     http://{addr} - set as the HTTP/HTTPS proxy in your client");
         tracing::info!(
@@ -101,6 +104,9 @@ fn log_startup_summary(config: &crate::config::Config, listeners: &BoundListener
     {
         tracing::info!("HTTP/3 (QUIC)  udp://{addr} - advertised to clients via alt-svc");
     }
+}
+
+fn log_security_summary(config: &crate::config::Config, ui_host: &str) {
     if config.mitm.enabled {
         tracing::info!(
             "HTTPS MITM     enabled - download and trust the root CA at http://{ui_host}:{}/admin/ca",
@@ -137,6 +143,7 @@ async fn bind_listeners(
         http: super::listeners::bind_http_listener(config).await?,
         https: super::listeners::bind_https_listener(config, ca).await?,
         socks5: super::listeners::bind_socks5_listener(config).await?,
+
         #[cfg(feature = "http3")]
         http3: super::listeners::bind_http3_listener(config, ca).await,
     })

@@ -56,7 +56,7 @@ impl GraphQLInspectorMiddleware {
                 }
             }
         }
-        // Fallback: keyword detection
+        // Accept GraphQL documents that omit the optional operation keyword.
         let lower = query_str.trim_start().to_lowercase();
         if lower.starts_with("mutation") {
             ("mutation".to_string(), None)

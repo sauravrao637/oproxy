@@ -19,6 +19,7 @@ mod assistant_registry;
 mod assistant_tools;
 mod auth;
 mod breakpoints;
+mod error;
 mod extensions;
 mod forward;
 mod login;
@@ -86,32 +87,23 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
         .route("/", get(serve_index))
         .route("/login", get(get_login).post(post_login))
         .route("/health", get(health))
-        .route("/api/sessions", get(list_sessions))
-        .route("/api/sessions/stream", get(sessions_stream))
-        .route("/api/sessions/{id}", get(get_session))
-        .route(
-            "/api/sessions/{id}/annotation",
-            axum::routing::patch(annotate_session),
-        )
-        .route("/api/sessions/{id}/export", get(export_session))
-        .route("/api/sessions/{id}/timing", get(get_session_timing))
-        .route("/api/sessions/diff", get(diff_sessions))
-        .route("/api/sessions/{id}/ws-frames", get(get_ws_frames))
-        .route("/api/connections", get(list_connections))
-        .route("/api/metrics/protocol", get(protocol_metrics))
-        .route("/api/import/curl", axum::routing::post(import_curl))
-        .route("/admin/sessions", get(list_sessions).delete(clear_sessions))
-        .route("/admin/sessions/save", axum::routing::post(save_sessions))
-        .route("/admin/sessions/load", axum::routing::post(load_sessions))
-        .route(
-            "/admin/sessions/import",
-            axum::routing::post(import_sessions),
-        )
-        .route("/admin/sessions/export/har", get(export_har))
-        .route(
-            "/admin/sessions/import/har",
-            axum::routing::post(import_har),
-        )
+        .merge(session_routes())
+        .merge(asset_routes())
+        .merge(policy_routes())
+        .merge(assistant_routes())
+        .merge(extension_routes())
+        .merge(settings_routes())
+        .fallback(proxy_fallback)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth_layer,
+        ))
+        .layer(axum::middleware::from_fn(security_headers))
+        .with_state(state)
+}
+
+fn policy_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route(
             "/admin/throttling",
             get(get_throttling)
@@ -140,25 +132,6 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
                 .put(update_rule_set)
                 .delete(delete_rule_set),
         )
-        .route("/admin/ca", get(get_ca_cert))
-        .route("/admin/ca/qr", get(get_ca_qr))
-        .route("/admin/update", get(get_update_status))
-        .route("/admin/metrics", get(get_metrics))
-        .route("/admin/playback", axum::routing::post(start_playback))
-        .route("/admin/breakpoints", get(list_bp_rules).post(add_bp_rule))
-        .route("/admin/breakpoints/pending", get(list_pending_bp))
-        .route("/admin/breakpoints/diagnostics", get(list_bp_diagnostics))
-        .route(
-            "/admin/breakpoints/pending/{id}/resolve",
-            axum::routing::post(resolve_bp),
-        )
-        .route(
-            "/admin/breakpoints/{id}",
-            axum::routing::put(update_bp_rule).delete(delete_bp_rule),
-        )
-        .route("/admin/plugins", get(list_plugins))
-        .route("/admin/config/reload", axum::routing::post(reload_config))
-        .route("/admin/config", get(get_config))
         .route(
             "/admin/capture-filter",
             get(get_capture_filter).post(update_capture_filter),
@@ -198,6 +171,16 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
             "/admin/map-remote-rules/{id}",
             axum::routing::put(update_map_remote_rule).delete(delete_map_remote_rule),
         )
+}
+
+fn settings_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/admin/ca", get(get_ca_cert))
+        .route("/admin/ca/qr", get(get_ca_qr))
+        .route("/admin/update", get(get_update_status))
+        .route("/admin/metrics", get(get_metrics))
+        .route("/admin/config/reload", axum::routing::post(reload_config))
+        .route("/admin/config", get(get_config))
         .route("/admin/forward", axum::routing::post(forward_request))
         .route(
             "/admin/forward/websocket",
@@ -212,6 +195,12 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
             "/admin/webhooks/{id}",
             axum::routing::put(update_webhook).delete(delete_webhook),
         )
+        .route("/admin/socks5/status", get(get_socks5_status))
+        .route("/admin/setup/network-info", get(get_network_info))
+}
+
+fn assistant_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/admin/assistant/tools", get(get_assistant_tools))
         .route("/admin/assistant/chat", axum::routing::post(chat_assistant))
         .route(
@@ -234,6 +223,23 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
             "/admin/workspace/actions",
             axum::routing::post(execute_workspace_action),
         )
+}
+
+fn extension_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/admin/playback", axum::routing::post(start_playback))
+        .route("/admin/breakpoints", get(list_bp_rules).post(add_bp_rule))
+        .route("/admin/breakpoints/pending", get(list_pending_bp))
+        .route("/admin/breakpoints/diagnostics", get(list_bp_diagnostics))
+        .route(
+            "/admin/breakpoints/pending/{id}/resolve",
+            axum::routing::post(resolve_bp),
+        )
+        .route(
+            "/admin/breakpoints/{id}",
+            axum::routing::put(update_bp_rule).delete(delete_bp_rule),
+        )
+        .route("/admin/plugins", get(list_plugins))
         .route(
             "/admin/mock/rules",
             get(list_mock_rules).post(create_mock_rule),
@@ -251,10 +257,42 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
             "/admin/scripts/{id}",
             axum::routing::put(update_script).delete(delete_script),
         )
-        .route("/admin/socks5/status", get(get_socks5_status))
+}
+
+fn session_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/stream", get(sessions_stream))
+        .route("/api/sessions/{id}", get(get_session))
+        .route(
+            "/api/sessions/{id}/annotation",
+            axum::routing::patch(annotate_session),
+        )
+        .route("/api/sessions/{id}/export", get(export_session))
+        .route("/api/sessions/{id}/timing", get(get_session_timing))
+        .route("/api/sessions/diff", get(diff_sessions))
+        .route("/api/sessions/{id}/ws-frames", get(get_ws_frames))
+        .route("/api/connections", get(list_connections))
+        .route("/api/metrics/protocol", get(protocol_metrics))
+        .route("/api/import/curl", axum::routing::post(import_curl))
+        .route("/admin/sessions", get(list_sessions).delete(clear_sessions))
+        .route("/admin/sessions/save", axum::routing::post(save_sessions))
+        .route("/admin/sessions/load", axum::routing::post(load_sessions))
+        .route(
+            "/admin/sessions/import",
+            axum::routing::post(import_sessions),
+        )
+        .route("/admin/sessions/export/har", get(export_har))
+        .route(
+            "/admin/sessions/import/har",
+            axum::routing::post(import_har),
+        )
+}
+
+fn asset_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/setup", get(serve_setup_wizard))
         .route("/setup/mobile", get(serve_setup_wizard))
-        .route("/admin/setup/network-info", get(get_network_info))
         .route("/manifest.json", get(serve_manifest))
         .route("/sw.js", get(serve_sw))
         .route("/icons/icon.svg", get(serve_icon))
@@ -273,20 +311,10 @@ pub fn control_plane_router(state: Arc<AppState>) -> Router {
         .route("/assets/app.js", get(serve_design_app_js))
         .route("/app.css", get(not_found))
         .route("/js/{*path}", get(not_found))
-        // Silence browser probes that would otherwise reach the proxy fallback
         .route("/favicon.ico", get(serve_icon))
         .route("/.well-known/{*path}", get(not_found))
         .route("/robots.txt", get(robots_txt))
-        .fallback(proxy_fallback)
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            admin_auth_layer,
-        ))
-        .layer(axum::middleware::from_fn(security_headers))
-        .with_state(state)
 }
-
-// ── Security helpers ───────────────────────────────────────────────────────────
 
 fn admin_egress_policy_response(error: String) -> axum::response::Response {
     (

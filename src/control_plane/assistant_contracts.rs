@@ -17,6 +17,10 @@ pub(super) enum AssistantToolExecutionKind {
     Proposal,
 }
 
+/// Complete risk taxonomy for assistant tools. Not every level is currently
+/// assigned to a tool (e.g. `Network`/`Destructive` are reserved for future
+/// contracts), so the unused variants are intentional — hence the `dead_code`
+/// allow rather than trimming the enum to only the levels in use today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]

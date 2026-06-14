@@ -1,8 +1,6 @@
 //! Forwarding and protocol planning contracts.
 //!
-//! The engine currently uses direct reqwest forwarding for buffered and
-//! streaming HTTP traffic. This module keeps only the load-bearing contracts:
-//! typed protocol context, body-access hints, and capability planning.
+//! Defines protocol context, body-access requirements, and forwarding plans.
 
 use serde::{Deserialize, Serialize};
 
@@ -191,16 +189,10 @@ pub enum Granularity {
     Messages,
 }
 
-/// Head-only declaration of how a plugin needs to access the body. Declared from
-/// the request head **before the first body byte is forwarded**, so the engine
-/// can choose the forwarding class without ever buffering a stream by accident.
+/// Declares how a plugin needs to access the body. The engine evaluates this
+/// from request metadata before forwarding any body bytes.
 ///
-/// `StreamingMutate` is intentionally **not** part of v1 — streaming is
-/// inspect-only. It is reserved for a future RFC:
-///
-/// ```text
-/// // StreamingMutate { granularity: Granularity },  // reserved, not in v1
-/// ```
+/// Streaming plugins may inspect but not mutate body data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyHint {
     /// Buffer the whole body; mutation is allowed (mock, rewrite, Lua, breakpoint).
@@ -210,8 +202,7 @@ pub enum BodyHint {
 }
 
 impl Default for BodyHint {
-    /// Default preserves today's behaviour: plugins are assumed to need the whole
-    /// body unless they opt into streaming.
+    /// Plugins are assumed to need the whole body unless they opt into streaming.
     fn default() -> Self {
         BodyHint::FullBody
     }
@@ -220,11 +211,9 @@ impl Default for BodyHint {
 /// Which forwarding path handles an exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardClass {
-    /// Today's reqwest path: body buffered (subject to `max_body_bytes`),
-    /// middleware may mutate it, response assembled before returning.
+    /// Buffer the body, subject to `max_body_bytes`, so middleware can mutate it.
     Buffered,
-    /// Streaming pump: body relayed frame-by-frame with back-pressure,
-    /// inspect-only in v1.
+    /// Relay the body with back-pressure while allowing inspection.
     Streaming,
 }
 
@@ -307,61 +296,9 @@ where
     }
 }
 
-/// Selects the forwarding class from the body hints of the active plugins on a
-/// route. Rules (RFC §8.2):
-///   * any `FullBody` ⇒ `Buffered` (a mutator/whole-body reader is present);
-///   * otherwise, at least one `StreamingInspect` ⇒ `Streaming`;
-///   * no hints at all ⇒ `Buffered` (conservative default == current behaviour).
-pub fn select_class<I>(hints: I) -> ForwardClass
-where
-    I: IntoIterator<Item = BodyHint>,
-{
-    let mut saw_streaming = false;
-    for hint in hints {
-        match hint {
-            BodyHint::FullBody => return ForwardClass::Buffered,
-            BodyHint::StreamingInspect { .. } => saw_streaming = true,
-        }
-    }
-    if saw_streaming {
-        ForwardClass::Streaming
-    } else {
-        ForwardClass::Buffered
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn empty_hints_default_to_buffered() {
-        assert_eq!(select_class(std::iter::empty()), ForwardClass::Buffered);
-    }
-
-    #[test]
-    fn any_full_body_forces_buffered() {
-        let hints = [
-            BodyHint::StreamingInspect {
-                granularity: Granularity::Messages,
-            },
-            BodyHint::FullBody,
-        ];
-        assert_eq!(select_class(hints), ForwardClass::Buffered);
-    }
-
-    #[test]
-    fn all_streaming_inspect_selects_streaming() {
-        let hints = [
-            BodyHint::StreamingInspect {
-                granularity: Granularity::Bytes,
-            },
-            BodyHint::StreamingInspect {
-                granularity: Granularity::Messages,
-            },
-        ];
-        assert_eq!(select_class(hints), ForwardClass::Streaming);
-    }
 
     #[test]
     fn protocol_context_maps_http_versions_to_wire_protocol() {

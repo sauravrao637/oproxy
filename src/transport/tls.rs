@@ -54,47 +54,66 @@ pub async fn mitm_intercept<IO>(
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let (cert_der, key_der) = match ca.get_certificate_for_domain(&hostname).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::error!(error = %e, host = %hostname, "MITM cert generation failed");
-            return;
-        }
+    let Some(tls_stream) = accept_mitm_tls(io, &hostname, &ca, handshake_timeout).await else {
+        return;
     };
 
-    // Advertise ALPN (h2, http/1.1) so the intercepted connection negotiates the
-    // same protocol the client/origin would have used directly, instead of being
-    // forced to HTTP/1.1.
-    let server_config = match build_mitm_server_config(cert_der, key_der) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            tracing::error!(error = %e, host = %hostname, "MITM TLS ServerConfig failed");
-            return;
-        }
-    };
-
-    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-    let tls_stream = match timeout(handshake_timeout, acceptor.accept(io)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            tracing::debug!(error = %e, host = %hostname, "MITM TLS accept failed (client may not trust CA)");
-            return;
-        }
-        Err(_) => {
-            tracing::debug!(host = %hostname, timeout_secs = handshake_timeout.as_secs(), "MITM TLS accept timed out");
-            return;
-        }
-    };
-
-    // Record what ALPN actually negotiated for observability (Phase 0 hook).
     let negotiated = tls_stream
         .get_ref()
         .1
         .alpn_protocol()
-        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .map(|protocol| String::from_utf8_lossy(protocol).into_owned())
         .unwrap_or_else(|| "http/1.1".to_string());
     tracing::debug!(host = %hostname, alpn = %negotiated, "MITM TLS established");
 
+    serve_intercepted_http(tls_stream, hostname, authority, engine, negotiated).await;
+}
+
+async fn accept_mitm_tls<IO>(
+    io: IO,
+    hostname: &str,
+    ca: &crate::certs::CertificateAuthority,
+    handshake_timeout: Duration,
+) -> Option<tokio_rustls::server::TlsStream<IO>>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (cert_der, key_der) = ca
+        .get_certificate_for_domain(hostname)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, host = %hostname, "MITM cert generation failed");
+        })
+        .ok()?;
+    let server_config = build_mitm_server_config(cert_der, key_der)
+        .map_err(|error| {
+            tracing::error!(%error, host = %hostname, "MITM TLS ServerConfig failed");
+        })
+        .ok()?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+    match timeout(handshake_timeout, acceptor.accept(io)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, host = %hostname, "MITM TLS accept failed (client may not trust CA)");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(host = %hostname, timeout_secs = handshake_timeout.as_secs(), "MITM TLS accept timed out");
+            return None;
+        }
+    }
+    .into()
+}
+
+async fn serve_intercepted_http<IO>(
+    tls_stream: tokio_rustls::server::TlsStream<IO>,
+    hostname: String,
+    authority: String,
+    engine: Arc<ProxyEngine>,
+    negotiated: String,
+) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let tls_io = hyper_util::rt::TokioIo::new(tls_stream);
     let engine_ref = engine.clone();
     // Forward to the FULL CONNECT authority (host:port). Using just the hostname
@@ -102,7 +121,7 @@ pub async fn mitm_intercept<IO>(
     // 502-ing for origins on other ports. The cert above still uses the bare
     // hostname for SNI/CN.
     let dest_ref = format!("https://{}", authority);
-    // One downstream identity per intercepted connection (Phase 7) so multiplexed
+    // One downstream identity per intercepted connection so multiplexed
     // h2 streams to the same MITM'd origin group together.
     let conn = crate::transport::http::DownstreamConn::new();
 

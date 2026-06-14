@@ -9,6 +9,8 @@ use tracing::{info, warn};
 use crate::session::{SessionChange, SessionChangeKind, SessionManager};
 
 type HmacSha256 = Hmac<Sha256>;
+const WEBHOOK_ATTEMPTS: u32 = 3;
+const WEBHOOK_RETRY_BASE: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -140,40 +142,51 @@ async fn fire_webhook(
     payload: &str,
     signature: Option<&str>,
 ) {
-    let parsed_url = match reqwest::Url::parse(url) {
-        Ok(url) => url,
-        Err(e) => {
-            warn!("webhook {} skipped: invalid URL: {e}", url);
-            return;
-        }
-    };
-    if let Err(e) = crate::security::enforce_admin_egress_policy(&parsed_url, policy).await {
-        warn!("webhook {} skipped: {e}", url);
+    if let Err(error) = validate_webhook_destination(url, policy).await {
+        warn!("webhook {url} skipped: {error}");
         return;
     }
 
-    let mut attempts = 0u32;
-    loop {
-        let mut req = client.post(url).header("content-type", "application/json");
-        if let Some(sig) = signature {
-            req = req.header("x-oproxy-signature", sig);
-        }
-        match req.body(payload.to_string()).send().await {
+    for attempt in 1..=WEBHOOK_ATTEMPTS {
+        match send_webhook(client, url, payload, signature).await {
             Ok(resp) => {
-                info!("webhook {} fired, status {}", url, resp.status());
+                info!("webhook {url} fired, status {}", resp.status());
                 return;
             }
-            Err(e) => {
-                attempts += 1;
-                if attempts >= 3 {
-                    warn!("webhook {} failed after 3 attempts: {e}", url);
+            Err(error) => {
+                if attempt == WEBHOOK_ATTEMPTS {
+                    warn!(
+                        "webhook {} failed after {} attempts: {error}",
+                        url, WEBHOOK_ATTEMPTS
+                    );
                     return;
                 }
-                let delay = Duration::from_millis(200 * (1 << attempts) as u64);
+                let delay = WEBHOOK_RETRY_BASE * (1 << attempt);
                 tokio::time::sleep(delay).await;
             }
         }
     }
+}
+
+async fn validate_webhook_destination(
+    url: &str,
+    policy: crate::security::AdminEgressPolicy,
+) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|error| format!("invalid URL: {error}"))?;
+    crate::security::enforce_admin_egress_policy(&parsed, policy).await
+}
+
+async fn send_webhook(
+    client: &reqwest::Client,
+    url: &str,
+    payload: &str,
+    signature: Option<&str>,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut request = client.post(url).header("content-type", "application/json");
+    if let Some(signature) = signature {
+        request = request.header("x-oproxy-signature", signature);
+    }
+    request.body(payload.to_string()).send().await
 }
 
 #[cfg(test)]

@@ -43,46 +43,45 @@ pub(super) async fn bind_https_listener(
         return Ok(None);
     };
 
-    match ca.get_certificate_for_domain("localhost").await {
-        Ok((cert_der, key_der)) => {
-            let cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
-            let private_key: rustls::pki_types::PrivateKeyDer<'static> =
-                rustls::pki_types::PrivatePkcs8KeyDer::from(key_der).into();
-            match rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, private_key)
-            {
-                Ok(tls_cfg) => {
-                    let tls_addr_str = format!("{}:{}", config.bind_host, https_port);
-                    let tls_addr: SocketAddr =
-                        tls_addr_str
-                            .parse()
-                            .map_err(|e| StartupError::InvalidAddr {
-                                addr: tls_addr_str,
-                                source: e,
-                            })?;
-                    match tokio::net::TcpListener::bind(tls_addr).await {
-                        Ok(tls_l) => Ok(Some((
-                            tls_l,
-                            tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg)),
-                        ))),
-                        Err(e) => {
-                            tracing::warn!(error=%e, "Failed to bind HTTPS listener, continuing without it");
-                            Ok(None)
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error=%e, "Failed to build TLS config for HTTPS listener");
-                    Ok(None)
-                }
-            }
+    let acceptor = match build_https_acceptor(ca).await {
+        Ok(acceptor) => acceptor,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to prepare HTTPS listener");
+            return Ok(None);
         }
-        Err(e) => {
-            tracing::warn!(error=%e, "Failed to generate localhost cert for HTTPS listener");
+    };
+    let address = format!("{}:{https_port}", config.bind_host);
+    let socket_address: SocketAddr =
+        address
+            .parse()
+            .map_err(|source| StartupError::InvalidAddr {
+                addr: address.clone(),
+                source,
+            })?;
+    match tokio::net::TcpListener::bind(socket_address).await {
+        Ok(listener) => Ok(Some((listener, acceptor))),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to bind HTTPS listener, continuing without it");
             Ok(None)
         }
     }
+}
+
+async fn build_https_acceptor(
+    ca: &CertificateAuthority,
+) -> Result<tokio_rustls::TlsAcceptor, String> {
+    let (certificate, key) = ca
+        .get_certificate_for_domain("localhost")
+        .await
+        .map_err(|error| format!("localhost certificate: {error}"))?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![rustls::pki_types::CertificateDer::from(certificate)],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key).into(),
+        )
+        .map_err(|error| format!("TLS configuration: {error}"))?;
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
 pub(super) async fn bind_socks5_listener(

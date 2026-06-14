@@ -17,6 +17,8 @@ mod inner {
 
     use crate::{core::engine::ProxyEngine, transport::lifecycle::wait_for_shutdown};
 
+    type H3RequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
     // ── TLS / QUIC cert resolver ────────────────────────────────────────────
 
     /// Sync bridge between the async `CertificateAuthority` and the synchronous
@@ -128,7 +130,7 @@ mod inner {
     async fn handle_quic_connection(
         incoming: quinn::Incoming,
         engine: Arc<ProxyEngine>,
-        mut shutdown: watch::Receiver<bool>,
+        shutdown: watch::Receiver<bool>,
     ) {
         let conn = match incoming.await {
             Ok(c) => c,
@@ -139,7 +141,7 @@ mod inner {
         };
 
         let h3_conn = h3_quinn::Connection::new(conn);
-        let mut h3_server: h3::server::Connection<_, Bytes> =
+        let h3_server: h3::server::Connection<_, Bytes> =
             match h3::server::builder().build(h3_conn).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -148,13 +150,18 @@ mod inner {
                 }
             };
 
-        // One downstream identity for this QUIC connection; cloned into every
-        // request stream so multiplexed h3 streams share a connection_id (Phase 7).
-        let conn_identity = crate::transport::http::DownstreamConn::new();
+        accept_h3_requests(h3_server, engine, shutdown).await;
+    }
 
+    async fn accept_h3_requests(
+        mut server: h3::server::Connection<h3_quinn::Connection, Bytes>,
+        engine: Arc<ProxyEngine>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let conn_identity = crate::transport::http::DownstreamConn::new();
         loop {
             let resolver = tokio::select! {
-                res = h3_server.accept() => res,
+                res = server.accept() => res,
                 _ = wait_for_shutdown(&mut shutdown) => break,
             };
             let resolver = match resolver {
@@ -183,49 +190,14 @@ mod inner {
 
     async fn handle_h3_request(
         req: Request<()>,
-        mut stream: RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+        mut stream: H3RequestStream,
         engine: Arc<ProxyEngine>,
         conn_identity: crate::transport::http::DownstreamConn,
     ) {
         let (parts, _) = req.into_parts();
-
-        // Read body DATA frames from the h3 stream, enforcing `max_body_bytes`
-        // DURING the read so a client cannot exhaust memory before the engine's
-        // own cap (which only applies after this pre-buffering) kicks in.
-        let max_body = engine.max_body_bytes();
-        let mut body_chunks: Vec<Bytes> = Vec::new();
-        let mut body_len: usize = 0;
-        while let Ok(Some(chunk)) = stream.recv_data().await {
-            let mut buf = chunk;
-            use bytes::Buf;
-            let chunk = buf.copy_to_bytes(buf.remaining());
-            body_len = body_len.saturating_add(chunk.len());
-            if body_len > max_body {
-                tracing::warn!(
-                    max_body_bytes = max_body,
-                    "h3 request body exceeded max_body_bytes; rejecting"
-                );
-                let resp = axum::http::Response::builder()
-                    .status(413)
-                    .body(())
-                    .unwrap();
-                let _ = stream.send_response(resp).await;
-                let _ = stream.finish().await;
-                return;
-            }
-            body_chunks.push(chunk);
-        }
-        let body_bytes: Bytes = body_chunks.into_iter().fold(Bytes::new(), |acc, chunk| {
-            // Concat without allocation when possible.
-            if acc.is_empty() {
-                chunk
-            } else {
-                let mut v = Vec::with_capacity(acc.len() + chunk.len());
-                v.extend_from_slice(&acc);
-                v.extend_from_slice(&chunk);
-                Bytes::from(v)
-            }
-        });
+        let Some(body_bytes) = read_request_body(&mut stream, engine.max_body_bytes()).await else {
+            return;
+        };
 
         let mut axum_req = match build_axum_request(parts, body_bytes) {
             Some(r) => r,
@@ -233,18 +205,46 @@ mod inner {
                 let resp = axum::http::Response::builder()
                     .status(400)
                     .body(())
-                    .unwrap();
+                    .expect("static 400 response is always valid");
                 let _ = stream.send_response(resp).await;
                 let _ = stream.finish().await;
                 return;
             }
         };
         // Attach the per-connection identity so the engine records connection_id /
-        // stream_id for this h3 stream (Phase 7).
+        // stream_id for this h3 stream.
         axum_req.extensions_mut().insert(conn_identity);
 
         let response = engine.handle_request_with_destination(axum_req, None).await;
 
+        send_h3_response(&mut stream, response).await;
+    }
+
+    async fn read_request_body(
+        stream: &mut H3RequestStream,
+        max_body_bytes: usize,
+    ) -> Option<Bytes> {
+        let mut body = Vec::new();
+        while let Ok(Some(chunk)) = stream.recv_data().await {
+            use bytes::Buf;
+            let mut chunk = chunk;
+            let chunk = chunk.copy_to_bytes(chunk.remaining());
+            if body.len().saturating_add(chunk.len()) > max_body_bytes {
+                tracing::warn!(max_body_bytes, "h3 request body exceeded limit");
+                let response = axum::http::Response::builder()
+                    .status(413)
+                    .body(())
+                    .expect("static 413 response is always valid");
+                let _ = stream.send_response(response).await;
+                let _ = stream.finish().await;
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Some(Bytes::from(body))
+    }
+
+    async fn send_h3_response(stream: &mut H3RequestStream, response: axum::response::Response) {
         let (resp_parts, resp_body) = response.into_parts();
         let mut h3_resp_builder = axum::http::Response::builder().status(resp_parts.status);
         for (k, v) in &resp_parts.headers {
@@ -262,7 +262,7 @@ mod inner {
             axum::http::Response::builder()
                 .status(500)
                 .body(())
-                .unwrap()
+                .expect("static 500 response is always valid")
         });
 
         if stream.send_response(h3_response).await.is_err() {

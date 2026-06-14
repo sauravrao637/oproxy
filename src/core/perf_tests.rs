@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::engine::ProxyEngine;
+    use crate::core::engine::{ProxyEngine, ProxyEngineConfig};
     use crate::middleware::chain::MiddlewareChain;
     use std::sync::Arc;
     use std::time::Instant;
@@ -9,26 +9,20 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_performance_overhead() {
         let middleware_chain = Arc::new(RwLock::new(MiddlewareChain::new()));
-        let engine = Arc::new(ProxyEngine::new(
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
             middleware_chain,
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
 
         let start = Instant::now();
         let iterations = 1000;
 
-        // This is a rough check to ensure the middleware chain isn't pathologically slow
+        // The generous threshold catches severe regressions without making the
+        // test sensitive to host load.
         for _ in 0..iterations {
             let middleware_chain_read = engine.middleware_chain.read().await;
-            // Simple operation
             let _ = middleware_chain_read
                 .execute_request(&mut crate::middleware::RequestContext {
                     method: "GET".to_string(),

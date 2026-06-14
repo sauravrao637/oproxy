@@ -132,7 +132,7 @@ impl Middleware for InspectionMiddleware {
                 protocol: ctx.protocol.clone(),
                 ..Default::default()
             };
-            // Telemetry: emit a per-exchange OTel span (Phase 11). Gated to the
+            // Telemetry: emit a per-exchange OTel span. Gated to the
             // `otel` feature — the finalized-exchange clone only happens when the
             // feature is on, so default builds pay nothing.
             #[cfg(feature = "otel")]

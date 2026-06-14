@@ -40,41 +40,61 @@ impl ProxySocks5Service {
         mut stream: tokio::net::TcpStream,
         mut shutdown: watch::Receiver<bool>,
     ) {
-        let target = match timeout(self.handshake_timeout, handshake(&mut stream)).await {
+        let Some(resolved) = self.prepare_target(&mut stream).await else {
+            return;
+        };
+        if !self.apply_tunnel_policy(&mut stream, &resolved).await {
+            return;
+        }
+        if self.should_intercept(&resolved) {
+            self.serve_mitm(stream, resolved).await;
+            return;
+        }
+        self.serve_tunnel(stream, resolved, &mut shutdown).await;
+    }
+
+    async fn prepare_target(&self, stream: &mut TcpStream) -> Option<Socks5Target> {
+        let target = match timeout(self.handshake_timeout, handshake(stream)).await {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => {
                 tracing::debug!(error=%e, "SOCKS5 handshake failed");
-                return;
+                return None;
             }
             Err(_) => {
                 tracing::debug!("SOCKS5 handshake timed out");
-                return;
+                return None;
             }
         };
+        Some(resolve_target(target, self.dns.clone()).await)
+    }
 
-        let resolved = resolve_target(target, self.dns.clone()).await;
-        if let Some((rule_id, decision)) = self.tunnel_decision_for(&resolved).await {
+    async fn apply_tunnel_policy(&self, stream: &mut TcpStream, target: &Socks5Target) -> bool {
+        if let Some((rule_id, decision)) = self.tunnel_decision_for(target).await {
             if decision.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(decision.delay_ms)).await;
             }
             self.engine
                 .record_socks5_mock_served(
-                    &resolved.host,
-                    resolved.port,
+                    &target.host,
+                    target.port,
                     rule_id,
                     "tunnel_decision".to_string(),
                 )
                 .await;
             if !decision.allow {
-                let _ = send_failure_reply(&mut stream, 0x02).await;
-                return;
+                let _ = send_failure_reply(stream, 0x02).await;
+                return false;
             }
         }
+        true
+    }
 
-        if self.engine.mitm_enabled
-            && is_tls_port(resolved.port)
-            && let Some(ca) = self.engine.ca.clone()
-        {
+    fn should_intercept(&self, target: &Socks5Target) -> bool {
+        self.engine.mitm_enabled && is_tls_port(target.port) && self.engine.ca.is_some()
+    }
+
+    async fn serve_mitm(&self, mut stream: TcpStream, target: Socks5Target) {
+        if let Some(ca) = self.engine.ca.clone() {
             if let Err(e) = timeout(self.handshake_timeout, send_success_reply(&mut stream))
                 .await
                 .unwrap_or(Err(Socks5Error::Io))
@@ -84,25 +104,28 @@ impl ProxySocks5Service {
             }
             mitm_intercept(
                 stream,
-                resolved.host.clone(),
-                format!("{}:{}", resolved.host, resolved.port),
+                target.host.clone(),
+                format!("{}:{}", target.host, target.port),
                 self.engine.clone(),
                 ca,
                 self.handshake_timeout,
             )
             .await;
-            return;
         }
+    }
 
-        // Record the session at OPEN time so long-lived tunnels are visible in
-        // the dashboard while active and the close-time latency reflects the
-        // real tunnel duration (recording both events at close made it ~0 ms).
+    async fn serve_tunnel(
+        &self,
+        stream: TcpStream,
+        target: Socks5Target,
+        shutdown: &mut watch::Receiver<bool>,
+    ) {
         let session_id = self
             .engine
-            .record_socks5_tunnel_opened(&resolved.host, resolved.port)
+            .record_socks5_tunnel_opened(&target.host, target.port)
             .await;
 
-        let connection = tunnel_with_connect_timeout(stream, &resolved, self.connect_timeout);
+        let connection = tunnel_with_connect_timeout(stream, &target, self.connect_timeout);
         tokio::pin!(connection);
         tokio::select! {
             res = &mut connection => {
@@ -119,7 +142,7 @@ impl ProxySocks5Service {
                         .await;
                 }
             }
-            _ = wait_for_shutdown(&mut shutdown) => {
+            _ = wait_for_shutdown(shutdown) => {
                 tracing::debug!("SOCKS5 connection stopped by shutdown");
             }
         }
@@ -361,6 +384,7 @@ pub async fn tunnel_with_connect_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::engine::ProxyEngineConfig;
     use crate::middleware::matcher::{Location, MatchMode};
     use crate::middleware::plugins::dns_override::{DnsEntry, DnsOverrides};
     use crate::middleware::plugins::mock::MockRule;
@@ -369,18 +393,14 @@ mod tests {
     use tokio::net::TcpListener;
 
     fn test_engine() -> Arc<ProxyEngine> {
-        Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(crate::middleware::chain::MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ))
+        Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(
+                crate::middleware::chain::MiddlewareChain::new(),
+            )),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }))
     }
 
     fn test_service_with_mock_rules(rules: Vec<MockRule>) -> ProxySocks5Service {

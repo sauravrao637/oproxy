@@ -12,5 +12,8 @@
     "react-dom": "^19.2.6",
     "vite": "^7.3.3"
   },
+  "resolutions": {
+    "esbuild": "^0.28.1"
+  },
   "packageManager": "yarn@4.15.0"
 }

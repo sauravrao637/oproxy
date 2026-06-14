@@ -34,22 +34,22 @@ const WS_FORWARD_MAX_SERVER_FRAMES: usize = 10;
 #[derive(serde::Deserialize)]
 pub(super) struct ForwardReq {
     #[serde(default)]
-    kind: ForwardKind,
-    method: String,
-    url: String,
+    pub(super) kind: ForwardKind,
+    pub(super) method: String,
+    pub(super) url: String,
     #[serde(default)]
-    headers: HashMap<String, String>,
+    pub(super) headers: HashMap<String, String>,
     #[serde(default)]
-    body: Option<String>,
+    pub(super) body: Option<String>,
     #[serde(default)]
-    note: Option<String>,
+    pub(super) note: Option<String>,
     #[serde(default)]
-    tags: Option<Vec<String>>,
+    pub(super) tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ForwardKind {
+pub(super) enum ForwardKind {
     #[default]
     Http,
     Http2,
@@ -58,7 +58,7 @@ enum ForwardKind {
 }
 
 #[derive(serde::Serialize)]
-struct ForwardResp {
+pub(super) struct ForwardResp {
     status: u16,
     status_text: String,
     headers: HashMap<String, String>,
@@ -67,6 +67,13 @@ struct ForwardResp {
     session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     protocol: Option<ForwardProtocolResp>,
+}
+
+#[derive(Debug)]
+pub(super) enum ForwardFailure {
+    BadRequest(String),
+    EgressBlocked(String),
+    Upstream(String),
 }
 
 #[derive(serde::Serialize)]
@@ -133,46 +140,97 @@ struct ForwardWsFrameResp {
     payload_len: usize,
 }
 
+struct ForwardFrameCollector<'a> {
+    state: &'a Arc<AppState>,
+    session_id: &'a str,
+    frames: Vec<ForwardWsFrameResp>,
+    server_frames: usize,
+}
+
+struct PreparedWebSocketForward {
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    session_id: String,
+    url: String,
+    frames: Vec<ForwardWsFrameReq>,
+    protocol: ProtocolContext,
+}
+
+impl<'a> ForwardFrameCollector<'a> {
+    fn new(state: &'a Arc<AppState>, session_id: &'a str) -> Self {
+        Self {
+            state,
+            session_id,
+            frames: Vec::new(),
+            server_frames: 0,
+        }
+    }
+
+    fn record(&mut self, direction: WsDirection, message: &Message) {
+        if direction == WsDirection::ServerToClient {
+            self.server_frames += 1;
+        }
+        record_ws_message(
+            self.state,
+            self.session_id,
+            direction,
+            message,
+            &mut self.frames,
+        );
+    }
+
+    fn reached_server_limit(&self) -> bool {
+        self.server_frames >= WS_FORWARD_MAX_SERVER_FRAMES
+    }
+}
+
 pub(super) async fn forward_request(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<ForwardReq>,
 ) -> impl IntoResponse {
+    match forward_http_exchange(&state, req).await {
+        Ok(response) => axum::Json(response).into_response(),
+        Err(ForwardFailure::BadRequest(error)) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": error })),
+        )
+            .into_response(),
+        Err(ForwardFailure::EgressBlocked(error)) => admin_egress_policy_response(error),
+        Err(ForwardFailure::Upstream(error)) => {
+            (axum::http::StatusCode::BAD_GATEWAY, error).into_response()
+        }
+    }
+}
+
+pub(super) async fn forward_http_exchange(
+    state: &Arc<AppState>,
+    req: ForwardReq,
+) -> Result<ForwardResp, ForwardFailure> {
     let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
         Ok(m) => m,
         Err(_) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({
-                    "error": format!("Invalid HTTP method: {}", req.method)
-                })),
-            )
-                .into_response();
+            return Err(ForwardFailure::BadRequest(format!(
+                "Invalid HTTP method: {}",
+                req.method
+            )));
         }
     };
     let url_parsed = match reqwest::Url::parse(&req.url) {
         Ok(u) => u,
         Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({ "error": format!("Invalid URL: {e}") })),
-            )
-                .into_response();
+            return Err(ForwardFailure::BadRequest(format!("Invalid URL: {e}")));
         }
     };
     if !matches!(url_parsed.scheme(), "http" | "https") {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": format!("Unsupported URL scheme: {}", url_parsed.scheme())
-            })),
-        )
-            .into_response();
+        return Err(ForwardFailure::BadRequest(format!(
+            "Unsupported URL scheme: {}",
+            url_parsed.scheme()
+        )));
     }
     if let Err(e) =
         enforce_admin_egress_policy(&url_parsed, AdminEgressPolicy::from_config(&state.config))
             .await
     {
-        return admin_egress_policy_response(e);
+        return Err(ForwardFailure::EgressBlocked(e));
     }
 
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -326,7 +384,7 @@ pub(super) async fn forward_request(
                 .and_then(|s| s.canonical_reason())
                 .unwrap_or("")
                 .to_string();
-            axum::Json(ForwardResp {
+            Ok(ForwardResp {
                 status,
                 status_text,
                 headers: res_headers,
@@ -335,7 +393,6 @@ pub(super) async fn forward_request(
                 session_id,
                 protocol: Some(protocol_response(final_protocol)),
             })
-            .into_response()
         }
         Err(e) => {
             let res_ctx = ResponseContext {
@@ -363,7 +420,7 @@ pub(super) async fn forward_request(
                 .api_handler
                 .session_manager
                 .record_response_with_metrics(session_id.clone(), res_ctx, metrics);
-            (axum::http::StatusCode::BAD_GATEWAY, e.to_string()).into_response()
+            Err(ForwardFailure::Upstream(e.to_string()))
         }
     }
 }
@@ -396,6 +453,56 @@ pub(super) async fn forward_websocket_exchange(
     state: &Arc<AppState>,
     req: ForwardWsReq,
 ) -> Result<ForwardWsResp, ForwardWsFailure> {
+    let prepared = prepare_websocket_forward(state, req).await?;
+    let PreparedWebSocketForward {
+        request,
+        session_id,
+        url,
+        frames,
+        protocol,
+    } = prepared;
+    let started = std::time::Instant::now();
+    let mut ws = connect_async(request)
+        .await
+        .map_err(|error| {
+            record_ws_failure(state, session_id.clone(), &url, started, error.to_string())
+        })?
+        .0;
+
+    let mut collector = ForwardFrameCollector::new(state, &session_id);
+    for frame in frames {
+        let message = websocket_message(frame);
+        collector.record(WsDirection::ClientToServer, &message);
+        if let Err(error) = ws.send(message).await {
+            return Err(record_ws_failure(
+                state,
+                session_id,
+                &url,
+                started,
+                error.to_string(),
+            ));
+        }
+    }
+
+    collect_websocket_replies(state, &session_id, &url, started, &mut ws, &mut collector).await?;
+    let _ = ws.close(None).await;
+    record_websocket_success(state, &session_id, &url, started, &protocol);
+    let collected_frames = std::mem::take(&mut collector.frames);
+    drop(collector);
+
+    Ok(ForwardWsResp {
+        status: 101,
+        status_text: "Switching Protocols".to_string(),
+        session_id,
+        frames: collected_frames,
+        protocol: Some(protocol_response(protocol)),
+    })
+}
+
+async fn prepare_websocket_forward(
+    state: &Arc<AppState>,
+    req: ForwardWsReq,
+) -> Result<PreparedWebSocketForward, ForwardWsFailure> {
     let url = reqwest::Url::parse(&req.url)
         .map_err(|e| ForwardWsFailure::BadRequest(format!("Invalid URL: {e}")))?;
     if !matches!(url.scheme(), "ws" | "wss") {
@@ -445,17 +552,10 @@ pub(super) async fn forward_websocket_exchange(
             .await;
     }
 
-    let started = std::time::Instant::now();
     let mut request = match req.url.as_str().into_client_request() {
         Ok(r) => r,
         Err(e) => {
-            return Err(record_ws_failure(
-                state,
-                session_id,
-                &req.url,
-                started,
-                e.to_string(),
-            ));
+            return Err(ForwardWsFailure::BadRequest(e.to_string()));
         }
     };
     for (name, value) in req.headers {
@@ -469,63 +569,46 @@ pub(super) async fn forward_websocket_exchange(
         }
     }
 
-    let mut ws = match connect_async(request).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
-            return Err(record_ws_failure(
-                state,
-                session_id,
-                &req.url,
-                started,
-                e.to_string(),
-            ));
-        }
-    };
+    Ok(PreparedWebSocketForward {
+        request,
+        session_id,
+        url: req.url,
+        frames: req.frames,
+        protocol: proto,
+    })
+}
 
-    let mut frames = Vec::new();
-    for frame in req.frames {
-        let message = match frame.opcode.as_str() {
-            "binary" => Message::Binary(
-                base64::engine::general_purpose::STANDARD
-                    .decode(frame.payload.as_bytes())
-                    .unwrap_or_else(|_| frame.payload.clone().into_bytes()),
-            ),
-            "ping" => Message::Ping(frame.payload.into_bytes()),
-            "pong" => Message::Pong(frame.payload.into_bytes()),
-            "close" => Message::Close(Some(CloseFrame {
-                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
-                reason: frame.payload.into(),
-            })),
-            _ => Message::Text(frame.payload),
-        };
-        record_ws_message(
-            state,
-            &session_id,
-            WsDirection::ClientToServer,
-            &message,
-            &mut frames,
-        );
-        if let Err(e) = ws.send(message).await {
-            return Err(record_ws_failure(
-                state,
-                session_id,
-                &req.url,
-                started,
-                e.to_string(),
-            ));
-        }
+fn websocket_message(frame: ForwardWsFrameReq) -> Message {
+    match frame.opcode.as_str() {
+        "binary" => Message::Binary(
+            base64::engine::general_purpose::STANDARD
+                .decode(frame.payload.as_bytes())
+                .unwrap_or_else(|_| frame.payload.into_bytes()),
+        ),
+        "ping" => Message::Ping(frame.payload.into_bytes()),
+        "pong" => Message::Pong(frame.payload.into_bytes()),
+        "close" => Message::Close(Some(CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+            reason: frame.payload.into(),
+        })),
+        _ => Message::Text(frame.payload),
     }
+}
 
+async fn collect_websocket_replies(
+    state: &Arc<AppState>,
+    session_id: &str,
+    url: &str,
+    started: std::time::Instant,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    collector: &mut ForwardFrameCollector<'_>,
+) -> Result<(), ForwardWsFailure> {
     while let Ok(Some(next)) = tokio::time::timeout(WS_FORWARD_REPLY_TIMEOUT, ws.next()).await {
         match next {
             Ok(message) => {
-                record_ws_message(
-                    state,
-                    &session_id,
-                    WsDirection::ServerToClient,
-                    &message,
-                    &mut frames,
-                );
+                collector.record(WsDirection::ServerToClient, &message);
                 if matches!(message, Message::Close(_)) {
                     break;
                 }
@@ -533,34 +616,41 @@ pub(super) async fn forward_websocket_exchange(
             Err(e) => {
                 return Err(record_ws_failure(
                     state,
-                    session_id,
-                    &req.url,
+                    session_id.to_string(),
+                    url,
                     started,
                     e.to_string(),
                 ));
             }
         }
-        if frames.iter().filter(|f| f.direction == "server").count() >= WS_FORWARD_MAX_SERVER_FRAMES
-        {
+        if collector.reached_server_limit() {
             break;
         }
     }
-    let _ = ws.close(None).await;
+    Ok(())
+}
 
+fn record_websocket_success(
+    state: &Arc<AppState>,
+    session_id: &str,
+    url: &str,
+    started: std::time::Instant,
+    protocol: &ProtocolContext,
+) {
     let response = ResponseContext {
         status: 101,
         headers: HashMap::from([("upgrade".to_string(), "websocket".to_string())]).into(),
-        request_uri: req.url.clone(),
-        session_id: Some(session_id.clone()),
+        request_uri: url.to_string(),
+        session_id: Some(session_id.to_string()),
         protocol: Some("WebSocket".to_string()),
-        protocol_context: Some(proto.clone()),
+        protocol_context: Some(protocol.clone()),
         ..Default::default()
     };
     state
         .api_handler
         .session_manager
         .record_response_with_metrics(
-            session_id.clone(),
+            session_id.to_string(),
             response,
             InspectionMetrics {
                 latency_ms: started.elapsed().as_millis() as u64,
@@ -569,14 +659,6 @@ pub(super) async fn forward_websocket_exchange(
                 ..Default::default()
             },
         );
-
-    Ok(ForwardWsResp {
-        status: 101,
-        status_text: "Switching Protocols".to_string(),
-        session_id,
-        frames,
-        protocol: Some(protocol_response(proto)),
-    })
 }
 
 fn record_ws_failure(

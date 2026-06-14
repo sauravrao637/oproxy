@@ -48,7 +48,7 @@ impl GrpcInspectorMiddleware {
 
     /// Decode a gRPC framed message:
     /// [1 byte: compressed flag][4 bytes: big-endian message length][N bytes: protobuf]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn decode_grpc_frame(data: &[u8]) -> Option<(bool, Vec<u8>)> {
         if data.len() < 5 {
             return None;
@@ -174,14 +174,14 @@ fn read_varint(data: &[u8], mut pos: usize) -> Option<(u64, usize)> {
     Some((result, pos - start))
 }
 
-/// Incremental gRPC frame splitter for the streaming forwarder (Phase 4).
+/// Incremental gRPC frame splitter for the streaming forwarder.
 ///
 /// gRPC length-prefixed framing is `[1B compressed flag][4B big-endian length]
 /// [N bytes message]`. On an HTTP/2 (or h3) stream these frames arrive split
 /// across, or coalesced within, arbitrary network chunks. `push` buffers bytes
 /// and returns every *complete* message it can, leaving any partial trailing
 /// frame buffered for the next chunk. This is what makes `needs_full_body` apply
-/// **per message, not per stream** (RFC §8.2, `Granularity::Messages`): each
+/// **per message, not per stream** (`Granularity::Messages`): each
 /// message is delivered whole to the inspector while the stream is never buffered.
 #[derive(Debug, Default)]
 pub struct GrpcFrameSplitter {
@@ -217,7 +217,7 @@ impl GrpcFrameSplitter {
     }
 
     /// Number of buffered bytes belonging to an as-yet-incomplete frame.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.buf.len()
     }

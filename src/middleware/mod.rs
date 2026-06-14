@@ -20,6 +20,28 @@ use crate::core::engine::is_binary_content_type;
 /// (`get`/`insert`/`remove`/`contains_key`/`iter`/…) so it is a near drop-in,
 /// with [`append`](HeaderMap::append)/[`get_all`](HeaderMap::get_all) added for
 /// the multi-value cases.
+///
+/// Backed by a `Vec`, so lookups are O(n) over the entries. That is the right
+/// tradeoff here: header counts per message are small, insertion order must be
+/// preserved, and a linear scan with `eq_ignore_ascii_case` avoids both hashing
+/// and the per-lookup allocation a normalised-key `HashMap` would require.
+///
+/// # Examples
+///
+/// ```
+/// use oproxy::middleware::HeaderMap;
+///
+/// let mut headers = HeaderMap::new();
+/// headers.append("Set-Cookie", "a=1");
+/// headers.append("set-cookie", "b=2"); // case-insensitive, both kept
+///
+/// assert_eq!(headers.get("SET-COOKIE"), Some(&"a=1".to_string()));
+/// assert_eq!(headers.get_all("set-cookie").count(), 2);
+///
+/// // `insert` collapses to a single value, unlike `append`.
+/// headers.insert("set-cookie", "c=3");
+/// assert_eq!(headers.get_all("set-cookie").count(), 1);
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeaderMap {
     entries: Vec<(String, String)>,
@@ -32,8 +54,10 @@ impl HeaderMap {
 
     /// First value for `key` (case-insensitive), if any.
     pub fn get(&self, key: &str) -> Option<&String> {
-        let k = key.to_ascii_lowercase();
-        self.entries.iter().find(|(n, _)| *n == k).map(|(_, v)| v)
+        self.entries
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v)
     }
 
     /// All values for `key` (case-insensitive), in insertion order.
@@ -63,10 +87,9 @@ impl HeaderMap {
 
     /// Remove all entries for `key`, returning the first removed value.
     pub fn remove(&mut self, key: &str) -> Option<String> {
-        let k = key.to_ascii_lowercase();
         let mut removed = None;
         self.entries.retain(|(n, v)| {
-            if *n == k {
+            if n.eq_ignore_ascii_case(key) {
                 if removed.is_none() {
                     removed = Some(v.clone());
                 }
@@ -79,8 +102,9 @@ impl HeaderMap {
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        let k = key.to_ascii_lowercase();
-        self.entries.iter().any(|(n, _)| *n == k)
+        self.entries
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case(key))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
@@ -237,7 +261,7 @@ pub struct RequestContext {
     /// middlewares and consumed by InspectionMiddleware.
     pub inspector: crate::session::InspectorData,
     /// Downstream connection identity, set by the transport accept loop and
-    /// recorded onto the `Exchange` by InspectionMiddleware (Phase 7). In-memory
+    /// recorded onto the `Exchange` by InspectionMiddleware. In-memory
     /// only — never serialised into recordings or sent upstream.
     pub connection_id: Option<String>,
     pub stream_id: Option<u64>,
@@ -427,10 +451,6 @@ impl From<ResponseContextWire> for ResponseContext {
 pub enum MiddlewareAction {
     Continue,      // Proceed to next middleware
     StopAndReturn, // Stop chain and return current response (e.g., Map Local)
-    // Intended for BreakpointMiddleware; not yet produced on the default binary
-    // path, so suppress the dead_code lint outside test builds.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Pause, // Halt execution (e.g., Breakpoint)
 }
 
 /// Per-stream observer created by a plugin to inspect a streamed exchange
@@ -468,6 +488,35 @@ pub trait BodyObserver: Send + 'static {
     async fn finish(self: Box<Self>);
 }
 
+/// A single stage in the request/response pipeline. Every traffic feature
+/// (rewrite, mock, throttle, inspect, …) is a `Middleware`: the engine runs
+/// [`on_request`](Middleware::on_request) for each plugin in order, forwards
+/// upstream, then runs [`on_response`](Middleware::on_response) in reverse.
+///
+/// Return [`MiddlewareAction::Continue`] to proceed, or
+/// [`MiddlewareAction::StopAndReturn`] to short-circuit with the current
+/// response (e.g. a mock).
+///
+/// # Examples
+///
+/// ```
+/// use async_trait::async_trait;
+/// use oproxy::middleware::{Middleware, MiddlewareAction, RequestContext};
+///
+/// struct AddHeader;
+///
+/// #[async_trait]
+/// impl Middleware for AddHeader {
+///     fn name(&self) -> &str {
+///         "add-header"
+///     }
+///
+///     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
+///         ctx.headers.insert("x-added-by", "add-header");
+///         MiddlewareAction::Continue
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait Middleware: Send + Sync {
     fn name(&self) -> &str;
@@ -485,13 +534,11 @@ pub trait Middleware: Send + Sync {
     /// Declares, from the request head alone, how this plugin needs to access the
     /// body. Called **before any body byte is forwarded** so the engine can pick
     /// the forwarding class (buffered vs streaming) up front — see
-    /// [`crate::core::forward::select_class`].
+    /// [`crate::core::forward::plan_execution`].
     ///
-    /// The default is [`BodyHint::FullBody`], preserving today's behaviour: a
-    /// plugin is assumed to need the whole (buffered) body unless it opts into
-    /// streaming inspection. Mutating plugins (mock, rewrite, Lua, breakpoint)
-    /// must keep this default; inspectors that can work incrementally should
-    /// return [`BodyHint::StreamingInspect`].
+    /// The default is [`BodyHint::FullBody`]. Mutating plugins (mock, rewrite,
+    /// Lua, breakpoint) must keep this default; inspectors that can work
+    /// incrementally should return [`BodyHint::StreamingInspect`].
     fn body_hint(&self, _head: &RequestContext) -> crate::core::forward::BodyHint {
         crate::core::forward::BodyHint::FullBody
     }
@@ -508,8 +555,6 @@ pub trait Middleware: Send + Sync {
         None
     }
 }
-
-// ── Unified Context Helpers ─────────────────────────────────────────────────
 
 pub fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers.get(name).cloned()

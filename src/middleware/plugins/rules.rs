@@ -809,8 +809,6 @@ mod tests {
         assert!(ctx.headers.contains_key("x-second"));
     }
 
-    // ── query helpers unit tests ───────────────────────────────────────────
-
     #[test]
     fn query_helpers() {
         assert_eq!(set_query_param("/p?a=1&b=2", "b", "99"), "/p?a=1&b=99");

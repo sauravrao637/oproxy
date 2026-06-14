@@ -191,27 +191,14 @@ fn run_request_scripts(
     mut headers: HashMap<String, String>,
 ) -> RequestScriptOutcome {
     for script in scripts {
-        let lua = match make_sandbox() {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!("Lua sandbox init failed: {e}");
-                continue;
-            }
+        let Some(lua) = prepare_script_vm(true) else {
+            continue;
         };
-        if let Err(e) = setup_log(&lua) {
-            tracing::warn!("Lua log setup failed: {e}");
-            continue;
-        }
-        if let Err(e) = setup_abort(&lua) {
-            tracing::warn!("Lua abort setup failed: {e}");
-            continue;
-        }
         if let Err(e) = inject_request(&lua, &method, &uri, &body, &headers) {
             tracing::warn!("Lua inject failed: {e}");
             continue;
         }
-        if let Err(e) = exec_with_timeout(&lua, &script.code) {
-            tracing::warn!(script = %script.name, "Lua exec error: {e}");
+        if !execute_script(&lua, &script) {
             continue;
         }
         if let Some((status, abort_body)) = check_abort(&lua) {
@@ -246,23 +233,14 @@ fn run_response_scripts(
     mut headers: HashMap<String, String>,
 ) -> ResponseScriptOutcome {
     for script in scripts {
-        let lua = match make_sandbox() {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!("Lua sandbox init failed: {e}");
-                continue;
-            }
-        };
-        if let Err(e) = setup_log(&lua) {
-            tracing::warn!("{e}");
+        let Some(lua) = prepare_script_vm(false) else {
             continue;
-        }
+        };
         if let Err(e) = inject_response(&lua, status, &body, &headers) {
             tracing::warn!("Lua inject resp failed: {e}");
             continue;
         }
-        if let Err(e) = exec_with_timeout(&lua, &script.code) {
-            tracing::warn!(script = %script.name, "Lua exec error: {e}");
+        if !execute_script(&lua, &script) {
             continue;
         }
         if let Err(e) = extract_response(&lua, &mut status, &mut body, &mut headers) {
@@ -274,6 +252,27 @@ fn run_response_scripts(
         body,
         headers,
     }
+}
+
+fn prepare_script_vm(allow_abort: bool) -> Option<Lua> {
+    let lua = make_sandbox()
+        .map_err(|error| tracing::warn!("Lua sandbox init failed: {error}"))
+        .ok()?;
+    setup_log(&lua)
+        .map_err(|error| tracing::warn!("Lua log setup failed: {error}"))
+        .ok()?;
+    if allow_abort {
+        setup_abort(&lua)
+            .map_err(|error| tracing::warn!("Lua abort setup failed: {error}"))
+            .ok()?;
+    }
+    Some(lua)
+}
+
+fn execute_script(lua: &Lua, script: &LuaScript) -> bool {
+    exec_with_timeout(lua, &script.code)
+        .map_err(|error| tracing::warn!(script = %script.name, "Lua exec error: {error}"))
+        .is_ok()
 }
 
 fn setup_log(lua: &Lua) -> mlua::Result<()> {
@@ -484,7 +483,6 @@ mod tests {
         let scripts = Arc::new(RwLock::new(vec![script]));
         let mw = LuaEngineMiddleware::new(scripts);
         let mut ctx = make_req("GET", "/api", "");
-        // Should not panic
         let action = mw.on_request(&mut ctx).await;
         assert_eq!(action, MiddlewareAction::Continue);
     }

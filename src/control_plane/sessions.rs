@@ -51,7 +51,7 @@ pub(super) struct ConnectionStream {
     status: u16,
     ts: String,
     /// Milliseconds from `connection.first_seen` to this stream's start — the
-    /// x-offset for the concurrency timeline (Phase 9).
+    /// x-offset for the concurrency timeline.
     start_offset_ms: i64,
     /// Stream duration in milliseconds (latency); the timeline bar width.
     duration_ms: u64,
@@ -73,13 +73,13 @@ pub(super) struct ConnectionSummary {
     /// Total wall-clock span of the connection in ms (timeline width).
     span_ms: i64,
     /// Peak number of streams in flight at the same instant — 1 for serial
-    /// HTTP/1.1, higher when h2/h3 streams genuinely overlap (Phase 9).
+    /// HTTP/1.1, higher when h2/h3 streams genuinely overlap.
     max_concurrency: usize,
     streams: Vec<ConnectionStream>,
 }
 
 /// `GET /api/connections` — groups recorded exchanges by `connection_id` so the
-/// UI can render the connection → stream tree and h2/h3 multiplexing (Phase 8).
+/// UI can render the connection → stream tree and h2/h3 multiplexing.
 /// Exchanges without a captured connection id are omitted.
 pub(super) async fn list_connections(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let started = Instant::now();
@@ -204,7 +204,7 @@ pub(super) struct LabelCount {
     count: usize,
 }
 
-/// Aggregate protocol metrics over the whole session store (Phase 10 dashboard).
+/// Aggregate protocol metrics over the whole session store.
 #[derive(serde::Serialize, Default)]
 pub(super) struct ProtocolMetrics {
     total_exchanges: usize,

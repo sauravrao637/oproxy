@@ -162,8 +162,6 @@ pub(super) async fn post_login(
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 /// Only allow paths that start with `/` but not `//` (open-redirect guard).
 /// Block any `/login` variant (exact, with query, or with fragment) to prevent
 /// a post-login redirect back to the login error page.

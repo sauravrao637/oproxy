@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request};
-use oproxy::core::engine::ProxyEngine;
+use oproxy::core::engine::{ProxyEngine, ProxyEngineConfig};
 use oproxy::middleware::chain::MiddlewareChain;
 use oproxy::middleware::matcher::Location;
 use oproxy::middleware::plugins::rules::{
@@ -31,18 +31,18 @@ async fn test_unified_rewrite_through_engine() {
     chain.add_middleware(Arc::new(rewrite_plugin));
 
     let middleware_chain = Arc::new(RwLock::new(chain));
-    let engine = Arc::new(ProxyEngine::new(
+    let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
         middleware_chain,
-        None,
-        false,
-        8080,
-        "127.0.0.1".to_string(),
-        30,
-        10 * 1024 * 1024,
-        10,
-        30,
-        None,
-    ));
+        ca: None,
+        mitm_enabled: false,
+        bind_port: 8080,
+        bind_host: "127.0.0.1".to_string(),
+        timeout_secs: 30,
+        max_body_bytes: 10 * 1024 * 1024,
+        pool_max_idle_per_host: 10,
+        pool_idle_timeout_secs: 30,
+        upstream_proxy: None,
+    }));
 
     let req = Request::builder()
         .method(Method::GET)

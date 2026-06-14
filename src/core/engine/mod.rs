@@ -1,4 +1,4 @@
-use crate::core::forward::{ApplicationProtocol, BodyMode, ProtocolContext, WireProtocol};
+use crate::core::forward::{ProtocolContext, WireProtocol};
 use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::{
     MiddlewareAction, RequestContext, ResponseContext, header_value, remove_header,
@@ -18,13 +18,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::time::Instant;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::core::decompression::decoded_response_body;
 use http_body_util::{BodyExt as _, Full};
 use std::future::ready;
 
-/// Downstream connection/stream identity captured at request entry (Phase 7),
+/// Downstream connection/stream identity captured at request entry,
 /// bundled so it can be threaded through the streaming path in one argument.
 struct StreamIdentity {
     connection_id: Option<String>,
@@ -33,137 +33,58 @@ struct StreamIdentity {
     remote_addr: Option<String>,
 }
 
-/// Human-readable label for an HTTP version, used for protocol observability.
-pub fn protocol_label(v: axum::http::Version) -> &'static str {
-    match v {
-        axum::http::Version::HTTP_09 => "HTTP/0.9",
-        axum::http::Version::HTTP_10 => "HTTP/1.0",
-        axum::http::Version::HTTP_11 => "HTTP/1.1",
-        axum::http::Version::HTTP_2 => "HTTP/2",
-        axum::http::Version::HTTP_3 => "HTTP/3",
-        _ => "HTTP/?",
-    }
+struct StreamRequest {
+    method: String,
+    uri: axum::http::Uri,
+    display_uri: String,
+    headers: crate::middleware::HeaderMap,
+    host: String,
+    destination: Option<String>,
+    started_at: Instant,
+    identity: StreamIdentity,
+    protocol_context: ProtocolContext,
 }
 
-fn infer_application_protocol(headers: &crate::middleware::HeaderMap) -> ApplicationProtocol {
-    let content_type = header_value(headers, "content-type")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if content_type.starts_with("application/grpc") {
-        ApplicationProtocol::Grpc
-    } else if content_type.starts_with("text/event-stream") {
-        ApplicationProtocol::Sse
-    } else if content_type.contains("graphql") {
-        ApplicationProtocol::Graphql
-    } else if content_type.contains("json") {
-        ApplicationProtocol::Json
-    } else if is_binary_content_type(&content_type) {
-        ApplicationProtocol::Binary
-    } else {
-        ApplicationProtocol::Http
-    }
+struct RequestMetadata<'a> {
+    uri: &'a str,
+    host: &'a str,
+    method: &'a str,
 }
 
-fn infer_body_mode(
-    method: &axum::http::Method,
-    headers: &crate::middleware::HeaderMap,
-) -> BodyMode {
-    if header_value(headers, "upgrade")
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false)
-    {
-        return BodyMode::Frames;
-    }
-    if infer_application_protocol(headers) == ApplicationProtocol::Grpc {
-        return BodyMode::StreamMessages;
-    }
-    if (method == axum::http::Method::GET
-        || method == axum::http::Method::HEAD
-        || method == axum::http::Method::OPTIONS)
-        && !headers.contains_key("content-length")
-        && !headers.contains_key("transfer-encoding")
-    {
-        return BodyMode::Empty;
-    }
-    let chunked = header_value(headers, "transfer-encoding")
-        .map(|v| v.to_ascii_lowercase().contains("chunked"))
-        .unwrap_or(false);
-    let large = header_value(headers, "content-length")
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(|len| len > STREAM_THRESHOLD_BYTES)
-        .unwrap_or(false);
-    if chunked || large {
-        BodyMode::StreamBytes
-    } else {
-        BodyMode::Full
-    }
+struct PreparedUpstream {
+    url: String,
+    headers: reqwest::header::HeaderMap,
+    method: reqwest::Method,
+    session_id: Option<String>,
+    protocol_context: Option<ProtocolContext>,
 }
 
-/// Drops client-supplied `x-oproxy-*` headers (side-channel spoofing) and
-/// hop-by-hop headers — illegal in HTTP/2 and never forwarded. Exception:
-/// `te: trailers` is required by gRPC and explicitly allowed in HTTP/2 requests
-/// (RFC 7540 §8.1.2.2), so `te` is stripped only for any other value.
-/// Shared by the buffered and streaming forward paths.
-fn sanitize_forwarded_request_headers(headers: &mut crate::middleware::HeaderMap) {
-    headers.retain(|name, _| !name.trim().to_ascii_lowercase().starts_with("x-oproxy-"));
-    for hdr in &[
-        "connection",
-        "keep-alive",
-        "proxy-connection",
-        "transfer-encoding",
-        "trailer",
-        "trailers",
-        "upgrade",
-    ] {
-        headers.remove(hdr);
-    }
-    headers.retain(|name, value| name != "te" || value.trim().eq_ignore_ascii_case("trailers"));
+/// Derived, owned view of an incoming request's head: method, target, headers,
+/// downstream connection identity, and protocol. Built once by
+/// [`ProxyEngine::build_request_head`] before the body is touched, then consumed
+/// by either the streaming or the buffered forward path.
+struct RequestHead {
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    host: String,
+    remote_addr: Option<String>,
+    connection_id: Option<String>,
+    stream_id: Option<u64>,
+    downstream_protocol: Option<String>,
+    req_method: String,
+    req_uri: String,
+    req_headers: crate::middleware::HeaderMap,
+    display_uri: String,
+    protocol_context: ProtocolContext,
 }
 
-/// Strips hop-by-hop headers from an upstream response before it is replayed
-/// to the downstream client. Shared by the buffered and streaming paths.
-fn strip_hop_by_hop_response_headers(headers: &mut crate::middleware::HeaderMap) {
-    for hdr in &[
-        "connection",
-        "keep-alive",
-        "proxy-connection",
-        "transfer-encoding",
-        "te",
-        "trailer",
-        "trailers",
-        "upgrade",
-    ] {
-        remove_header(headers, hdr);
-    }
-}
-
-fn request_scheme(uri: &axum::http::Uri, mitm_destination: Option<&str>) -> String {
-    if let Some(destination) = mitm_destination
-        && let Some((scheme, _)) = destination.split_once("://")
-    {
-        return scheme.to_string();
-    }
-    uri.scheme_str().unwrap_or("http").to_string()
-}
-
-fn display_request_uri(
-    uri: &axum::http::Uri,
-    mitm_destination: Option<&str>,
-    host: &str,
-) -> String {
-    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
-    if let Some(destination) = mitm_destination {
-        let base = destination.trim_end_matches('/');
-        return format!("{}{}", base, path_and_query);
-    }
-
-    if uri.scheme().is_some() && uri.authority().is_some() {
-        return uri.to_string();
-    }
-
-    format!("http://{}{}", host, path_and_query)
-}
+mod wire;
+use wire::{
+    display_request_uri, infer_application_protocol, infer_body_mode, request_scheme,
+    sanitize_forwarded_request_headers, strip_hop_by_hop_response_headers, target_url,
+    upstream_headers, upstream_path,
+};
+pub use wire::{is_binary_content_type, protocol_label};
 
 pub struct ProxyEngine {
     /// (http_client, streaming_client) — pair wrapped for upstream proxy hot-reload.
@@ -188,6 +109,66 @@ pub struct ProxyEngine {
     /// `OnceLock` so it can be set through the `Arc` without the fragile
     /// `Arc::get_mut` pattern (which silently no-ops if any clone exists).
     alt_svc_header: std::sync::OnceLock<String>,
+}
+
+/// Construction parameters for [`ProxyEngine::new`]. Grouping these into a
+/// struct keeps call sites self-documenting (named fields rather than a long
+/// positional argument list).
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use tokio::sync::RwLock;
+///
+/// use oproxy::core::engine::{ProxyEngine, ProxyEngineConfig};
+/// use oproxy::middleware::chain::MiddlewareChain;
+///
+/// let engine = ProxyEngine::new(ProxyEngineConfig {
+///     middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+///     ca: None,
+///     mitm_enabled: false,
+///     bind_port: 8080,
+///     bind_host: "127.0.0.1".to_string(),
+///     timeout_secs: 30,
+///     max_body_bytes: 10 * 1024 * 1024,
+///     pool_max_idle_per_host: 10,
+///     pool_idle_timeout_secs: 30,
+///     upstream_proxy: None,
+/// });
+/// assert_eq!(engine.max_body_bytes(), 10 * 1024 * 1024);
+/// ```
+pub struct ProxyEngineConfig {
+    pub middleware_chain: Arc<RwLock<MiddlewareChain>>,
+    pub ca: Option<Arc<crate::certs::CertificateAuthority>>,
+    pub mitm_enabled: bool,
+    pub bind_port: u16,
+    pub bind_host: String,
+    pub timeout_secs: u64,
+    pub max_body_bytes: usize,
+    pub pool_max_idle_per_host: usize,
+    pub pool_idle_timeout_secs: u64,
+    pub upstream_proxy: Option<String>,
+}
+
+#[cfg(test)]
+impl Default for ProxyEngineConfig {
+    /// Lightweight defaults for tests: an empty middleware chain, MITM off, and
+    /// a localhost bind. Production constructs every field explicitly.
+    fn default() -> Self {
+        Self {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            ca: None,
+            mitm_enabled: false,
+            bind_port: 8080,
+            bind_host: "127.0.0.1".to_string(),
+            timeout_secs: 30,
+            max_body_bytes: 10 * 1024 * 1024,
+            pool_max_idle_per_host: 10,
+            pool_idle_timeout_secs: 30,
+            upstream_proxy: None,
+        }
+    }
 }
 
 impl ProxyEngine {
@@ -250,25 +231,25 @@ impl ProxyEngine {
         (http, streaming)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        middleware_chain: Arc<RwLock<MiddlewareChain>>,
-        ca: Option<Arc<crate::certs::CertificateAuthority>>,
-        mitm_enabled: bool,
-        bind_port: u16,
-        bind_host: String,
-        timeout_secs: u64,
-        max_body_bytes: usize,
-        pool_max_idle_per_host: usize,
-        pool_idle_timeout_secs: u64,
-        upstream_proxy: Option<&str>,
-    ) -> Self {
+    pub fn new(config: ProxyEngineConfig) -> Self {
+        let ProxyEngineConfig {
+            middleware_chain,
+            ca,
+            mitm_enabled,
+            bind_port,
+            bind_host,
+            timeout_secs,
+            max_body_bytes,
+            pool_max_idle_per_host,
+            pool_idle_timeout_secs,
+            upstream_proxy,
+        } = config;
         let pool_idle = std::time::Duration::from_secs(pool_idle_timeout_secs);
         let clients = Self::build_clients(
             timeout_secs,
             pool_max_idle_per_host,
             pool_idle,
-            upstream_proxy,
+            upstream_proxy.as_deref(),
         );
         Self {
             clients: tokio::sync::RwLock::new(clients),
@@ -425,6 +406,186 @@ impl ProxyEngine {
         }
     }
 
+    async fn respond_to_intercepted(
+        &self,
+        intercepted: crate::middleware::InterceptedResponse,
+        request_uri: &str,
+        session_id: Option<String>,
+        request_host: &str,
+        request_method: &str,
+        protocol_context: Option<ProtocolContext>,
+    ) -> Response {
+        let crate::middleware::InterceptedResponse {
+            status,
+            headers,
+            body,
+            tags,
+            served_mock,
+        } = intercepted;
+        let mut response = ResponseContext {
+            status,
+            headers,
+            body,
+            request_uri: request_uri.to_string(),
+            session_id,
+            tags,
+            request_host: request_host.to_string(),
+            request_method: request_method.to_string(),
+            protocol_context,
+            ..Default::default()
+        };
+
+        let chain = self.middleware_chain.read().await.clone();
+        if chain.execute_response(&mut response).await != MiddlewareAction::Continue {
+            return (StatusCode::FORBIDDEN, "Response stopped by middleware").into_response();
+        }
+
+        self.record_short_circuit_response(&response).await;
+        if let (Some(session_id), Some(served_mock)) = (response.session_id.as_deref(), served_mock)
+        {
+            self.append_session_event(
+                session_id,
+                crate::session::SessionEvent::MockServed {
+                    rule_id: served_mock.rule_id,
+                    behavior: served_mock.behavior,
+                },
+            )
+            .await;
+        }
+
+        let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
+        let mut builder = Response::builder().status(status);
+        for (name, value) in &response.headers {
+            builder = builder.header(name, value);
+        }
+        builder
+            .body(Body::from(response.body))
+            .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mock error").into_response())
+    }
+
+    async fn execute_request_middleware(
+        &self,
+        request: &mut RequestContext,
+        metadata: RequestMetadata<'_>,
+    ) -> Result<(), Response> {
+        let chain = self.middleware_chain.read().await.clone();
+        match chain.execute_request(request).await {
+            MiddlewareAction::Continue => Ok(()),
+            MiddlewareAction::StopAndReturn => {
+                if let Some(intercepted) = request.mock_response.take() {
+                    return Err(self
+                        .respond_to_intercepted(
+                            intercepted,
+                            metadata.uri,
+                            request.session_id.clone(),
+                            metadata.host,
+                            metadata.method,
+                            request.protocol_context.clone(),
+                        )
+                        .await);
+                }
+                info!("Request stopped by middleware");
+                Err((StatusCode::FORBIDDEN, "Request stopped by middleware").into_response())
+            }
+        }
+    }
+
+    async fn execute_response_middleware(
+        &self,
+        response: &mut ResponseContext,
+    ) -> Result<(), Response> {
+        let chain = self.middleware_chain.read().await.clone();
+        match chain.execute_response(response).await {
+            MiddlewareAction::Continue => Ok(()),
+            MiddlewareAction::StopAndReturn => {
+                info!("Response stopped by middleware");
+                Err((StatusCode::FORBIDDEN, "Response stopped by middleware").into_response())
+            }
+        }
+    }
+
+    fn response_builder(&self, response: &ResponseContext) -> axum::http::response::Builder {
+        let status =
+            StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let mut builder = Response::builder().status(status);
+        for (name, value) in &response.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(alt_svc) = self.alt_svc_header.get() {
+            builder = builder.header("alt-svc", alt_svc);
+        }
+        builder
+    }
+
+    fn prepare_upstream(
+        &self,
+        request: &mut RequestContext,
+        uri: &axum::http::Uri,
+        fallback_uri: &str,
+    ) -> Result<PreparedUpstream, Box<Response>> {
+        let destination = request.destination.take();
+        sanitize_forwarded_request_headers(&mut request.headers);
+        let path = upstream_path(uri, fallback_uri);
+        let url = target_url(
+            destination.as_deref(),
+            &request.host,
+            &path,
+            &mut request.headers,
+        );
+        if self.is_self_proxy(&url) {
+            tracing::warn!(%url, "Proxy loop detected");
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Proxy error: Proxy loop detected (request forwarded to the proxy itself)",
+                )
+                    .into_response(),
+            ));
+        }
+        let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|error| {
+            tracing::warn!(method = %request.method, %error, "rejecting invalid HTTP method");
+            Box::new((StatusCode::BAD_REQUEST, "invalid HTTP method").into_response())
+        })?;
+        Ok(PreparedUpstream {
+            url,
+            headers: upstream_headers(&request.headers),
+            method,
+            session_id: request.session_id.clone(),
+            protocol_context: request.protocol_context.clone(),
+        })
+    }
+
+    async fn record_forward_failure(
+        &self,
+        error: &reqwest::Error,
+        metadata: RequestMetadata<'_>,
+        session_id: Option<String>,
+        protocol_context: Option<ProtocolContext>,
+        ttfb_ms: u64,
+    ) -> Response {
+        let mut source_chain = error.to_string();
+        let mut source = std::error::Error::source(error);
+        while let Some(next) = source {
+            source_chain.push_str(&format!(": {next}"));
+            source = next.source();
+        }
+        tracing::error!(error = %source_chain, "Proxy error");
+        let mut response = ResponseContext {
+            status: 502,
+            body: Bytes::from(format!("Proxy error: {error}")),
+            request_uri: metadata.uri.to_string(),
+            session_id,
+            ttfb_ms,
+            request_host: metadata.host.to_string(),
+            request_method: metadata.method.to_string(),
+            protocol_context,
+            ..Default::default()
+        };
+        let chain = self.middleware_chain.read().await.clone();
+        chain.execute_response(&mut response).await;
+        (StatusCode::BAD_GATEWAY, "Error forwarding request").into_response()
+    }
+
     async fn append_session_event(&self, session_id: &str, event: crate::session::SessionEvent) {
         let Some(session_manager) = self.short_circuit_session_manager.read().await.clone() else {
             return;
@@ -539,21 +700,15 @@ impl ProxyEngine {
         );
     }
 
-    pub async fn handle_request(self: Arc<Self>, req: Request<Body>) -> Response {
-        self.handle_request_with_destination(req, None).await
-    }
-
-    /// Like [`handle_request`] but with an explicit upstream destination supplied by
-    /// the MITM TLS layer. Passing it as a typed argument (rather than the former
-    /// `x-oproxy-destination` request header) keeps it off the wire and prevents a
-    /// client from spoofing the proxy target.
-    #[instrument(skip(self, req, mitm_destination))]
-    pub async fn handle_request_with_destination(
-        self: Arc<Self>,
-        req: Request<Body>,
-        mitm_destination: Option<String>,
-    ) -> Response {
-        let start = Instant::now();
+    /// Derives the [`RequestHead`] from the incoming request before its body is
+    /// read. Pure with respect to `self` (only reads config-free helpers), so it
+    /// is cheap and safe to run for every request, including the CONNECT
+    /// safety-net case that returns immediately afterwards.
+    fn build_request_head(
+        &self,
+        req: &Request<Body>,
+        mitm_destination: Option<&str>,
+    ) -> RequestHead {
         let method = req.method().clone();
         let uri = req.uri().clone();
         // HTTP/2 and HTTP/3 carry the target authority in the `:authority`
@@ -570,10 +725,10 @@ impl ProxyEngine {
 
         debug!(method = %method, uri = %uri, host = %host, "Processing request");
 
-        // Capture downstream connection identity (Phase 7) exactly once per
-        // request — `next_stream()` mutates the per-connection counter. The
-        // downstream protocol is the negotiated request version (h2 requests
-        // arrive as HTTP/2 regardless of the upstream leg).
+        // Capture downstream connection identity exactly once per request —
+        // `next_stream()` mutates the per-connection counter. The downstream protocol
+        // is the negotiated request version (h2 requests arrive as HTTP/2 regardless
+        // of the upstream leg).
         let remote_addr = req
             .extensions()
             .get::<crate::transport::http::DownstreamPeer>()
@@ -589,6 +744,68 @@ impl ProxyEngine {
             )
         };
 
+        let req_method = method.to_string();
+        let req_uri = uri.to_string();
+        let mut req_headers = crate::middleware::HeaderMap::new();
+        for (name, value) in req.headers().iter() {
+            req_headers.append(name.to_string(), value.to_str().unwrap_or("").to_string());
+        }
+
+        let display_uri = display_request_uri(&uri, mitm_destination, &host);
+        let protocol_context = ProtocolContext::http(
+            req.version(),
+            request_scheme(&uri, mitm_destination),
+            infer_application_protocol(&req_headers),
+            infer_body_mode(&method, &req_headers),
+        )
+        .with_identity(connection_id.clone(), stream_id);
+
+        RequestHead {
+            method,
+            uri,
+            host,
+            remote_addr,
+            connection_id,
+            stream_id,
+            downstream_protocol,
+            req_method,
+            req_uri,
+            req_headers,
+            display_uri,
+            protocol_context,
+        }
+    }
+
+    pub async fn handle_request(self: Arc<Self>, req: Request<Body>) -> Response {
+        self.handle_request_with_destination(req, None).await
+    }
+
+    /// Like [`handle_request`] but with an explicit upstream destination supplied by
+    /// the MITM TLS layer. Passing it as a typed argument (rather than the former
+    /// `x-oproxy-destination` request header) keeps it off the wire and prevents a
+    /// client from spoofing the proxy target.
+    #[instrument(skip(self, req, mitm_destination))]
+    pub async fn handle_request_with_destination(
+        self: Arc<Self>,
+        req: Request<Body>,
+        mitm_destination: Option<String>,
+    ) -> Response {
+        let start = Instant::now();
+        let RequestHead {
+            method,
+            uri,
+            host,
+            remote_addr,
+            connection_id,
+            stream_id,
+            downstream_protocol,
+            req_method,
+            req_uri,
+            req_headers,
+            display_uri,
+            protocol_context,
+        } = self.build_request_head(&req, mitm_destination.as_deref());
+
         // CONNECT is handled at the hyper service level in main.rs (before axum
         // middleware) so it never reaches here.  Return BAD_GATEWAY as a safety net.
         if method == axum::http::Method::CONNECT {
@@ -598,22 +815,6 @@ impl ProxyEngine {
             )
                 .into_response();
         }
-
-        let req_method = method.to_string();
-        let req_uri = uri.to_string();
-        let mut req_headers = crate::middleware::HeaderMap::new();
-        for (name, value) in req.headers().iter() {
-            req_headers.append(name.to_string(), value.to_str().unwrap_or("").to_string());
-        }
-
-        let display_uri = display_request_uri(&uri, mitm_destination.as_deref(), &host);
-        let protocol_context = ProtocolContext::http(
-            req.version(),
-            request_scheme(&uri, mitm_destination.as_deref()),
-            infer_application_protocol(&req_headers),
-            infer_body_mode(&method, &req_headers),
-        )
-        .with_identity(connection_id.clone(), stream_id);
 
         // Decide the forwarding class from the active plugins' body hints BEFORE
         // the body is buffered (head-only, per the streaming contract). Today
@@ -653,20 +854,22 @@ impl ProxyEngine {
             return self
                 .forward_stream(
                     req,
-                    req_method,
-                    uri,
-                    display_uri,
-                    req_headers,
-                    host,
-                    mitm_destination,
-                    start,
-                    StreamIdentity {
-                        connection_id,
-                        stream_id,
-                        downstream_protocol,
-                        remote_addr,
+                    StreamRequest {
+                        method: req_method,
+                        uri,
+                        display_uri,
+                        headers: req_headers,
+                        host,
+                        destination: mitm_destination,
+                        started_at: start,
+                        identity: StreamIdentity {
+                            connection_id,
+                            stream_id,
+                            downstream_protocol,
+                            remote_addr,
+                        },
+                        protocol_context,
                     },
-                    protocol_context,
                 )
                 .await;
         }
@@ -704,194 +907,35 @@ impl ProxyEngine {
             ..Default::default()
         };
 
-        // Execute Request Middleware Chain
-        {
-            debug!("Executing request middleware chain");
-            let chain = self.middleware_chain.read().await.clone();
-            let action = chain.execute_request(&mut req_ctx).await;
-            match action {
-                MiddlewareAction::Continue => {}
-                MiddlewareAction::StopAndReturn => {
-                    // A middleware (Mock / map-local / Lua abort / breakpoint timeout) may
-                    // have set a typed short-circuit response to return instead of forwarding.
-                    if let Some(intercepted) = req_ctx.mock_response.take() {
-                        let crate::middleware::InterceptedResponse {
-                            status,
-                            headers,
-                            body: raw_body,
-                            tags,
-                            served_mock,
-                        } = intercepted;
-                        let mut res_ctx = ResponseContext {
-                            status,
-                            headers,
-                            body: raw_body,
-                            request_uri: display_uri.clone(),
-                            session_id: req_ctx.session_id.clone(),
-                            tags,
-                            request_host: host.clone(),
-                            request_method: req_method.clone(),
-                            protocol_context: req_ctx.protocol_context.clone(),
-                            ..Default::default()
-                        };
-                        {
-                            let chain = self.middleware_chain.read().await.clone();
-                            let action = chain.execute_response(&mut res_ctx).await;
-                            if action != MiddlewareAction::Continue {
-                                return (StatusCode::FORBIDDEN, "Response stopped by middleware")
-                                    .into_response();
-                            }
-                        }
-                        self.record_short_circuit_response(&res_ctx).await;
-                        if let (Some(session_id), Some(served_mock)) =
-                            (res_ctx.session_id.as_deref(), served_mock)
-                        {
-                            self.append_session_event(
-                                session_id,
-                                crate::session::SessionEvent::MockServed {
-                                    rule_id: served_mock.rule_id,
-                                    behavior: served_mock.behavior,
-                                },
-                            )
-                            .await;
-                        }
-                        let sc = StatusCode::from_u16(res_ctx.status).unwrap_or(StatusCode::OK);
-                        let mut builder = Response::builder().status(sc);
-                        for (k, v) in &res_ctx.headers {
-                            builder = builder.header(k, v);
-                        }
-                        return builder.body(Body::from(res_ctx.body)).unwrap_or_else(|_| {
-                            (StatusCode::INTERNAL_SERVER_ERROR, "mock error").into_response()
-                        });
-                    }
-                    info!("Request stopped by middleware");
-                    return (StatusCode::FORBIDDEN, "Request stopped by middleware")
-                        .into_response();
-                }
-                MiddlewareAction::Pause => {
-                    debug!("Request paused by breakpoint");
-                    return (StatusCode::ACCEPTED, "Request paused by breakpoint").into_response();
-                }
-            }
-        }
-
-        // Upstream target + session id now travel as typed context fields, not headers.
-        let destination = req_ctx.destination.take();
-        let oproxy_session_id = req_ctx.session_id.clone();
-        sanitize_forwarded_request_headers(&mut req_ctx.headers);
-
-        // In forward-proxy mode the browser sends an absolute URI as the request
-        // target (e.g. GET http://api.example.com/path HTTP/1.1).  Concatenating
-        // that onto the routing destination produces a malformed URL like
-        // "https://dest.comhttp://api.example.com/path".
-        //
-        // We use the *typed* Uri object (preserved from before body consumption)
-        // rather than string prefix matching, because http crate versions differ
-        // in how to_string() serialises the scheme separator.  If the Uri has an
-        // authority component it is an absolute URI; extract only path+query.
-        let path_and_query: String = if uri.authority().is_some() {
-            uri.path_and_query()
-                .map(|pq| pq.as_str().to_string())
-                .unwrap_or_else(|| "/".to_string())
-        } else {
-            // Reverse-proxy / origin-form request: keep the original request
-            // target, not the display URI stored for capture.
-            uri.path_and_query()
-                .map(|pq| pq.as_str().to_string())
-                .unwrap_or_else(|| {
-                    let raw = req_uri.clone();
-                    if raw.starts_with('/') {
-                        raw
-                    } else {
-                        "/".to_string()
-                    }
-                })
-        };
-
-        let target_url = match destination {
-            Some(ref dest) => {
-                // Normalise: if the user entered a destination without a scheme
-                // (e.g. "localhost:3000") reqwest would receive a relative URL and
-                // fail with "relative URL without a base". Prepend http:// in that case.
-                let base = dest.trim_end_matches('/');
-                let base = if base.starts_with("http://") || base.starts_with("https://") {
-                    base.to_string()
-                } else {
-                    format!("http://{}", base)
-                };
-                // Rewrite the Host header to match the remapped destination so the
-                // upstream's virtual-host / SNI routing works correctly.
-                if let Ok(url) = reqwest::Url::parse(&base)
-                    && let Some(dest_host) = url.host_str()
-                {
-                    let host_val = match url.port() {
-                        Some(p) => format!("{}:{}", dest_host, p),
-                        None => dest_host.to_string(),
-                    };
-                    req_ctx.headers.insert("host".to_string(), host_val);
-                }
-                format!("{}{}", base, path_and_query)
-            }
-            None => format!("http://{}{}", req_ctx.host, path_and_query),
-        };
-        debug!(url = %target_url, "Forwarding request");
-
-        if self.is_self_proxy(&target_url) {
-            tracing::warn!(url = %target_url, "Proxy loop detected: request forwarded to the proxy itself");
-            let mut err_ctx = crate::middleware::ResponseContext {
-                status: 502,
-                headers: crate::middleware::HeaderMap::new(),
-                body: bytes::Bytes::from(
-                    "Proxy error: Proxy loop detected (request forwarded to the proxy itself)",
-                ),
-                request_uri: display_uri.clone(),
-                session_id: oproxy_session_id,
-                ttfb_ms: 0,
-                request_host: host.clone(),
-                request_method: req_method.clone(),
-                protocol_context: req_ctx.protocol_context.clone(),
-                ..Default::default()
-            };
-            {
-                let chain = self.middleware_chain.read().await.clone();
-                chain.execute_response(&mut err_ctx).await;
-            }
-            return (
-                StatusCode::BAD_GATEWAY,
-                "Proxy error: Proxy loop detected (request forwarded to the proxy itself)",
+        debug!("Executing request middleware chain");
+        if let Err(response) = self
+            .execute_request_middleware(
+                &mut req_ctx,
+                RequestMetadata {
+                    uri: &display_uri,
+                    host: &host,
+                    method: &req_method,
+                },
             )
-                .into_response();
+            .await
+        {
+            return response;
         }
 
-        let mut target_headers = reqwest::header::HeaderMap::new();
-        for (name, value) in &req_ctx.headers {
-            // reqwest computes Content-Length automatically. Sending a mismatched length
-            // (e.g. after a middleware modified the body) causes HTTP protocol errors.
-            if name != "host"
-                && name != "content-length"
-                && let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                && let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
-            {
-                // append (not insert) so multi-valued request headers survive.
-                target_headers.append(n, v);
-            }
-        }
+        let upstream = match self.prepare_upstream(&mut req_ctx, &uri, &req_uri) {
+            Ok(upstream) => upstream,
+            Err(response) => return *response,
+        };
+        debug!(url = %upstream.url, "Forwarding request");
 
         // Use the no-timeout streaming client for all proxied requests.
         // Proxied traffic can be arbitrarily long (SSE, large downloads); the timeout
         // client (pool.0) is reserved for control-plane outbound calls via http_client().
         let client = self.clients.read().await.1.clone();
 
-        let forward_method = match reqwest::Method::from_bytes(req_method.as_bytes()) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(method = %req_method, error = %e, "rejecting request with invalid HTTP method");
-                return (StatusCode::BAD_REQUEST, "invalid HTTP method").into_response();
-            }
-        };
         let mut request_builder = client
-            .request(forward_method, &target_url)
-            .headers(target_headers);
+            .request(upstream.method, &upstream.url)
+            .headers(upstream.headers);
 
         // Avoid attaching an empty body to methods like GET if the original request didn't specify one.
         // reqwest automatically adds `Content-Length: 0` if we call `.body()`, which strict servers reject.
@@ -906,7 +950,7 @@ impl ProxyEngine {
             Ok(res) => {
                 let ttfb_ms = net_start.elapsed().as_millis() as u64;
                 let status = res.status().as_u16();
-                // Record the negotiated upstream protocol for observability (Phase 0).
+                // Record the negotiated upstream protocol for observability.
                 let upstream_protocol = protocol_label(res.version()).to_string();
                 let mut res_headers = crate::middleware::HeaderMap::new();
                 for (name, value) in res.headers().iter() {
@@ -936,7 +980,7 @@ impl ProxyEngine {
                         status,
                         headers: res_headers.clone(),
                         request_uri: display_uri.clone(),
-                        session_id: oproxy_session_id,
+                        session_id: upstream.session_id,
                         ttfb_ms,
                         request_host: host.clone(),
                         request_method: req_method.clone(),
@@ -984,7 +1028,7 @@ impl ProxyEngine {
                     headers: res_headers,
                     body: res_body,
                     request_uri: display_uri.clone(),
-                    session_id: oproxy_session_id,
+                    session_id: upstream.session_id,
                     ttfb_ms,
                     body_ms,
                     request_host: host.clone(),
@@ -994,24 +1038,9 @@ impl ProxyEngine {
                     ..Default::default()
                 };
 
-                // Execute Response Middleware Chain
-                {
-                    debug!("Executing response middleware chain");
-                    let chain = self.middleware_chain.read().await.clone();
-                    let action = chain.execute_response(&mut res_ctx).await;
-                    match action {
-                        MiddlewareAction::Continue => {}
-                        MiddlewareAction::StopAndReturn => {
-                            info!("Response stopped by middleware");
-                            return (StatusCode::FORBIDDEN, "Response stopped by middleware")
-                                .into_response();
-                        }
-                        MiddlewareAction::Pause => {
-                            debug!("Response paused by breakpoint");
-                            return (StatusCode::ACCEPTED, "Response paused by breakpoint")
-                                .into_response();
-                        }
-                    }
+                debug!("Executing response middleware chain");
+                if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
+                    return response;
                 }
 
                 let status_code = StatusCode::from_u16(res_ctx.status)
@@ -1026,13 +1055,7 @@ impl ProxyEngine {
                     "Request completed"
                 );
 
-                let mut builder = Response::builder().status(status_code);
-                for (name, value) in &res_ctx.headers {
-                    builder = builder.header(name, value);
-                }
-                if let Some(svc) = self.alt_svc_header.get() {
-                    builder = builder.header("alt-svc", svc.as_str());
-                }
+                let builder = self.response_builder(&res_ctx);
 
                 // gRPC over HTTP/2 requires the response to end with a HEADERS frame
                 // (trailers) carrying `grpc-status`, NOT with DATA+END_STREAM.  reqwest
@@ -1064,34 +1087,19 @@ impl ProxyEngine {
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
                 }
             }
-            Err(e) => {
-                // Walk the source chain so the full cause is visible in logs.
-                let mut chain = format!("{e}");
-                let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
-                while let Some(s) = src {
-                    chain.push_str(&format!(": {s}"));
-                    src = s.source();
-                }
-                error!(error = %chain, "Proxy error");
-                // Run on_response with a synthetic 502 so InspectionMiddleware records
-                // the failed exchange instead of leaving it as a dangling "pending" session.
-                let mut err_ctx = crate::middleware::ResponseContext {
-                    status: 502,
-                    headers: crate::middleware::HeaderMap::new(),
-                    body: Bytes::from(format!("Proxy error: {}", e)),
-                    request_uri: display_uri.clone(),
-                    session_id: oproxy_session_id,
-                    ttfb_ms: net_start.elapsed().as_millis() as u64,
-                    request_host: host.clone(),
-                    request_method: req_method.clone(),
-                    protocol_context: req_ctx.protocol_context.clone(),
-                    ..Default::default()
-                };
-                {
-                    let chain = self.middleware_chain.read().await.clone();
-                    chain.execute_response(&mut err_ctx).await;
-                }
-                (StatusCode::BAD_GATEWAY, "Error forwarding request").into_response()
+            Err(error) => {
+                self.record_forward_failure(
+                    &error,
+                    RequestMetadata {
+                        uri: &display_uri,
+                        host: &host,
+                        method: &req_method,
+                    },
+                    upstream.session_id,
+                    upstream.protocol_context,
+                    net_start.elapsed().as_millis() as u64,
+                )
+                .await
             }
         }
     }
@@ -1101,20 +1109,22 @@ impl ProxyEngine {
     /// active plugin declared a streaming-capable body hint, so the request chain
     /// runs head-only (no plugin needs or mutates the body) and inspection is
     /// limited to headers/metadata in v1 (streaming = inspect-only).
-    #[allow(clippy::too_many_arguments)]
     async fn forward_stream(
         self: Arc<Self>,
         req: Request<Body>,
-        req_method: String,
-        uri: axum::http::Uri,
-        display_uri: String,
-        req_headers: crate::middleware::HeaderMap,
-        host: String,
-        mitm_destination: Option<String>,
-        start: Instant,
-        identity: StreamIdentity,
-        protocol_context: ProtocolContext,
+        request: StreamRequest,
     ) -> Response {
+        let StreamRequest {
+            method: req_method,
+            uri,
+            display_uri,
+            headers: req_headers,
+            host,
+            destination: mitm_destination,
+            started_at: start,
+            identity,
+            protocol_context,
+        } = request;
         let req_uri = uri.to_string();
         let mut req_ctx = RequestContext {
             method: req_method.clone(),
@@ -1130,141 +1140,26 @@ impl ProxyEngine {
             ..Default::default()
         };
 
-        // Request middleware chain, head-only.
-        {
-            let chain = self.middleware_chain.read().await.clone();
-            match chain.execute_request(&mut req_ctx).await {
-                MiddlewareAction::Continue => {}
-                MiddlewareAction::StopAndReturn => {
-                    // Mocks force the buffered class, so this is normally an
-                    // access-control block; handle a mock defensively all the same.
-                    if let Some(intercepted) = req_ctx.mock_response.take() {
-                        let crate::middleware::InterceptedResponse {
-                            status,
-                            headers,
-                            body: raw_body,
-                            tags,
-                            served_mock,
-                        } = intercepted;
-                        let mut res_ctx = ResponseContext {
-                            status,
-                            headers,
-                            body: raw_body,
-                            request_uri: display_uri.clone(),
-                            session_id: req_ctx.session_id.clone(),
-                            tags,
-                            request_host: host.clone(),
-                            request_method: req_method.clone(),
-                            protocol_context: req_ctx.protocol_context.clone(),
-                            ..Default::default()
-                        };
-                        {
-                            let chain = self.middleware_chain.read().await.clone();
-                            if chain.execute_response(&mut res_ctx).await
-                                != MiddlewareAction::Continue
-                            {
-                                return (StatusCode::FORBIDDEN, "Response stopped by middleware")
-                                    .into_response();
-                            }
-                        }
-                        self.record_short_circuit_response(&res_ctx).await;
-                        if let (Some(session_id), Some(served_mock)) =
-                            (res_ctx.session_id.as_deref(), served_mock)
-                        {
-                            self.append_session_event(
-                                session_id,
-                                crate::session::SessionEvent::MockServed {
-                                    rule_id: served_mock.rule_id,
-                                    behavior: served_mock.behavior,
-                                },
-                            )
-                            .await;
-                        }
-                        let sc = StatusCode::from_u16(res_ctx.status).unwrap_or(StatusCode::OK);
-                        let mut builder = Response::builder().status(sc);
-                        for (k, v) in &res_ctx.headers {
-                            builder = builder.header(k, v);
-                        }
-                        return builder.body(Body::from(res_ctx.body)).unwrap_or_else(|_| {
-                            (StatusCode::INTERNAL_SERVER_ERROR, "mock error").into_response()
-                        });
-                    }
-                    return (StatusCode::FORBIDDEN, "Request stopped by middleware")
-                        .into_response();
-                }
-                MiddlewareAction::Pause => {
-                    return (StatusCode::ACCEPTED, "Request paused by breakpoint").into_response();
-                }
-            }
-        }
-
-        let destination = req_ctx.destination.take();
-        let oproxy_session_id = req_ctx.session_id.clone();
-        // The response body is streamed back verbatim, so content-encoding stays
-        // intact (the client decodes) — no manual decode on this path.
-        sanitize_forwarded_request_headers(&mut req_ctx.headers);
-
-        let path_and_query: String = uri
-            .path_and_query()
-            .map(|pq| pq.as_str().to_string())
-            .unwrap_or_else(|| {
-                if req_uri.starts_with('/') {
-                    req_uri.clone()
-                } else {
-                    "/".to_string()
-                }
-            });
-
-        let target_url = match destination {
-            Some(ref dest) => {
-                let base = dest.trim_end_matches('/');
-                let base = if base.starts_with("http://") || base.starts_with("https://") {
-                    base.to_string()
-                } else {
-                    format!("http://{}", base)
-                };
-                if let Ok(url) = reqwest::Url::parse(&base)
-                    && let Some(dest_host) = url.host_str()
-                {
-                    let host_val = match url.port() {
-                        Some(p) => format!("{}:{}", dest_host, p),
-                        None => dest_host.to_string(),
-                    };
-                    req_ctx.headers.insert("host".to_string(), host_val);
-                }
-                format!("{}{}", base, path_and_query)
-            }
-            None => format!("http://{}{}", req_ctx.host, path_and_query),
-        };
-
-        if self.is_self_proxy(&target_url) {
-            tracing::warn!(url = %target_url, "Proxy loop detected (streaming path)");
-            return (
-                StatusCode::BAD_GATEWAY,
-                "Proxy error: Proxy loop detected (request forwarded to the proxy itself)",
+        if let Err(response) = self
+            .execute_request_middleware(
+                &mut req_ctx,
+                RequestMetadata {
+                    uri: &display_uri,
+                    host: &host,
+                    method: &req_method,
+                },
             )
-                .into_response();
+            .await
+        {
+            return response;
         }
 
-        let mut target_headers = reqwest::header::HeaderMap::new();
-        for (name, value) in &req_ctx.headers {
-            if name != "host"
-                && name != "content-length"
-                && let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                && let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
-            {
-                target_headers.append(n, v);
-            }
-        }
+        let upstream = match self.prepare_upstream(&mut req_ctx, &uri, &req_uri) {
+            Ok(upstream) => upstream,
+            Err(response) => return *response,
+        };
 
         let client = self.clients.read().await.1.clone();
-        let forward_method = match reqwest::Method::from_bytes(req_method.as_bytes()) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(method = %req_method, error = %e, "rejecting request with invalid HTTP method");
-                return (StatusCode::BAD_REQUEST, "invalid HTTP method").into_response();
-            }
-        };
 
         // Collect stream observers now — after the request chain has set session_id
         // and other side-channel fields — so observers can capture that state.
@@ -1300,8 +1195,8 @@ impl ProxyEngine {
             }
         };
         let request_builder = client
-            .request(forward_method, &target_url)
-            .headers(target_headers)
+            .request(upstream.method, &upstream.url)
+            .headers(upstream.headers)
             .body(reqwest::Body::wrap_stream(body_stream));
 
         let net_start = Instant::now();
@@ -1320,7 +1215,7 @@ impl ProxyEngine {
                     status,
                     headers: res_headers,
                     request_uri: display_uri.clone(),
-                    session_id: oproxy_session_id,
+                    session_id: upstream.session_id,
                     ttfb_ms,
                     request_host: host.clone(),
                     request_method: req_method.clone(),
@@ -1332,12 +1227,8 @@ impl ProxyEngine {
                     ..Default::default()
                 };
 
-                {
-                    let chain = self.middleware_chain.read().await.clone();
-                    if chain.execute_response(&mut res_ctx).await != MiddlewareAction::Continue {
-                        return (StatusCode::FORBIDDEN, "Response stopped by middleware")
-                            .into_response();
-                    }
+                if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
+                    return response;
                 }
 
                 let encoded_response = header_value(&res_ctx.headers, "content-encoding")
@@ -1384,15 +1275,7 @@ impl ProxyEngine {
                             obs.finish().await;
                         }
 
-                        let status_code = StatusCode::from_u16(res_ctx.status)
-                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                        let mut builder = Response::builder().status(status_code);
-                        for (name, value) in &res_ctx.headers {
-                            builder = builder.header(name, value);
-                        }
-                        if let Some(svc) = self.alt_svc_header.get() {
-                            builder = builder.header("alt-svc", svc.as_str());
-                        }
+                        let builder = self.response_builder(&res_ctx);
                         return builder
                             .body(Body::from(decoded))
                             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
@@ -1435,15 +1318,7 @@ impl ProxyEngine {
                     "Streaming request completed"
                 );
 
-                let status_code = StatusCode::from_u16(res_ctx.status)
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let mut builder = Response::builder().status(status_code);
-                for (name, value) in &res_ctx.headers {
-                    builder = builder.header(name, value);
-                }
-                if let Some(svc) = self.alt_svc_header.get() {
-                    builder = builder.header("alt-svc", svc.as_str());
-                }
+                let builder = self.response_builder(&res_ctx);
                 let stream_body = axum::body::Body::from_stream(async_stream::stream! {
                     let mut r = res;
                     let observers_arc = observers_arc;
@@ -1476,49 +1351,22 @@ impl ProxyEngine {
                     .body(stream_body)
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
             }
-            Err(e) => {
-                error!(error = %e, "Proxy error (streaming path)");
-                let mut err_ctx = ResponseContext {
-                    status: 502,
-                    headers: crate::middleware::HeaderMap::new(),
-                    body: Bytes::from(format!("Proxy error: {}", e)),
-                    request_uri: display_uri.clone(),
-                    session_id: oproxy_session_id,
-                    ttfb_ms: net_start.elapsed().as_millis() as u64,
-                    request_host: host.clone(),
-                    request_method: req_method.clone(),
-                    protocol_context: req_ctx.protocol_context.clone(),
-                    ..Default::default()
-                };
-                {
-                    let chain = self.middleware_chain.read().await.clone();
-                    chain.execute_response(&mut err_ctx).await;
-                }
-                (StatusCode::BAD_GATEWAY, "Error forwarding request").into_response()
+            Err(error) => {
+                self.record_forward_failure(
+                    &error,
+                    RequestMetadata {
+                        uri: &display_uri,
+                        host: &host,
+                        method: &req_method,
+                    },
+                    upstream.session_id,
+                    upstream.protocol_context,
+                    net_start.elapsed().as_millis() as u64,
+                )
+                .await
             }
         }
     }
-}
-
-pub fn is_binary_content_type(ct: &str) -> bool {
-    let ct = ct.split(';').next().unwrap_or("").trim();
-    ct.starts_with("image/")
-        || ct.starts_with("audio/")
-        || ct.starts_with("video/")
-        || ct.starts_with("font/")
-        || ct == "application/octet-stream"
-        || ct == "application/pdf"
-        || ct == "application/wasm"
-        || ct == "application/zip"
-        || ct == "application/gzip"
-        || ct == "application/x-tar"
-        || ct == "application/x-gzip"
-        || ct == "application/msgpack"
-        || ct == "application/x-msgpack"
-        || ct == "application/cbor"
-        || ct == "application/protobuf"
-        || ct == "application/x-protobuf"
-        || ct == "application/vnd.google.protobuf"
 }
 
 #[cfg(test)]

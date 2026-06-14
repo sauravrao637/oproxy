@@ -70,6 +70,12 @@ pub(crate) struct AssistantToolEvent {
     pub summary: Option<String>,
 }
 
+struct ProcessedToolCall {
+    event: AssistantToolEvent,
+    message: Value,
+    proposed_action: Option<AssistantAction>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExecuteAssistantActionRequest {
     pub action_id: String,
@@ -208,81 +214,11 @@ async fn run_assistant_chat(
 
         messages.push(Value::Object(provider_message.raw_message));
         for call in tool_calls {
-            let call_id = call
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("tool_call")
-                .to_string();
-            let name = call
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let tool_result = match parse_tool_arguments(&call) {
-                Ok(args) => execute_assistant_tool(&state, &name, args).await,
-                Err(e) => Err(e),
-            };
-            match tool_result {
-                Ok(ToolOutcome::Read(result)) => {
-                    tool_events.push(AssistantToolEvent {
-                        name: name.clone(),
-                        category: "read".to_string(),
-                        status: "ok".to_string(),
-                        summary: Some(tool_summary(&result)),
-                    });
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": result.to_string(),
-                    }));
-                }
-                Ok(ToolOutcome::Workspace(result)) => {
-                    let content = serde_json::to_value(&result)
-                        .unwrap_or_else(|_| json!({ "ok": true, "message": result.message }));
-                    tool_events.push(AssistantToolEvent {
-                        name: name.clone(),
-                        category: "ui".to_string(),
-                        status: "ok".to_string(),
-                        summary: Some(result.message.clone()),
-                    });
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": content.to_string(),
-                    }));
-                }
-                Ok(ToolOutcome::Proposed(mut action)) => {
-                    register_pending_action(&state, &mut action).await;
-                    tool_events.push(AssistantToolEvent {
-                        name: name.clone(),
-                        category: action.risk_category().to_string(),
-                        status: "needs_confirmation".to_string(),
-                        summary: Some(action.summary.clone()),
-                    });
-                    proposed_actions.push(action.clone());
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": json!({
-                            "status": "needs_confirmation",
-                            "action_id": action.action_id,
-                            "summary": action.summary,
-                        }).to_string(),
-                    }));
-                }
-                Err(e) => {
-                    tool_events.push(AssistantToolEvent {
-                        name: name.clone(),
-                        category: "unknown".to_string(),
-                        status: "error".to_string(),
-                        summary: Some(e.clone()),
-                    });
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": json!({ "error": e }).to_string(),
-                    }));
-                }
+            let processed = process_tool_call(&state, &call).await;
+            tool_events.push(processed.event);
+            messages.push(processed.message);
+            if let Some(action) = processed.proposed_action {
+                proposed_actions.push(action);
             }
         }
 
@@ -314,6 +250,84 @@ async fn run_assistant_chat(
         tool_events,
         proposed_actions,
     })
+}
+
+async fn process_tool_call(state: &Arc<AppState>, call: &Value) -> ProcessedToolCall {
+    let call_id = call
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("tool_call");
+    let name = call
+        .pointer("/function/name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let outcome = match parse_tool_arguments(call) {
+        Ok(arguments) => execute_assistant_tool(state, name, arguments).await,
+        Err(error) => Err(error),
+    };
+    let (event, content, proposed_action) = match outcome {
+        Ok(ToolOutcome::Read(result)) => (
+            AssistantToolEvent {
+                name: name.to_string(),
+                category: "read".to_string(),
+                status: "ok".to_string(),
+                summary: Some(tool_summary(&result)),
+            },
+            result,
+            None,
+        ),
+        Ok(ToolOutcome::Workspace(result)) => {
+            let content = serde_json::to_value(&result)
+                .unwrap_or_else(|_| json!({ "ok": true, "message": result.message }));
+            (
+                AssistantToolEvent {
+                    name: name.to_string(),
+                    category: "ui".to_string(),
+                    status: "ok".to_string(),
+                    summary: Some(result.message),
+                },
+                content,
+                None,
+            )
+        }
+        Ok(ToolOutcome::Proposed(mut action)) => {
+            register_pending_action(state, &mut action).await;
+            let content = json!({
+                "status": "needs_confirmation",
+                "action_id": action.action_id,
+                "summary": action.summary,
+            });
+            (
+                AssistantToolEvent {
+                    name: name.to_string(),
+                    category: action.risk_category().to_string(),
+                    status: "needs_confirmation".to_string(),
+                    summary: Some(action.summary.clone()),
+                },
+                content,
+                Some(action),
+            )
+        }
+        Err(error) => (
+            AssistantToolEvent {
+                name: name.to_string(),
+                category: "unknown".to_string(),
+                status: "error".to_string(),
+                summary: Some(error.clone()),
+            },
+            json!({ "error": error }),
+            None,
+        ),
+    };
+    ProcessedToolCall {
+        event,
+        message: json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": content.to_string(),
+        }),
+        proposed_action,
+    }
 }
 
 async fn register_pending_action(state: &Arc<AppState>, action: &mut AssistantAction) {

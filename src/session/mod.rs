@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Bound on the in-flight session write queue. Generous enough that normal
@@ -14,7 +14,21 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// memory growth.
 const WRITE_QUEUE_CAPACITY: usize = 8192;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        tracing::error!("session store read lock was poisoned; recovering protected state");
+        poisoned.into_inner()
+    })
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        tracing::error!("session store write lock was poisoned; recovering protected state");
+        poisoned.into_inner()
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WsDirection {
     ClientToServer,
     ServerToClient,
@@ -201,7 +215,7 @@ pub struct Exchange {
     pub paused_at: Option<DateTime<Utc>>,
     /// Identity of the downstream connection this exchange arrived on. All
     /// exchanges multiplexed over one HTTP/2 or HTTP/3 connection share this id;
-    /// for HTTP/1.1 it is one connection per (reused) socket. (Phase 7)
+    /// for HTTP/1.1 it is one connection per (reused) socket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
     /// Monotonic stream index within `connection_id`. For HTTP/1.1 this counts
@@ -303,7 +317,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn new(max_sessions: usize) -> Self {
         Self::with_body_budget(max_sessions, usize::MAX)
     }
@@ -466,7 +480,7 @@ impl SessionManager {
         // Flush pending writes before taking the read snapshot.
         self.flush().await;
         let json = {
-            let guard = self.exchanges.read().unwrap();
+            let guard = read_lock(&self.exchanges);
             serde_json::to_string_pretty(&*guard)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         };
@@ -489,16 +503,14 @@ impl SessionManager {
     // ── Read operations (acquire read lock directly) ───────────────────────────
 
     pub fn get_all_sessions(&self) -> Vec<Exchange> {
-        let exchanges = self.exchanges.read().unwrap();
+        let exchanges = read_lock(&self.exchanges);
         exchanges.values().cloned().collect()
     }
 
     pub fn get_session(&self, id: &str) -> Option<Exchange> {
-        let exchanges = self.exchanges.read().unwrap();
+        let exchanges = read_lock(&self.exchanges);
         exchanges.get(id).cloned()
     }
-
-    // ── Static helpers used by the writer task ────────────────────────────────
 
     fn exchange_body_size(exchange: &Exchange) -> usize {
         let request_bytes = exchange.request.body.len();
@@ -645,26 +657,180 @@ async fn writer_task(
     max_retained_body_bytes: usize,
     change_tx: broadcast::Sender<SessionChange>,
 ) {
-    // Running tally of body bytes — updated inline so enforce_budget needs no O(n) scan.
-    let mut body_bytes: usize = 0;
+    let mut store = SessionStore {
+        exchanges: &exchanges,
+        max_sessions,
+        max_retained_body_bytes,
+        body_bytes: 0,
+    };
     while let Some(op) = rx.recv().await {
-        process_write_op(
-            op,
-            &exchanges,
-            max_sessions,
-            max_retained_body_bytes,
-            &mut body_bytes,
-            &change_tx,
+        process_write_op(op, &mut store, &change_tx);
+    }
+}
+
+struct SessionStore<'a> {
+    exchanges: &'a RwLock<IndexMap<String, Exchange>>,
+    max_sessions: usize,
+    max_retained_body_bytes: usize,
+    body_bytes: usize,
+}
+
+impl SessionStore<'_> {
+    fn record_request(&mut self, id: String, request: Box<RequestContext>, source: SessionSource) {
+        let mut exchanges = write_lock(self.exchanges);
+        self.evict_session_if_full(&mut exchanges, &id);
+        self.body_bytes += request.body.len();
+        exchanges.insert(
+            id.clone(),
+            Exchange {
+                id,
+                timestamp: Utc::now(),
+                updated_at: None,
+                connection_id: request.connection_id.clone(),
+                stream_id: request.stream_id,
+                downstream_protocol: request.downstream_protocol.clone(),
+                protocol_context: request.protocol_context.clone(),
+                request: *request,
+                response: None,
+                metrics: None,
+                source,
+                ws_frames: Vec::new(),
+                events: Vec::new(),
+                note: None,
+                tags: Vec::new(),
+                inspector_data: None,
+                paused_at: None,
+            },
         );
+        self.enforce_body_budget(&mut exchanges);
+    }
+
+    fn record_response(
+        &mut self,
+        id: &str,
+        response: ResponseContext,
+        metrics: Option<InspectionMetrics>,
+    ) {
+        let added = response.body.len();
+        let mut exchanges = write_lock(self.exchanges);
+        if let Some(exchange) = exchanges.get_mut(id) {
+            exchange.response = Some(response);
+            if let Some(metrics) = metrics {
+                exchange.metrics = Some(metrics);
+            }
+            exchange.updated_at = Some(Utc::now());
+            self.body_bytes += added;
+        }
+        self.enforce_body_budget(&mut exchanges);
+    }
+
+    fn append_ws_frame(&mut self, id: &str, frame: WsFrame) {
+        let added = (frame.payload_text.as_ref().map_or(0, String::len)
+            + frame.payload_hex.as_ref().map_or(0, String::len))
+        .saturating_mul(2);
+        let mut exchanges = write_lock(self.exchanges);
+        if let Some(exchange) = exchanges.get_mut(id) {
+            exchange.events.push(SessionEvent::WsFrame {
+                frame: frame.clone(),
+            });
+            exchange.ws_frames.push(frame);
+            self.body_bytes += added;
+        }
+        self.enforce_body_budget(&mut exchanges);
+    }
+
+    fn append_event(&mut self, id: &str, event: SessionEvent) {
+        let added = event.retained_body_size();
+        let mut exchanges = write_lock(self.exchanges);
+        if let Some(exchange) = exchanges.get_mut(id) {
+            exchange.events.push(event);
+            exchange.updated_at = Some(Utc::now());
+            self.body_bytes += added;
+        }
+        self.enforce_body_budget(&mut exchanges);
+    }
+
+    fn annotate(&self, id: &str, note: Option<String>, tags: Option<Vec<String>>) -> bool {
+        let mut exchanges = write_lock(self.exchanges);
+        let Some(exchange) = exchanges.get_mut(id) else {
+            return false;
+        };
+        if let Some(note) = note {
+            exchange.note = (!note.is_empty()).then_some(note);
+        }
+        if let Some(tags) = tags {
+            exchange.tags = tags;
+        }
+        exchange.updated_at = Some(Utc::now());
+        true
+    }
+
+    fn import(&mut self, new_exchanges: Vec<Exchange>) {
+        let mut exchanges = write_lock(self.exchanges);
+        for exchange in new_exchanges {
+            self.evict_session_if_full(&mut exchanges, &exchange.id);
+            self.body_bytes += SessionManager::exchange_body_size(&exchange);
+            exchanges.insert(exchange.id.clone(), exchange);
+        }
+        self.enforce_body_budget(&mut exchanges);
+    }
+
+    fn clear(&mut self) {
+        write_lock(self.exchanges).clear();
+        self.body_bytes = 0;
+    }
+
+    fn update_inspector_data(&self, id: &str, data: InspectorData) {
+        if let Some(exchange) = write_lock(self.exchanges).get_mut(id) {
+            exchange.inspector_data = Some(data);
+        }
+    }
+
+    fn set_paused(&self, id: &str, paused: bool) {
+        if let Some(exchange) = write_lock(self.exchanges).get_mut(id) {
+            exchange.paused_at = paused.then(Utc::now);
+            exchange.updated_at = Some(Utc::now());
+        }
+    }
+
+    fn replace(&mut self, map: IndexMap<String, Exchange>) {
+        self.body_bytes = map.values().map(SessionManager::exchange_body_size).sum();
+        let mut exchanges = write_lock(self.exchanges);
+        *exchanges = map;
+        self.enforce_body_budget(&mut exchanges);
+    }
+
+    fn evict_session_if_full(
+        &mut self,
+        exchanges: &mut IndexMap<String, Exchange>,
+        incoming_id: &str,
+    ) {
+        if exchanges.len() >= self.max_sessions
+            && !exchanges.contains_key(incoming_id)
+            && let Some((_, evicted)) = exchanges.shift_remove_index(0)
+        {
+            self.body_bytes = self
+                .body_bytes
+                .saturating_sub(SessionManager::exchange_body_size(&evicted));
+        }
+    }
+
+    fn enforce_body_budget(&mut self, exchanges: &mut IndexMap<String, Exchange>) {
+        if self.max_retained_body_bytes != usize::MAX
+            && self.body_bytes > self.max_retained_body_bytes
+        {
+            enforce_budget(
+                exchanges,
+                self.max_retained_body_bytes,
+                &mut self.body_bytes,
+            );
+        }
     }
 }
 
 fn process_write_op(
     op: WriteOp,
-    exchanges: &RwLock<IndexMap<String, Exchange>>,
-    max_sessions: usize,
-    max_retained_body_bytes: usize,
-    body_bytes: &mut usize,
+    store: &mut SessionStore<'_>,
     change_tx: &broadcast::Sender<SessionChange>,
 ) {
     match op {
@@ -673,68 +839,13 @@ fn process_write_op(
             request,
             source,
         } => {
-            let added = request.body.len();
-            {
-                let mut store = exchanges.write().unwrap();
-                if store.len() >= max_sessions
-                    && !store.contains_key(&id)
-                    && let Some((_, evicted)) = store.shift_remove_index(0)
-                {
-                    *body_bytes =
-                        body_bytes.saturating_sub(SessionManager::exchange_body_size(&evicted));
-                }
-                *body_bytes += added;
-                store.insert(
-                    id.clone(),
-                    Exchange {
-                        id: id.clone(),
-                        timestamp: Utc::now(),
-                        updated_at: None,
-                        // Copy the downstream identity off the request's side-channel
-                        // fields onto the serialised Exchange before the move (Phase 7).
-                        connection_id: request.connection_id.clone(),
-                        stream_id: request.stream_id,
-                        downstream_protocol: request.downstream_protocol.clone(),
-                        protocol_context: request.protocol_context.clone(),
-                        request: *request,
-                        response: None,
-                        metrics: None,
-                        source,
-                        ws_frames: Vec::new(),
-                        events: Vec::new(),
-                        note: None,
-                        tags: Vec::new(),
-                        inspector_data: None,
-                        paused_at: None,
-                    },
-                );
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::RequestCaptured,
-            });
+            store.record_request(id.clone(), request, source);
+            publish_change(change_tx, Some(id), SessionChangeKind::RequestCaptured);
         }
 
         WriteOp::RecordResponse { id, response } => {
-            let added = response.body.len();
-            {
-                let mut store = exchanges.write().unwrap();
-                if let Some(ex) = store.get_mut(&id) {
-                    ex.response = Some(response);
-                    ex.updated_at = Some(Utc::now());
-                    *body_bytes += added;
-                }
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::ResponseCaptured,
-            });
+            store.record_response(&id, response, None);
+            publish_change(change_tx, Some(id), SessionChangeKind::ResponseCaptured);
         }
 
         WriteOp::RecordResponseWithMetrics {
@@ -742,65 +853,18 @@ fn process_write_op(
             response,
             metrics,
         } => {
-            let added = response.body.len();
-            {
-                let mut store = exchanges.write().unwrap();
-                if let Some(ex) = store.get_mut(&id) {
-                    ex.response = Some(response);
-                    ex.metrics = Some(metrics);
-                    ex.updated_at = Some(Utc::now());
-                    *body_bytes += added;
-                }
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::ResponseCaptured,
-            });
+            store.record_response(&id, response, Some(metrics));
+            publish_change(change_tx, Some(id), SessionChangeKind::ResponseCaptured);
         }
 
         WriteOp::AppendWsFrame { id, frame } => {
-            let frame_bytes = frame.payload_text.as_ref().map_or(0, String::len)
-                + frame.payload_hex.as_ref().map_or(0, String::len);
-            let added = frame_bytes.saturating_mul(2);
-            {
-                let mut store = exchanges.write().unwrap();
-                if let Some(ex) = store.get_mut(&id) {
-                    ex.events.push(SessionEvent::WsFrame {
-                        frame: frame.clone(),
-                    });
-                    ex.ws_frames.push(frame);
-                    *body_bytes += added;
-                }
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::WsFrameCaptured,
-            });
+            store.append_ws_frame(&id, frame);
+            publish_change(change_tx, Some(id), SessionChangeKind::WsFrameCaptured);
         }
 
         WriteOp::AppendEvent { id, event } => {
-            let added = event.retained_body_size();
-            {
-                let mut store = exchanges.write().unwrap();
-                if let Some(ex) = store.get_mut(&id) {
-                    ex.events.push(event);
-                    ex.updated_at = Some(Utc::now());
-                    *body_bytes += added;
-                }
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::SessionUpdated,
-            });
+            store.append_event(&id, event);
+            publish_change(change_tx, Some(id), SessionChangeKind::SessionUpdated);
         }
 
         WriteOp::Annotate {
@@ -809,27 +873,9 @@ fn process_write_op(
             tags,
             reply,
         } => {
-            let found = {
-                let mut store = exchanges.write().unwrap();
-                match store.get_mut(&id) {
-                    None => false,
-                    Some(ex) => {
-                        if let Some(n) = note {
-                            ex.note = if n.is_empty() { None } else { Some(n) };
-                        }
-                        if let Some(t) = tags {
-                            ex.tags = t;
-                        }
-                        ex.updated_at = Some(Utc::now());
-                        true
-                    }
-                }
-            };
+            let found = store.annotate(&id, note, tags);
             if found {
-                let _ = change_tx.send(SessionChange {
-                    session_id: Some(id),
-                    kind: SessionChangeKind::SessionUpdated,
-                });
+                publish_change(change_tx, Some(id), SessionChangeKind::SessionUpdated);
             }
             let _ = reply.send(found);
         }
@@ -837,87 +883,32 @@ fn process_write_op(
         WriteOp::ImportSessions {
             exchanges: new_exchanges,
         } => {
-            {
-                let mut store = exchanges.write().unwrap();
-                for e in new_exchanges {
-                    if store.len() >= max_sessions
-                        && !store.contains_key(&e.id)
-                        && let Some((_, evicted)) = store.shift_remove_index(0)
-                    {
-                        *body_bytes =
-                            body_bytes.saturating_sub(SessionManager::exchange_body_size(&evicted));
-                    }
-                    *body_bytes += SessionManager::exchange_body_size(&e);
-                    store.insert(e.id.clone(), e);
-                }
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: None,
-                kind: SessionChangeKind::SessionsImported,
-            });
+            store.import(new_exchanges);
+            publish_change(change_tx, None, SessionChangeKind::SessionsImported);
         }
 
         WriteOp::ClearSessions => {
-            {
-                let mut store = exchanges.write().unwrap();
-                store.clear();
-                *body_bytes = 0;
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: None,
-                kind: SessionChangeKind::SessionsCleared,
-            });
+            store.clear();
+            publish_change(change_tx, None, SessionChangeKind::SessionsCleared);
         }
 
         WriteOp::UpdateInspectorData { id, data } => {
-            let mut store = exchanges.write().unwrap();
-            if let Some(ex) = store.get_mut(&id) {
-                ex.inspector_data = Some(data);
-            }
+            store.update_inspector_data(&id, data);
         }
 
         WriteOp::MarkPaused { id } => {
-            let mut store = exchanges.write().unwrap();
-            if let Some(ex) = store.get_mut(&id) {
-                ex.paused_at = Some(Utc::now());
-                ex.updated_at = Some(Utc::now());
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::SessionPaused,
-            });
+            store.set_paused(&id, true);
+            publish_change(change_tx, Some(id), SessionChangeKind::SessionPaused);
         }
 
         WriteOp::ClearPaused { id } => {
-            let mut store = exchanges.write().unwrap();
-            if let Some(ex) = store.get_mut(&id) {
-                ex.paused_at = None;
-                ex.updated_at = Some(Utc::now());
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: Some(id),
-                kind: SessionChangeKind::SessionUpdated,
-            });
+            store.set_paused(&id, false);
+            publish_change(change_tx, Some(id), SessionChangeKind::SessionUpdated);
         }
 
         WriteOp::LoadData { map, reply } => {
-            // Recompute body_bytes from the incoming map (load is infrequent).
-            let new_body_bytes: usize = map.values().map(SessionManager::exchange_body_size).sum();
-            {
-                let mut store = exchanges.write().unwrap();
-                *store = map;
-                *body_bytes = new_body_bytes;
-                if max_retained_body_bytes != usize::MAX && *body_bytes > max_retained_body_bytes {
-                    enforce_budget(&mut store, max_retained_body_bytes, body_bytes);
-                }
-            }
-            let _ = change_tx.send(SessionChange {
-                session_id: None,
-                kind: SessionChangeKind::SessionsImported,
-            });
+            store.replace(map);
+            publish_change(change_tx, None, SessionChangeKind::SessionsImported);
             let _ = reply.send(());
         }
 
@@ -925,6 +916,14 @@ fn process_write_op(
             let _ = reply.send(());
         }
     }
+}
+
+fn publish_change(
+    change_tx: &broadcast::Sender<SessionChange>,
+    session_id: Option<String>,
+    kind: SessionChangeKind,
+) {
+    let _ = change_tx.send(SessionChange { session_id, kind });
 }
 
 /// Evict body content from the oldest exchanges until the budget is satisfied.
@@ -948,79 +947,8 @@ fn enforce_budget(
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
-
-pub enum SearchTerm {
-    Tag(String),
-    Host(String),
-    Method(String),
-    Status(u16),
-    Text(String),
-}
-
-impl SearchTerm {
-    pub fn matches(&self, ex: &Exchange) -> bool {
-        match self {
-            SearchTerm::Tag(t) => ex
-                .tags
-                .iter()
-                .any(|tag| tag.to_lowercase().contains(t.as_str())),
-            SearchTerm::Host(h) => ex.request.host.to_lowercase().contains(h.as_str()),
-            SearchTerm::Method(m) => ex.request.method.to_lowercase() == m.as_str(),
-            SearchTerm::Status(s) => ex
-                .response
-                .as_ref()
-                .map(|r| r.status == *s)
-                .unwrap_or(false),
-            SearchTerm::Text(t) => {
-                let t = t.as_str();
-                ex.request.uri.to_lowercase().contains(t)
-                    || ex.request.body_text().to_lowercase().contains(t)
-                    || ex
-                        .request
-                        .headers
-                        .iter()
-                        .any(|(k, v)| k.to_lowercase().contains(t) || v.to_lowercase().contains(t))
-                    || ex
-                        .response
-                        .as_ref()
-                        .map(|r| {
-                            r.body_text().to_lowercase().contains(t)
-                                || r.headers.iter().any(|(k, v)| {
-                                    k.to_lowercase().contains(t) || v.to_lowercase().contains(t)
-                                })
-                        })
-                        .unwrap_or(false)
-                    || ex
-                        .note
-                        .as_deref()
-                        .map(|n| n.to_lowercase().contains(t))
-                        .unwrap_or(false)
-            }
-        }
-    }
-}
-
-pub fn parse_search_query(query: &str) -> Vec<SearchTerm> {
-    query
-        .split_whitespace()
-        .filter(|s| !s.is_empty())
-        .map(|token| {
-            if let Some(t) = token.strip_prefix("tag:") {
-                SearchTerm::Tag(t.to_lowercase())
-            } else if let Some(h) = token.strip_prefix("host:") {
-                SearchTerm::Host(h.to_lowercase())
-            } else if let Some(m) = token.strip_prefix("method:") {
-                SearchTerm::Method(m.to_lowercase())
-            } else if let Some(s) = token.strip_prefix("status:") {
-                s.parse::<u16>()
-                    .map(SearchTerm::Status)
-                    .unwrap_or_else(|_| SearchTerm::Text(s.to_lowercase()))
-            } else {
-                SearchTerm::Text(token.to_lowercase())
-            }
-        })
-        .collect()
-}
+pub mod search;
+pub use search::parse_search_query;
 
 #[cfg(test)]
 mod tests {

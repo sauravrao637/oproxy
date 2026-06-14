@@ -5,13 +5,35 @@ use rcgen::{
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 type CertCache = Arc<RwLock<HashMap<String, (Vec<u8>, Vec<u8>)>>>;
+type CertResult<T> = Result<T, Box<dyn std::error::Error>>;
+type RootMaterial = (CertificateParams, Certificate, KeyPair);
 const MAX_CERT_CACHE_ENTRIES: usize = 1024;
+
+struct RootPaths {
+    directory: PathBuf,
+    key: PathBuf,
+    cert: PathBuf,
+}
+
+impl RootPaths {
+    fn new(directory: &Path) -> Self {
+        Self {
+            directory: directory.to_path_buf(),
+            key: directory.join("root.key"),
+            cert: directory.join("root.crt"),
+        }
+    }
+
+    fn exists(&self) -> bool {
+        self.key.exists() && self.cert.exists()
+    }
+}
 
 pub struct CertificateAuthority {
     root_params: CertificateParams,
@@ -21,33 +43,10 @@ pub struct CertificateAuthority {
 }
 
 impl CertificateAuthority {
-    pub async fn new(storage_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(storage_path: &Path) -> CertResult<Self> {
         debug!(path = ?storage_path, "Initializing CA");
-        let storage_path = storage_path.to_path_buf();
-        let root_key_path = storage_path.join("root.key");
-        let root_cert_path = storage_path.join("root.crt");
-
-        if !storage_path.exists() {
-            debug!("Creating CA storage directory");
-            fs::create_dir_all(&storage_path)?;
-        }
-
-        // Bug fix: previously both branches called generate_root_ca, which ignored the loaded
-        // key pair and wrote new files on every restart. Now we reconstruct the Certificate
-        // from the stored key so domain certs remain valid across restarts.
-        let (root_params, root_cert, root_key) =
-            if root_key_path.exists() && root_cert_path.exists() {
-                debug!("Loading existing root CA from disk");
-                harden_private_key_permissions(&root_key_path);
-                let key_pem = fs::read_to_string(&root_key_path)?;
-                let key_pair = KeyPair::from_pem(&key_pem)?;
-                let params = Self::root_params();
-                let cert = params.self_signed(&key_pair)?;
-                (params, cert, key_pair)
-            } else {
-                info!("Generating new root CA");
-                Self::generate_root_ca(&storage_path)?
-            };
+        let paths = RootPaths::new(storage_path);
+        let (root_params, root_cert, root_key) = Self::load_or_generate_root(&paths)?;
 
         Ok(Self {
             root_params,
@@ -55,6 +54,28 @@ impl CertificateAuthority {
             root_key,
             cert_cache: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    fn load_or_generate_root(paths: &RootPaths) -> CertResult<RootMaterial> {
+        if !paths.directory.exists() {
+            debug!("Creating CA storage directory");
+            fs::create_dir_all(&paths.directory)?;
+        }
+        if paths.exists() {
+            debug!("Loading existing root CA from disk");
+            Self::load_root_ca(paths)
+        } else {
+            info!("Generating new root CA");
+            Self::generate_root_ca(paths)
+        }
+    }
+
+    fn load_root_ca(paths: &RootPaths) -> CertResult<RootMaterial> {
+        harden_private_key_permissions(&paths.key);
+        let key_pair = KeyPair::from_pem(&fs::read_to_string(&paths.key)?)?;
+        let params = Self::root_params();
+        let cert = params.self_signed(&key_pair)?;
+        Ok((params, cert, key_pair))
     }
 
     fn root_params() -> CertificateParams {
@@ -71,33 +92,35 @@ impl CertificateAuthority {
         params
     }
 
-    fn generate_root_ca(
-        storage_path: &Path,
-    ) -> Result<(CertificateParams, Certificate, KeyPair), Box<dyn std::error::Error>> {
+    fn generate_root_ca(paths: &RootPaths) -> CertResult<RootMaterial> {
         let params = Self::root_params();
         let key_pair = KeyPair::generate()?;
         let cert = params.self_signed(&key_pair)?;
 
-        write_private_key(&storage_path.join("root.key"), &key_pair.serialize_pem())?;
-        fs::write(storage_path.join("root.crt"), cert.pem())?;
+        write_private_key(&paths.key, &key_pair.serialize_pem())?;
+        fs::write(&paths.cert, cert.pem())?;
 
         Ok((params, cert, key_pair))
     }
 
-    pub async fn get_certificate_for_domain(
-        &self,
-        domain: &str,
-    ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    pub async fn get_certificate_for_domain(&self, domain: &str) -> CertResult<(Vec<u8>, Vec<u8>)> {
         debug!(domain = %domain, "Getting certificate for domain");
-        {
-            let cache = self.cert_cache.read().await;
-            if let Some(pair) = cache.get(domain) {
-                debug!(domain = %domain, "Certificate cache hit");
-                return Ok(pair.clone());
-            }
+        if let Some(pair) = self.cached_certificate(domain).await {
+            debug!(domain = %domain, "Certificate cache hit");
+            return Ok(pair);
         }
         debug!(domain = %domain, "Certificate cache miss");
 
+        let pair = self.issue_domain_certificate(domain)?;
+        self.cache_certificate(domain, pair.clone()).await;
+        Ok(pair)
+    }
+
+    async fn cached_certificate(&self, domain: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.cert_cache.read().await.get(domain).cloned()
+    }
+
+    fn issue_domain_certificate(&self, domain: &str) -> CertResult<(Vec<u8>, Vec<u8>)> {
         let mut params = CertificateParams::new(vec![domain.to_string()])?;
         params.distinguished_name = DistinguishedName::new();
         params.distinguished_name.push(DnType::CommonName, domain);
@@ -108,21 +131,18 @@ impl CertificateAuthority {
             error!(error = %e, "Failed to create certificate params");
             e
         })?;
-        let cert_der = cert.der().to_vec();
-        let key_der = cert_key.serialize_der();
+        Ok((cert.der().to_vec(), cert_key.serialize_der()))
+    }
 
+    async fn cache_certificate(&self, domain: &str, pair: (Vec<u8>, Vec<u8>)) {
+        let mut cache = self.cert_cache.write().await;
+        if cache.len() >= MAX_CERT_CACHE_ENTRIES
+            && let Some(evicted) = cache.keys().next().cloned()
         {
-            let mut cache = self.cert_cache.write().await;
-            if cache.len() >= MAX_CERT_CACHE_ENTRIES
-                && let Some(evicted) = cache.keys().next().cloned()
-            {
-                cache.remove(&evicted);
-                debug!(domain = %evicted, "Evicted certificate cache entry");
-            }
-            cache.insert(domain.to_string(), (cert_der.clone(), key_der.clone()));
+            cache.remove(&evicted);
+            debug!(domain = %evicted, "Evicted certificate cache entry");
         }
-
-        Ok((cert_der, key_der))
+        cache.insert(domain.to_string(), pair);
     }
 
     pub fn get_root_cert_pem(&self) -> String {

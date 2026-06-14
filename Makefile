@@ -49,7 +49,7 @@ test-ui: ## Run Playwright browser tests (builds debug binary first)
 	yarn --cwd tests/browser test
 
 lint: ## Run Clippy (warnings as errors)
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 check: fmt lint test ## fmt + lint + test (full pre-release check)
 

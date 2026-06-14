@@ -733,7 +733,7 @@ body.col-resizing .t tbody tr { background: inherit !important; }
 .conn-stream-id { color: var(--text-low); min-width: 28px; }
 .conn-stream-path { color: var(--text-mid); width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
 /* Per-stream concurrency timeline: a shared-axis track with a positioned bar.
-   Overlapping bars across rows reveal h2/h3 multiplexing (Phase 9). */
+   Overlapping bars across rows reveal h2/h3 multiplexing. */
 .conn-track {
   position: relative; flex: 1; height: 9px;
   background: var(--border-soft); border-radius: 2px; overflow: hidden;

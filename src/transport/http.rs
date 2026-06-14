@@ -18,7 +18,7 @@ pub struct DownstreamPeer(pub SocketAddr);
 
 /// Per-connection identity threaded into every request's extensions so the engine
 /// can record which downstream connection (and which stream within it) an
-/// exchange belongs to (Phase 7). The counter is shared across all requests on
+/// exchange belongs to. The counter is shared across all requests on
 /// the connection: HTTP/1.1 increments it per sequential request, h2/h3 per
 /// multiplexed stream.
 #[derive(Clone, Debug)]
@@ -127,23 +127,19 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::RwLock;
 
-    use crate::core::engine::ProxyEngine;
+    use crate::core::engine::{ProxyEngine, ProxyEngineConfig};
     use crate::transport::lifecycle::ConnectionSupervisor;
 
     fn test_service() -> ProxyHttpService {
         let app = Router::new().route("/ok", get(|| async { "transport-ok" }));
-        let engine = Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(crate::middleware::chain::MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(
+                crate::middleware::chain::MiddlewareChain::new(),
+            )),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
         let context = TransportContext {
             session_manager: Arc::new(crate::session::SessionManager::new(10_000)),
             breakpoint_manager: Arc::new(

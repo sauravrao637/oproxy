@@ -339,8 +339,175 @@ impl BreakpointMiddleware {
     }
 }
 
+#[async_trait]
+impl Middleware for BreakpointMiddleware {
+    fn name(&self) -> &str {
+        "BreakpointMiddleware"
+    }
+
+    async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
+        let target = MatchTarget::from_request(ctx);
+        if self
+            .first_match(|t| matches!(t, BreakpointType::Request), &target)
+            .await
+            .is_none()
+        {
+            return MiddlewareAction::Continue;
+        }
+
+        let session_id = ctx
+            .session_id
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Write back so InspectionMiddleware reuses the same ID rather than
+        // generating a fresh one and creating a duplicate ghost session.
+        ctx.session_id = Some(session_id.clone());
+
+        let bp_id = Uuid::new_v4().to_string();
+
+        // Record the request immediately so it appears in the sessions list as paused
+        self.session_manager.record_request_with_source(
+            session_id.clone(),
+            ctx.clone(),
+            crate::session::SessionSource::Proxy,
+        );
+        self.session_manager.mark_paused(&session_id);
+        self.session_manager.append_event(
+            &session_id,
+            crate::session::SessionEvent::BreakpointPaused {
+                breakpoint_id: bp_id.clone(),
+            },
+        );
+
+        let (tx, rx) = oneshot::channel();
+        self.manager.pending.write().await.insert(
+            bp_id.clone(),
+            PendingBreakpoint {
+                id: bp_id.clone(),
+                bp_type: BreakpointType::Request,
+                context: BreakpointContext::Request(Box::new(ctx.clone())),
+                tx,
+            },
+        );
+
+        match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
+            Ok(Ok(BreakpointResolution::Continue)) => {
+                self.session_manager.clear_paused(&session_id);
+                MiddlewareAction::Continue
+            }
+            Ok(Ok(BreakpointResolution::Modify(bc))) => {
+                self.session_manager.clear_paused(&session_id);
+                if let BreakpointContext::Request(new_ctx) = *bc {
+                    *ctx = *new_ctx;
+                    MiddlewareAction::Continue
+                } else {
+                    MiddlewareAction::StopAndReturn
+                }
+            }
+            Ok(Ok(BreakpointResolution::Drop)) => {
+                self.session_manager.clear_paused(&session_id);
+                MiddlewareAction::StopAndReturn
+            }
+            Ok(Err(_)) => {
+                self.session_manager.clear_paused(&session_id);
+                MiddlewareAction::StopAndReturn
+            }
+            Err(_) => {
+                self.manager.pending.write().await.remove(&bp_id);
+                self.session_manager.clear_paused(&session_id);
+                tracing::warn!(id = %bp_id, "Breakpoint request timed out, dropping");
+                let mut headers = crate::middleware::HeaderMap::new();
+                headers.insert("content-type".to_string(), "text/plain".to_string());
+                ctx.mock_response = Some(crate::middleware::InterceptedResponse {
+                    status: 504,
+                    headers,
+                    body: Bytes::from_static(b"Breakpoint timed out"),
+                    tags: Vec::new(),
+                    served_mock: None,
+                });
+                MiddlewareAction::StopAndReturn
+            }
+        }
+    }
+
+    async fn on_response(&self, ctx: &mut ResponseContext) -> MiddlewareAction {
+        let target = MatchTarget::from_response(ctx);
+        if self
+            .first_match(|t| matches!(t, BreakpointType::Response), &target)
+            .await
+            .is_none()
+        {
+            return MiddlewareAction::Continue;
+        }
+
+        let bp_id = Uuid::new_v4().to_string();
+
+        // For response breakpoints, mark the session as paused if it exists
+        if let Some(session_id) = &ctx.session_id {
+            self.session_manager.mark_paused(session_id);
+            self.session_manager.append_event(
+                session_id,
+                crate::session::SessionEvent::BreakpointPaused {
+                    breakpoint_id: bp_id.clone(),
+                },
+            );
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.manager.pending.write().await.insert(
+            bp_id.clone(),
+            PendingBreakpoint {
+                id: bp_id.clone(),
+                bp_type: BreakpointType::Response,
+                context: BreakpointContext::Response(Box::new(ctx.clone())),
+                tx,
+            },
+        );
+
+        match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
+            Ok(Ok(BreakpointResolution::Continue)) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                MiddlewareAction::Continue
+            }
+            Ok(Ok(BreakpointResolution::Modify(bc))) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                if let BreakpointContext::Response(new_ctx) = *bc {
+                    *ctx = *new_ctx;
+                    MiddlewareAction::Continue
+                } else {
+                    MiddlewareAction::StopAndReturn
+                }
+            }
+            Ok(Ok(BreakpointResolution::Drop)) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                MiddlewareAction::StopAndReturn
+            }
+            Ok(Err(_)) => {
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                MiddlewareAction::StopAndReturn
+            }
+            Err(_) => {
+                self.manager.pending.write().await.remove(&bp_id);
+                if let Some(session_id) = &ctx.session_id {
+                    self.session_manager.clear_paused(session_id);
+                }
+                tracing::warn!(id = %bp_id, "Breakpoint response timed out, dropping");
+                MiddlewareAction::StopAndReturn
+            }
+        }
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::middleware::matcher::{Location, MatchMode};
@@ -828,173 +995,5 @@ mod tests {
             manager.pending.read().await.is_empty(),
             "resolved breakpoints must leave the pending queue"
         );
-    }
-}
-
-#[async_trait]
-impl Middleware for BreakpointMiddleware {
-    fn name(&self) -> &str {
-        "BreakpointMiddleware"
-    }
-
-    async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
-        let target = MatchTarget::from_request(ctx);
-        if self
-            .first_match(|t| matches!(t, BreakpointType::Request), &target)
-            .await
-            .is_none()
-        {
-            return MiddlewareAction::Continue;
-        }
-
-        let session_id = ctx
-            .session_id
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        // Write back so InspectionMiddleware reuses the same ID rather than
-        // generating a fresh one and creating a duplicate ghost session.
-        ctx.session_id = Some(session_id.clone());
-
-        let bp_id = Uuid::new_v4().to_string();
-
-        // Record the request immediately so it appears in the sessions list as paused
-        self.session_manager.record_request_with_source(
-            session_id.clone(),
-            ctx.clone(),
-            crate::session::SessionSource::Proxy,
-        );
-        self.session_manager.mark_paused(&session_id);
-        self.session_manager.append_event(
-            &session_id,
-            crate::session::SessionEvent::BreakpointPaused {
-                breakpoint_id: bp_id.clone(),
-            },
-        );
-
-        let (tx, rx) = oneshot::channel();
-        self.manager.pending.write().await.insert(
-            bp_id.clone(),
-            PendingBreakpoint {
-                id: bp_id.clone(),
-                bp_type: BreakpointType::Request,
-                context: BreakpointContext::Request(Box::new(ctx.clone())),
-                tx,
-            },
-        );
-
-        match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
-            Ok(Ok(BreakpointResolution::Continue)) => {
-                self.session_manager.clear_paused(&session_id);
-                MiddlewareAction::Continue
-            }
-            Ok(Ok(BreakpointResolution::Modify(bc))) => {
-                self.session_manager.clear_paused(&session_id);
-                if let BreakpointContext::Request(new_ctx) = *bc {
-                    *ctx = *new_ctx;
-                    MiddlewareAction::Continue
-                } else {
-                    MiddlewareAction::StopAndReturn
-                }
-            }
-            Ok(Ok(BreakpointResolution::Drop)) => {
-                self.session_manager.clear_paused(&session_id);
-                MiddlewareAction::StopAndReturn
-            }
-            Ok(Err(_)) => {
-                self.session_manager.clear_paused(&session_id);
-                MiddlewareAction::StopAndReturn
-            }
-            Err(_) => {
-                self.manager.pending.write().await.remove(&bp_id);
-                self.session_manager.clear_paused(&session_id);
-                tracing::warn!(id = %bp_id, "Breakpoint request timed out, dropping");
-                let mut headers = crate::middleware::HeaderMap::new();
-                headers.insert("content-type".to_string(), "text/plain".to_string());
-                ctx.mock_response = Some(crate::middleware::InterceptedResponse {
-                    status: 504,
-                    headers,
-                    body: Bytes::from_static(b"Breakpoint timed out"),
-                    tags: Vec::new(),
-                    served_mock: None,
-                });
-                MiddlewareAction::StopAndReturn
-            }
-        }
-    }
-
-    async fn on_response(&self, ctx: &mut ResponseContext) -> MiddlewareAction {
-        let target = MatchTarget::from_response(ctx);
-        if self
-            .first_match(|t| matches!(t, BreakpointType::Response), &target)
-            .await
-            .is_none()
-        {
-            return MiddlewareAction::Continue;
-        }
-
-        let bp_id = Uuid::new_v4().to_string();
-
-        // For response breakpoints, mark the session as paused if it exists
-        if let Some(session_id) = &ctx.session_id {
-            self.session_manager.mark_paused(session_id);
-            self.session_manager.append_event(
-                session_id,
-                crate::session::SessionEvent::BreakpointPaused {
-                    breakpoint_id: bp_id.clone(),
-                },
-            );
-        }
-
-        let (tx, rx) = oneshot::channel();
-        self.manager.pending.write().await.insert(
-            bp_id.clone(),
-            PendingBreakpoint {
-                id: bp_id.clone(),
-                bp_type: BreakpointType::Response,
-                context: BreakpointContext::Response(Box::new(ctx.clone())),
-                tx,
-            },
-        );
-
-        match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
-            Ok(Ok(BreakpointResolution::Continue)) => {
-                if let Some(session_id) = &ctx.session_id {
-                    self.session_manager.clear_paused(session_id);
-                }
-                MiddlewareAction::Continue
-            }
-            Ok(Ok(BreakpointResolution::Modify(bc))) => {
-                if let Some(session_id) = &ctx.session_id {
-                    self.session_manager.clear_paused(session_id);
-                }
-                if let BreakpointContext::Response(new_ctx) = *bc {
-                    *ctx = *new_ctx;
-                    MiddlewareAction::Continue
-                } else {
-                    MiddlewareAction::StopAndReturn
-                }
-            }
-            Ok(Ok(BreakpointResolution::Drop)) => {
-                if let Some(session_id) = &ctx.session_id {
-                    self.session_manager.clear_paused(session_id);
-                }
-                MiddlewareAction::StopAndReturn
-            }
-            Ok(Err(_)) => {
-                if let Some(session_id) = &ctx.session_id {
-                    self.session_manager.clear_paused(session_id);
-                }
-                MiddlewareAction::StopAndReturn
-            }
-            Err(_) => {
-                self.manager.pending.write().await.remove(&bp_id);
-                if let Some(session_id) = &ctx.session_id {
-                    self.session_manager.clear_paused(session_id);
-                }
-                tracing::warn!(id = %bp_id, "Breakpoint response timed out, dropping");
-                MiddlewareAction::StopAndReturn
-            }
-        }
     }
 }

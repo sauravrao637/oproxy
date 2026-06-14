@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::engine::ProxyEngine;
+    use crate::core::engine::{ProxyEngine, ProxyEngineConfig};
     use crate::middleware::chain::MiddlewareChain;
     use crate::middleware::plugins::capture_filter::{
         CaptureFilterConfig, CaptureFilterMiddleware, FilterMode,
@@ -28,18 +28,12 @@ mod tests {
         chain.add_middleware(Arc::new(CaptureFilterMiddleware::new(capture_filter)));
         chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager)));
 
-        Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(chain)),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ))
+        Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }))
     }
 
     async fn request_unreachable_loopback(engine: Arc<ProxyEngine>, path: &str) -> StatusCode {
@@ -68,18 +62,12 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_unreachable_host_returns_bad_gateway() {
         let middleware_chain = Arc::new(RwLock::new(MiddlewareChain::new()));
-        let engine = Arc::new(ProxyEngine::new(
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
             middleware_chain,
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
 
         let app = Router::new().fallback(move |req| {
             let engine = engine.clone();
@@ -111,18 +99,12 @@ mod tests {
         let mut chain = MiddlewareChain::new();
         chain.add_middleware(Arc::new(MapRemoteMiddleware::new(vec![])));
         let middleware_chain = Arc::new(RwLock::new(chain));
-        let engine = Arc::new(ProxyEngine::new(
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
             middleware_chain,
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
 
         let app = Router::new().fallback(move |req| {
             let engine = engine.clone();
@@ -163,18 +145,12 @@ mod tests {
             axum::serve(listener, upstream).await.unwrap();
         });
 
-        let engine = Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(MiddlewareChain::new())),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
         let app = Router::new().fallback(move |req| {
             let engine = engine.clone();
             async move { engine.handle_request(req).await }
@@ -206,18 +182,12 @@ mod tests {
         let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
         let mut chain = MiddlewareChain::new();
         chain.add_middleware(Arc::new(InspectionMiddleware::new(sessions.clone())));
-        let engine = Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(chain)),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
 
         let app = Router::new().fallback(move |req| {
             let engine = engine.clone();
@@ -354,18 +324,12 @@ mod tests {
         // Engine whose only plugin opts into streaming.
         let mut chain = MiddlewareChain::new();
         chain.add_middleware(Arc::new(StreamingInspectPlugin));
-        let engine = Arc::new(ProxyEngine::new(
-            Arc::new(RwLock::new(chain)),
-            None,
-            false,
-            8080,
-            "127.0.0.1".to_string(),
-            30,
-            10 * 1024 * 1024,
-            10,
-            30,
-            None,
-        ));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
 
         let app = Router::new().fallback(move |req| {
             let engine = engine.clone();

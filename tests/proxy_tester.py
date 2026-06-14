@@ -662,8 +662,76 @@ class ServerManager:
                     self.send_header('Content-Length', str(size))
                     self.end_headers()
                     self.wfile.write(b'A' * size)
+                elif self.path == '/headers':
+                    # Reflect the request headers the upstream actually received,
+                    # so the client can assert which headers the proxy forwarded.
+                    received = {k.lower(): v for k, v in self.headers.items()}
+                    data = json.dumps(received).encode()
+                    self._send_response(200, 'application/json', data)
+                elif self.path == '/set-cookies':
+                    # Two Set-Cookie headers — must survive the proxy intact and
+                    # not collapse to one (multi-value header preservation).
+                    body = b'multi-cookie'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.send_header('Set-Cookie', 'first=1; Path=/')
+                    self.send_header('Set-Cookie', 'second=2; Path=/')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path.startswith('/status/'):
+                    try:
+                        code = int(self.path.rsplit('/', 1)[1])
+                    except ValueError:
+                        code = 400
+                    body = f'status {code}'.encode()
+                    self._send_response(code, 'text/plain', body)
+                elif self.path == '/sse':
+                    # Server-Sent Events: text/event-stream triggers the proxy's
+                    # streaming response path. Sent chunked, then closed.
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Transfer-Encoding', 'chunked')
+                    self.end_headers()
+                    for i in range(3):
+                        chunk = f"data: event-{i}\n\n".encode()
+                        self.wfile.write(f"{len(chunk):X}\r\n".encode())
+                        self.wfile.write(chunk)
+                        self.wfile.write(b"\r\n")
+                    self.wfile.write(b"0\r\n\r\n")
                 else:
                     self._send_response(200, 'text/plain', b'Hello HTTP/1.1')
+
+            def do_PUT(self):
+                self._echo_method()
+
+            def do_DELETE(self):
+                self._echo_method()
+
+            def do_PATCH(self):
+                self._echo_method()
+
+            def do_OPTIONS(self):
+                body = b''
+                self.send_response(204)
+                self.send_header('Allow', 'GET,POST,PUT,DELETE,PATCH,HEAD,OPTIONS')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+            def do_HEAD(self):
+                # HEAD must return headers (incl. Content-Length) but no body.
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(b'Hello HTTP/1.1')))
+                self.end_headers()
+
+            def _echo_method(self):
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length) if content_length > 0 else b''
+                # Echo the method name and body so the client can verify the verb
+                # round-tripped through the proxy unchanged.
+                payload = self.command.encode() + b':' + body
+                self._send_response(200, 'text/plain', payload)
 
             def do_POST(self):
                 content_length = int(self.headers.get('Content-Length', 0))
@@ -796,6 +864,46 @@ class ServerManager:
                     body = b'Hello keepalive'
                 elif path == '/large':
                     body = b'A' * 1024 * 1024
+                elif path == '/headers':
+                    received = {k.decode().lower(): v.decode() for k, v in scope['headers']}
+                    body = json.dumps(received).encode()
+                    headers = [(b'content-type', b'application/json')]
+                elif path == '/set-cookies':
+                    await send({'type': 'http.response.start', 'status': 200, 'headers': [
+                        (b'content-type', b'text/plain'),
+                        (b'set-cookie', b'first=1; Path=/'),
+                        (b'set-cookie', b'second=2; Path=/'),
+                    ]})
+                    await send({'type': 'http.response.body', 'body': b'multi-cookie', 'more_body': False})
+                    return
+                elif path.startswith('/status/'):
+                    try:
+                        status = int(path.rsplit('/', 1)[1])
+                    except ValueError:
+                        status = 400
+                    body = f'status {status}'.encode()
+                elif path == '/sse':
+                    await send({'type': 'http.response.start', 'status': 200,
+                                'headers': [(b'content-type', b'text/event-stream')]})
+                    for i in range(3):
+                        await send({'type': 'http.response.body',
+                                    'body': f'data: event-{i}\n\n'.encode(), 'more_body': True})
+                    await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+                    return
+            elif method in ('PUT', 'DELETE', 'PATCH'):
+                body_chunks = []
+                more_body = True
+                while more_body:
+                    message = await receive()
+                    body_chunks.append(message.get('body', b''))
+                    more_body = message.get('more_body', False)
+                body = method.encode() + b':' + b''.join(body_chunks)
+            elif method == 'OPTIONS':
+                status = 204
+                headers = [(b'allow', b'GET,POST,PUT,DELETE,PATCH,HEAD,OPTIONS')]
+                body = b''
+            elif method == 'HEAD':
+                body = b''
             elif method == 'POST':
                 body_chunks = []
                 more_body = True
@@ -1753,6 +1861,768 @@ def test_http1_session_events(proxy_url, base_url, timeout, verbose):
         return False
 
 
+# ----------------------------------------------------------------------
+# Robustness / regression / security cases (release-gate hardening)
+# ----------------------------------------------------------------------
+def test_status_passthrough(proxy_url, base_url, timeout, verbose, label='HTTP/1.1', http2=False):
+    """Non-200 upstream statuses (404, 500, 503) must be forwarded verbatim,
+    body intact — not rewritten to a generic proxy error."""
+    try:
+        for code in (404, 500, 503):
+            url = make_test_url(base_url, f'/status/{code}')
+            if http2:
+                client = httpx.Client(http2=True, proxy=proxy_url, timeout=timeout, verify=False)
+                r = client.get(url)
+                if r.http_version != 'HTTP/2':
+                    print(f"[FAIL] {label} Status Passthrough: not HTTP/2 ({r.http_version})")
+                    return False
+            else:
+                r = requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+            if r.status_code != code or r.text != f'status {code}':
+                print(f"[FAIL] {label} Status Passthrough: {code} -> {r.status_code} body={r.text[:60]!r}")
+                return False
+        print(f"[PASS] {label} Status Passthrough (404/500/503)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] {label} Status Passthrough: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_multi_set_cookie(proxy_url, base_url, timeout, verbose, label='HTTP/1.1', http2=False):
+    """Two Set-Cookie headers from upstream must both survive the proxy and not
+    collapse into one — the multi-value header path (HeaderMap append/get_all)."""
+    url = make_test_url(base_url, '/set-cookies')
+    try:
+        if http2:
+            client = httpx.Client(http2=True, proxy=proxy_url, timeout=timeout, verify=False)
+            r = client.get(url)
+            cookies = [v for k, v in r.headers.multi_items() if k.lower() == 'set-cookie']
+        else:
+            r = requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+            # requests joins duplicate headers with ", " — count via raw urllib3 msg.
+            cookies = r.raw.headers.get_all('Set-Cookie') or []
+        has_first = any('first=1' in c for c in cookies)
+        has_second = any('second=2' in c for c in cookies)
+        if r.status_code == 200 and len(cookies) >= 2 and has_first and has_second:
+            print(f"[PASS] {label} Multi Set-Cookie")
+            return True
+        print(f"[FAIL] {label} Multi Set-Cookie: got {cookies!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] {label} Multi Set-Cookie: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_http1_methods(proxy_url, base_url, timeout, verbose):
+    """PUT/DELETE/PATCH must round-trip with body; HEAD returns headers but no
+    body; OPTIONS returns 204. Exercises the engine's body-mode inference."""
+    proxies = {'http': proxy_url, 'https': proxy_url}
+    try:
+        for method in ('PUT', 'DELETE', 'PATCH'):
+            r = requests.request(method, make_test_url(base_url, '/anything'),
+                                 data=b'payload', proxies=proxies, timeout=timeout)
+            if r.status_code != 200 or r.content != f'{method}:'.encode() + b'payload':
+                print(f"[FAIL] HTTP/1.1 Methods: {method} -> {r.status_code} {r.content[:60]!r}")
+                return False
+
+        h = requests.head(make_test_url(base_url, '/'), proxies=proxies, timeout=timeout)
+        if h.status_code != 200 or h.content != b'':
+            print(f"[FAIL] HTTP/1.1 Methods: HEAD -> {h.status_code} body={h.content[:40]!r}")
+            return False
+
+        o = requests.options(make_test_url(base_url, '/'), proxies=proxies, timeout=timeout)
+        if o.status_code != 204:
+            print(f"[FAIL] HTTP/1.1 Methods: OPTIONS -> {o.status_code}")
+            return False
+
+        print("[PASS] HTTP/1.1 Methods (PUT/DELETE/PATCH/HEAD/OPTIONS)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] HTTP/1.1 Methods: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_large_request_upload(proxy_url, base_url, timeout, verbose):
+    """A 1 MB request body must be buffered and forwarded intact (request-side
+    counterpart to the large-response test)."""
+    url = make_test_url(base_url, '/echo')
+    payload = b'B' * (1024 * 1024)
+    large_timeout = max(timeout * 6, 60)
+    try:
+        r = requests.post(url, data=payload,
+                          headers={'Content-Type': 'application/octet-stream'},
+                          proxies={'http': proxy_url, 'https': proxy_url}, timeout=large_timeout)
+        if r.status_code == 200 and r.content == payload:
+            print("[PASS] HTTP/1.1 Large Upload (1MB request body)")
+            return True
+        print(f"[FAIL] HTTP/1.1 Large Upload: status={r.status_code} len={len(r.content)}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] HTTP/1.1 Large Upload: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_sse_streaming(proxy_url, base_url, timeout, verbose):
+    """text/event-stream responses go through the proxy's streaming path; all
+    events must arrive in order."""
+    url = make_test_url(base_url, '/sse')
+    try:
+        r = requests.get(url, proxies={'http': proxy_url, 'https': proxy_url},
+                         timeout=timeout, stream=True)
+        data = r.raw.read()
+        ok = (r.status_code == 200
+              and r.headers.get('Content-Type', '').startswith('text/event-stream')
+              and b'data: event-0' in data
+              and b'data: event-1' in data
+              and b'data: event-2' in data)
+        if ok:
+            print("[PASS] HTTP/1.1 SSE Streaming")
+            return True
+        print(f"[FAIL] HTTP/1.1 SSE Streaming: status={r.status_code} ct={r.headers.get('Content-Type')!r} body={data[:80]!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] HTTP/1.1 SSE Streaming: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_internal_headers_stripped(proxy_url, base_url, timeout, verbose):
+    """SECURITY: a client must not be able to spoof the proxy's internal
+    `x-oproxy-*` side-channel headers. They must be stripped before forwarding,
+    while ordinary custom headers pass through unchanged."""
+    url = make_test_url(base_url, '/headers')
+    spoofed = {
+        'x-oproxy-destination': 'http://evil.example.com',
+        'x-oproxy-mock-response': '{"status":200}',
+        'X-Custom-Header': 'keep-me',
+    }
+    try:
+        r = requests.get(url, headers=spoofed,
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code != 200:
+            print(f"[FAIL] Internal Header Stripping: status={r.status_code}")
+            return False
+        received = r.json()
+        leaked = [k for k in received if k.lower().startswith('x-oproxy-')]
+        if leaked:
+            print(f"[FAIL] Internal Header Stripping: client spoofed headers reached upstream: {leaked}")
+            return False
+        if received.get('x-custom-header') != 'keep-me':
+            print(f"[FAIL] Internal Header Stripping: custom header not forwarded: {received.get('x-custom-header')!r}")
+            return False
+        print("[PASS] Internal Header Stripping (x-oproxy-* spoofing blocked)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Internal Header Stripping: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_concurrent_requests(proxy_url, base_url, timeout, verbose, count=20):
+    """Many simultaneous requests must all succeed — smoke test for the
+    connection pool and per-request isolation under load."""
+    url = make_test_url(base_url, '/')
+
+    def one(_):
+        try:
+            r = requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+            return r.status_code == 200 and b'Hello' in r.content
+        except Exception:
+            return False
+
+    try:
+        with futures.ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(one, range(count)))
+        if all(results):
+            print(f"[PASS] Concurrent Requests ({count} parallel)")
+            return True
+        print(f"[FAIL] Concurrent Requests: {results.count(False)}/{count} failed")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Concurrent Requests: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+# ----------------------------------------------------------------------
+# Manipulation-feature cases (drive the admin API, then assert behavior)
+# ----------------------------------------------------------------------
+_sentinel_seq = [0]
+
+def _uniq(prefix):
+    """A process-unique sentinel path. Guarantees H1 and H2 variants of the
+    same test never share a path (which would cross-match each other's rule)."""
+    _sentinel_seq[0] += 1
+    return f'/{prefix}-{int(time.time())}-{_sentinel_seq[0]}'
+
+
+def _gate_get(proxy_url, url, timeout, http2=False, **kwargs):
+    """GET `url` through the proxy over HTTP/1.1 (requests) or HTTP/2 (httpx).
+    Both return objects exposing .status_code / .headers / .text / .content."""
+    if http2:
+        client = httpx.Client(http2=True, proxy=proxy_url, timeout=timeout, verify=False)
+        return client.get(url, **kwargs)
+    return requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout, **kwargs)
+
+
+def test_mock_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
+    """Install a Mock rule via the admin API, verify the proxy short-circuits a
+    matching request with the canned response (never reaching upstream), then
+    clean the rule up. Runs over HTTP/1.1 or HTTP/2 (same middleware pipeline)."""
+    if not proxy_url.startswith('http://'):
+        print(f"[SKIP] {label} Mock Rule: requires HTTP proxy for admin API")
+        return None
+    sentinel = _uniq('mock')
+    rule = {
+        'name': 'release-gate-mock',
+        'enabled': True,
+        # Match by unique path only; host carries a port in the Host header, so
+        # an exact host match is unreliable. The sentinel path keeps this scoped.
+        'location': {'path': sentinel, 'mode': 'glob'},
+        'responses': [{
+            'status': 299,
+            'headers': {'X-Mocked-By': 'oproxy-test'},
+            'body': 'mocked-body',
+            'delay_ms': 0,
+        }],
+    }
+    rule_id = None
+    try:
+        cr = _admin_request(proxy_url, 'POST', '/admin/mock/rules', timeout, json=rule)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] {label} Mock Rule: create returned {cr.status_code} {cr.text[:120]}")
+            return False
+        rule_id = (cr.json() or {}).get('id')
+
+        r = _gate_get(proxy_url, make_test_url(base_url, sentinel), timeout, http2)
+        if r.status_code == 299 and r.text == 'mocked-body' and r.headers.get('X-Mocked-By') == 'oproxy-test':
+            print(f"[PASS] {label} Mock Rule (canned response served)")
+            return True
+        print(f"[FAIL] {label} Mock Rule: status={r.status_code} body={r.text[:80]!r} hdr={r.headers.get('X-Mocked-By')!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] {label} Mock Rule: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if rule_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/mock/rules/{rule_id}', timeout)
+            except Exception:
+                pass
+
+
+def test_access_block(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
+    """Install an access-control Block rule scoped to a unique path, verify the
+    proxy returns 403 for it (and still serves other paths), then clean up.
+    Runs over HTTP/1.1 or HTTP/2."""
+    if not proxy_url.startswith('http://'):
+        print(f"[SKIP] {label} Access Block: requires HTTP proxy for admin API")
+        return None
+    sentinel = _uniq('blocked')
+    rule = {
+        'name': 'release-gate-block',
+        'enabled': True,
+        # Match by unique path only (see test_mock_rule for the host/port note).
+        'location': {'path': sentinel, 'mode': 'glob'},
+        'action': 'block',
+    }
+    rule_id = None
+    try:
+        cr = _admin_request(proxy_url, 'POST', '/admin/access-rules', timeout, json=rule)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] {label} Access Block: create returned {cr.status_code} {cr.text[:120]}")
+            return False
+        rule_id = (cr.json() or {}).get('id')
+
+        blocked = _gate_get(proxy_url, make_test_url(base_url, sentinel), timeout, http2)
+        if blocked.status_code != 403:
+            print(f"[FAIL] {label} Access Block: blocked path returned {blocked.status_code}, expected 403")
+            return False
+
+        allowed = _gate_get(proxy_url, make_test_url(base_url, '/'), timeout, http2)
+        if allowed.status_code != 200:
+            print(f"[FAIL] {label} Access Block: non-blocked path returned {allowed.status_code}")
+            return False
+
+        print(f"[PASS] {label} Access Block (403 on blocked path, 200 otherwise)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] {label} Access Block: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if rule_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/access-rules/{rule_id}', timeout)
+            except Exception:
+                pass
+
+
+def test_rewrite_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
+    """Install a rewrite rule-set that injects a response header on a matching
+    path; verify the client sees the injected header. Then clean up. Runs over
+    HTTP/1.1 or HTTP/2."""
+    if not proxy_url.startswith('http://'):
+        print(f"[SKIP] {label} Rewrite Rule: requires HTTP proxy for admin API")
+        return None
+    sentinel = _uniq('rewrite')
+    rule = {
+        'name': 'release-gate-rewrite',
+        'enabled': True,
+        'location': {'path': sentinel, 'mode': 'glob'},
+        'applies_to': 'response',
+        'actions': [{'type': 'set_header', 'name': 'X-Rewritten', 'value': 'yes'}],
+    }
+    rule_id = None
+    try:
+        cr = _admin_request(proxy_url, 'POST', '/admin/rule-sets', timeout, json=rule)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] {label} Rewrite Rule: create returned {cr.status_code} {cr.text[:120]}")
+            return False
+        rule_id = (cr.json() or {}).get('id')
+        r = _gate_get(proxy_url, make_test_url(base_url, sentinel), timeout, http2)
+        if r.status_code == 200 and r.headers.get('X-Rewritten') == 'yes':
+            print(f"[PASS] {label} Rewrite Rule (response header injected)")
+            return True
+        print(f"[FAIL] {label} Rewrite Rule: status={r.status_code} X-Rewritten={r.headers.get('X-Rewritten')!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] {label} Rewrite Rule: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if rule_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/rule-sets/{rule_id}', timeout)
+            except Exception:
+                pass
+
+
+def test_websocket_mock(proxy_url, ws_base, timeout, verbose):
+    """Install a Mock rule with a WebSocketScript behavior, open a WebSocket via
+    the proxy to a matching path, and confirm the proxy serves the scripted
+    frame instead of proxying to a real server. Then clean up."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] WebSocket Mock: requires HTTP proxy for admin API")
+        return None
+    sentinel = _uniq('wsmock')
+    rule = {
+        'name': 'release-gate-ws-mock',
+        'enabled': True,
+        'location': {'path': sentinel, 'mode': 'glob'},
+        'behavior': {
+            'type': 'web_socket_script',
+            # Small delay so the scripted frame arrives AFTER the 101 handshake
+            # response (otherwise it can coalesce into the same TCP read and be
+            # swallowed by the handshake parser).
+            'frames': [{'opcode': 1, 'payload': 'mocked-ws-frame', 'delay_ms': 300}],
+        },
+    }
+    rule_id = None
+    try:
+        cr = _admin_request(proxy_url, 'POST', '/admin/mock/rules', timeout, json=rule)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] WebSocket Mock: create returned {cr.status_code} {cr.text[:160]}")
+            return False
+        rule_id = (cr.json() or {}).get('id')
+
+        target = f"{ws_base}{sentinel}"
+        with _open_websocket_via_http_proxy(proxy_url, target, timeout) as sock:
+            opcode, payload = _recv_ws_frame(sock, timeout)
+        if opcode == 0x1 and payload == b'mocked-ws-frame':
+            print("[PASS] WebSocket Mock (scripted frame served)")
+            return True
+        print(f"[FAIL] WebSocket Mock: opcode={opcode} payload={payload!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] WebSocket Mock: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if rule_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/mock/rules/{rule_id}', timeout)
+            except Exception:
+                pass
+
+
+def test_throttling(proxy_url, base_url, timeout, verbose):
+    """Enable a latency throttle and confirm a request is measurably delayed,
+    then disable it. Throttling is global, so this always restores the config."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] Throttling: requires HTTP proxy for admin API")
+        return None
+    added_latency_ms = 700
+    try:
+        sr = _admin_request(proxy_url, 'PUT', '/admin/throttling', timeout,
+                            json={'latency_ms': added_latency_ms, 'bandwidth_limit_kbps': 0, 'enabled': True})
+        if sr.status_code not in (200, 201, 204):
+            print(f"[FAIL] Throttling: enable returned {sr.status_code}")
+            return False
+        start = time.time()
+        r = requests.get(make_test_url(base_url, '/'),
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout + 5)
+        elapsed = time.time() - start
+        if r.status_code == 200 and elapsed >= (added_latency_ms / 1000.0) * 0.7:
+            print(f"[PASS] Throttling (latency ~{elapsed*1000:.0f}ms >= {added_latency_ms}ms target)")
+            return True
+        print(f"[FAIL] Throttling: status={r.status_code} elapsed={elapsed*1000:.0f}ms (expected >= {added_latency_ms}ms)")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Throttling: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        try:
+            _admin_request(proxy_url, 'PUT', '/admin/throttling', timeout,
+                           json={'latency_ms': 0, 'bandwidth_limit_kbps': 0, 'enabled': False})
+        except Exception:
+            pass
+
+
+def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
+    """Upload a managed fixture via the admin API, install a Map Local rule that
+    serves it for a matching path, and verify its contents are returned. Using
+    the fixtures API (not a local temp file) avoids any filesystem-visibility gap
+    between this test process and the proxy process."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] Map Local: requires HTTP proxy for admin API")
+        return None
+    sentinel = _uniq('maplocal')
+    fixture_name = f'gate-{int(time.time())}.txt'
+    content = b'map-local-served-content'
+    rule_id = None
+    fixture_uploaded = False
+    try:
+        up = _admin_request(proxy_url, 'POST', f'/admin/map-local-rules/fixtures/{fixture_name}',
+                            timeout, data=content,
+                            headers={'Content-Type': 'application/octet-stream'})
+        if up.status_code not in (200, 201):
+            print(f"[FAIL] Map Local: fixture upload returned {up.status_code} {up.text[:160]}")
+            return False
+        fixture_uploaded = True
+
+        rule = {
+            'name': 'release-gate-maplocal',
+            'enabled': True,
+            'location': {'path': sentinel, 'mode': 'glob'},
+            'file_path': fixture_name,  # relative → resolved from storage/map-local/
+        }
+        cr = _admin_request(proxy_url, 'POST', '/admin/map-local-rules', timeout, json=rule)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] Map Local: rule create returned {cr.status_code} {cr.text[:160]}")
+            return False
+        rule_id = (cr.json() or {}).get('id')
+
+        r = requests.get(f"http://{target_host}:{target_port}{sentinel}",
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code == 200 and r.content == content:
+            print("[PASS] Map Local (managed fixture served)")
+            return True
+        print(f"[FAIL] Map Local: status={r.status_code} body={r.content[:60]!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Map Local: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if rule_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/{rule_id}', timeout)
+            except Exception:
+                pass
+        if fixture_uploaded:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/fixtures/{fixture_name}', timeout)
+            except Exception:
+                pass
+
+
+def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
+    """Override DNS for a sentinel hostname to the fixture's IP, then request
+    that hostname through the proxy and confirm it reaches the fixture."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] DNS Override: requires HTTP proxy for admin API")
+        return None
+    host = f'dnsgate-{int(time.time())}.test'
+    try:
+        sr = _admin_request(proxy_url, 'PUT', f'/admin/dns/{host}', timeout,
+                            json={'ip': target_host, 'enabled': True})
+        if sr.status_code not in (200, 201, 204):
+            print(f"[FAIL] DNS Override: set returned {sr.status_code} {sr.text[:120]}")
+            return False
+        r = requests.get(f"http://{host}:{target_port}/",
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code == 200 and b'Hello' in r.content:
+            print("[PASS] DNS Override (sentinel host routed to fixture)")
+            return True
+        print(f"[FAIL] DNS Override: status={r.status_code} body={r.content[:60]!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] DNS Override: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        try:
+            _admin_request(proxy_url, 'DELETE', f'/admin/dns/{host}', timeout)
+        except Exception:
+            pass
+
+
+def test_capture_filter(proxy_url, base_url, timeout, verbose):
+    """Enable a denylist capture filter for the fixture host and confirm a
+    subsequent request is NOT recorded as a session; then restore recording."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] Capture Filter: requires HTTP proxy for admin API")
+        return None
+    host = urlparse(base_url).hostname
+    sentinel = f'/capfilter-{int(time.time())}'
+    try:
+        sr = _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
+                            json={'mode': 'denylist', 'hosts': [host]})
+        if sr.status_code not in (200, 201, 204):
+            print(f"[FAIL] Capture Filter: set returned {sr.status_code}")
+            return False
+        r = requests.get(make_test_url(base_url, sentinel),
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code != 200:
+            print(f"[FAIL] Capture Filter: request returned {r.status_code}")
+            return False
+        # Give the recorder a moment; the filtered request must NOT appear.
+        time.sleep(1.0)
+        details = _recorded_session_details(proxy_url, timeout)
+        if any(sentinel in ((d.get('request') or {}).get('uri') or '') for d in details):
+            print("[FAIL] Capture Filter: filtered request was recorded anyway")
+            return False
+        print("[PASS] Capture Filter (filtered host not recorded)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Capture Filter: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        try:
+            _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
+                           json={'mode': 'disabled', 'hosts': []})
+        except Exception:
+            pass
+
+
+def test_lua_script(proxy_url, target_host, target_port, timeout, verbose):
+    """Install a Lua script that aborts requests to a sentinel path with a
+    custom status/body; verify the short-circuit, then clean up."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] Lua Script: requires HTTP proxy for admin API")
+        return None
+    sentinel = f'/lua-{int(time.time())}'
+    code = (
+        f'if string.find(request.uri, "{sentinel}", 1, true) then\n'
+        f'  abort(231, "lua-aborted")\n'
+        f'end\n'
+    )
+    script = {'name': 'release-gate-lua', 'code': code, 'enabled': True}
+    script_id = None
+    try:
+        cr = _admin_request(proxy_url, 'POST', '/admin/scripts', timeout, json=script)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] Lua Script: create returned {cr.status_code} {cr.text[:120]}")
+            return False
+        script_id = (cr.json() or {}).get('id')
+        r = requests.get(f"http://{target_host}:{target_port}{sentinel}",
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code == 231 and r.text == 'lua-aborted':
+            print("[PASS] Lua Script (abort short-circuit)")
+            return True
+        print(f"[FAIL] Lua Script: status={r.status_code} body={r.text[:60]!r}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Lua Script: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if script_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/scripts/{script_id}', timeout)
+            except Exception:
+                pass
+
+
+def _b64url(obj):
+    raw = json.dumps(obj, separators=(',', ':')).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+
+
+def test_jwt_inspector(proxy_url, base_url, timeout, verbose):
+    """Send a request with a Bearer JWT and confirm the proxy decodes it into
+    the session's inspector_data (JWT inspector). No verification of signature."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] JWT Inspector: requires HTTP proxy for admin API")
+        return None
+    token = (
+        _b64url({'alg': 'HS256', 'typ': 'JWT'}) + '.'
+        + _b64url({'sub': 'gate', 'name': 'release'}) + '.'
+        + 'c2ln'
+    )
+    sentinel = f'jwt-{int(time.time())}'
+    url = make_test_url(base_url, f'/?sentinel={sentinel}')
+    try:
+        r = requests.get(url, headers={'Authorization': f'Bearer {token}'},
+                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code != 200:
+            print(f"[FAIL] JWT Inspector: request returned {r.status_code}")
+            return False
+
+        def matches(exchange):
+            uri = (exchange.get('request') or {}).get('uri') or ''
+            jwt = (exchange.get('inspector_data') or {}).get('jwt') or {}
+            claims = jwt.get('claims') or {}
+            return sentinel in uri and claims.get('sub') == 'gate'
+
+        _wait_for_recorded_session(proxy_url, matches, timeout, include_bodies=True)
+        print("[PASS] JWT Inspector (claims decoded into inspector_data)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] JWT Inspector: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_graphql_inspector(proxy_url, base_url, timeout, verbose):
+    """POST a GraphQL document and confirm the proxy records the parsed
+    operation in inspector_data (GraphQL inspector)."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] GraphQL Inspector: requires HTTP proxy for admin API")
+        return None
+    sentinel = f'gql-{int(time.time())}'
+    url = make_test_url(base_url, f'/echo?sentinel={sentinel}')
+    # The GraphQL inspector keys on a JSON body containing a "query" field
+    # (GraphQL-over-HTTP), not a raw application/graphql document.
+    body = json.dumps({'query': 'query GateOp { hello }'})
+    try:
+        r = requests.post(url, data=body.encode(),
+                          headers={'Content-Type': 'application/json'},
+                          proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        if r.status_code != 200:
+            print(f"[FAIL] GraphQL Inspector: request returned {r.status_code}")
+            return False
+
+        def matches(exchange):
+            uri = (exchange.get('request') or {}).get('uri') or ''
+            gql = (exchange.get('inspector_data') or {}).get('graphql') or {}
+            return sentinel in uri and gql.get('operation_type') == 'query'
+
+        _wait_for_recorded_session(proxy_url, matches, timeout, include_bodies=True)
+        print("[PASS] GraphQL Inspector (operation parsed into inspector_data)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] GraphQL Inspector: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
+    """Install a request breakpoint, fire a matching request (which pauses),
+    resolve it via the admin API with 'continue', and confirm the request then
+    completes against upstream. Cleans up the rule."""
+    if not proxy_url.startswith('http://'):
+        print("[SKIP] Breakpoint: requires HTTP proxy for admin API")
+        return None
+    sentinel = f'/bp-{int(time.time())}'
+    rule = {
+        'location': {'path': sentinel, 'mode': 'glob'},
+        'bp_type': 'Request',
+        'enabled': True,
+    }
+    rule_id = None
+    result = {}
+
+    def fire():
+        try:
+            r = requests.get(f"http://{target_host}:{target_port}{sentinel}",
+                             proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout + 10)
+            result['status'] = r.status_code
+            result['body'] = r.content
+        except Exception as ex:
+            result['error'] = str(ex)
+
+    try:
+        cr = _admin_request(proxy_url, 'POST', '/admin/breakpoints', timeout, json=rule)
+        if cr.status_code not in (200, 201):
+            print(f"[FAIL] Breakpoint: create returned {cr.status_code} {cr.text[:120]}")
+            return False
+        rule_id = (cr.json() or {}).get('id')
+
+        worker = threading.Thread(target=fire, daemon=True)
+        worker.start()
+
+        # Wait for the request to show up as paused.
+        pending_id = None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pr = _admin_request(proxy_url, 'GET', '/admin/breakpoints/pending', timeout)
+            if pr.status_code == 200:
+                for p in (pr.json() or []):
+                    uri = p.get('uri') or (p.get('request') or {}).get('uri') or ''
+                    if sentinel in uri or len(pr.json()) == 1:
+                        pending_id = p.get('id')
+                        break
+            if pending_id:
+                break
+            time.sleep(0.2)
+
+        if not pending_id:
+            print("[SKIP] Breakpoint: request did not pause (breakpoints may be disabled in this build)")
+            return None
+
+        rr = _admin_request(proxy_url, 'POST',
+                            f'/admin/breakpoints/pending/{pending_id}/resolve', timeout,
+                            json={'action': 'continue'})
+        if rr.status_code not in (200, 204):
+            print(f"[FAIL] Breakpoint: resolve returned {rr.status_code}")
+            return False
+
+        worker.join(timeout + 5)
+        if result.get('status') == 200 and b'Hello' in result.get('body', b''):
+            print("[PASS] Breakpoint (pause + resume continued upstream)")
+            return True
+        print(f"[FAIL] Breakpoint: resumed request result={result}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Breakpoint: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+    finally:
+        if rule_id:
+            try:
+                _admin_request(proxy_url, 'DELETE', f'/admin/breakpoints/{rule_id}', timeout)
+            except Exception:
+                pass
+
+
 # HTTP/3 tests — all skip gracefully when aioquic is absent or H3 is disabled
 def _h3_proxy_parts(h3_proxy_url):
     """Return (host, port) from an h3:// or https:// URL, defaulting port 8443."""
@@ -2015,6 +2885,36 @@ def run_tests():
         http_add("gRPC", test_grpc(http_proxy, target_host, grpc_port, timeout, verbose,
                                    grpc_server_ca_pem=server_manager.grpc_ca_pem,
                                    session_admin_proxy=http_proxy))
+
+        # Robustness / regression / security
+        http_add("HTTP/1.1 Status Passthrough", test_status_passthrough(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/2 Status Passthrough", test_status_passthrough(http_proxy, http2_base_url, timeout, verbose, label='HTTP/2', http2=True))
+        http_add("HTTP/1.1 Multi Set-Cookie", test_multi_set_cookie(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/2 Multi Set-Cookie", test_multi_set_cookie(http_proxy, http2_base_url, timeout, verbose, label='HTTP/2', http2=True))
+        http_add("HTTP/1.1 Methods", test_http1_methods(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/1.1 Large Upload", test_large_request_upload(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/1.1 SSE Streaming", test_sse_streaming(http_proxy, http1_base_url, timeout, verbose))
+        http_add("Internal Header Stripping", test_internal_headers_stripped(http_proxy, http1_base_url, timeout, verbose))
+        http_add("Concurrent Requests", test_concurrent_requests(http_proxy, http1_base_url, timeout, verbose))
+
+        # Manipulation features (admin API → behavior). Mock/Access/Rewrite run
+        # over both HTTP/1.1 and HTTP/2 since they share one middleware pipeline.
+        http_add("HTTP/1.1 Mock Rule", test_mock_rule(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/2 Mock Rule", test_mock_rule(http_proxy, http2_base_url, timeout, verbose, http2=True, label='HTTP/2'))
+        http_add("HTTP/1.1 Access Block", test_access_block(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/2 Access Block", test_access_block(http_proxy, http2_base_url, timeout, verbose, http2=True, label='HTTP/2'))
+        http_add("HTTP/1.1 Rewrite Rule", test_rewrite_rule(http_proxy, http1_base_url, timeout, verbose))
+        http_add("HTTP/2 Rewrite Rule", test_rewrite_rule(http_proxy, http2_base_url, timeout, verbose, http2=True, label='HTTP/2'))
+        http_add("WebSocket Mock", test_websocket_mock(http_proxy, ws_url, timeout, verbose))
+        http_add("Map Local", test_map_local(http_proxy, target_host, http1_port, timeout, verbose))
+        http_add("DNS Override", test_dns_override(http_proxy, target_host, http1_port, timeout, verbose))
+        http_add("Lua Script", test_lua_script(http_proxy, target_host, http1_port, timeout, verbose))
+        http_add("Breakpoint", test_breakpoint(http_proxy, target_host, http1_port, timeout, verbose))
+        http_add("JWT Inspector", test_jwt_inspector(http_proxy, http1_base_url, timeout, verbose))
+        http_add("GraphQL Inspector", test_graphql_inspector(http_proxy, http1_base_url, timeout, verbose))
+        http_add("Capture Filter", test_capture_filter(http_proxy, http1_base_url, timeout, verbose))
+        # Throttling is global, so run it last (it always restores its config).
+        http_add("Throttling", test_throttling(http_proxy, http1_base_url, timeout, verbose))
 
     if socks_proxy:
         print("\n=== Testing SOCKS5 proxy:", socks_proxy)
