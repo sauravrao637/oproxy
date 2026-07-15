@@ -1,0 +1,48 @@
+# QA profile: everything tests/e2e_protocol_test.py and tests/proxy_tester.py
+# exercise from one instance — MITM, SOCKS5, HTTP/3, and admin-token auth.
+#
+# Standalone file — see configs/qa-admin.yaml for why fields are restated here
+# rather than assumed "inherited" from configs/default.yaml.
+#
+# Same port as configs/default.yaml (8080) because tests/e2e_protocol_test.py
+# hardcodes that port. Run this instead of the default instance, not alongside it:
+#
+#   OPROXY_CONFIG=configs/qa-e2e.yaml cargo run
+#   OPROXY_CONFIG=configs/qa-e2e.yaml cargo run --features http3   # to also cover HTTP/3
+#
+# Then, from a second terminal:
+#
+#   python tests/e2e_protocol_test.py --admin-token qa-e2e-token
+#   python tests/proxy_tester.py --http-proxy http://127.0.0.1:8080 \
+#       --socks-proxy socks5://127.0.0.1:1080 --admin-token qa-e2e-token
+
+port: 8080
+
+# Loopback bind means the client, the proxy, and the test target servers are
+# all "127.0.0.1" from the same machine, so the admin-host peer-IP check
+# passes without allow_remote_admin (that flag only matters when the proxy
+# sits behind NAT, e.g. Docker bridge networking - see docs/docker.md).
+bind_host: "127.0.0.1"
+
+storage_path: ./storage-qa-e2e
+
+log:
+  level: info
+  dir: .
+  file: server-qa-e2e.log
+
+mitm:
+  enabled: true
+  root_ca_path: ./certs
+
+# Set so admin_auth_enabled is true and the token-required test paths run
+# instead of skipping (both scripts accept --admin-token to match this).
+admin_token: qa-e2e-token
+
+# tests/e2e_protocol_test.py hardcodes SOCKS5_PORT = 1080.
+socks5_port: 1080
+
+# HTTP/3 listener - only starts if the binary was built with `--features http3`;
+# otherwise these two fields are simply ignored.
+http3_enabled: true
+http3_port: 8443

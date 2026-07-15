@@ -88,6 +88,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        // A refused loopback connection must produce a specific client-facing cause.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.to_ascii_lowercase().contains("refused"),
+            "expected an actionable connect-refused message, got: {body}"
+        );
     }
 
     /// When MapRemoteMiddleware is present with no matching rules,
@@ -173,6 +183,239 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body, Bytes::from_static(b"auth-ok"));
+    }
+
+    /// Chunked upstream responses must be relayed unchanged, recorded with the
+    /// transferred size, and tagged as streamed.
+    #[tokio::test]
+    async fn streamed_chunked_response_is_recorded_with_body_and_tag() {
+        use axum::routing::get;
+        use bytes::Bytes;
+
+        let upstream = Router::new().route(
+            "/stream",
+            get(|| async {
+                let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+                    Ok(Bytes::from_static(b"hello ")),
+                    Ok(Bytes::from_static(b"world")),
+                ];
+                axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let mut chain = MiddlewareChain::new();
+        chain.add_middleware(Arc::new(InspectionMiddleware::new(sessions.clone())));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
+        engine
+            .set_short_circuit_session_manager(sessions.clone())
+            .await;
+
+        let app = Router::new().fallback(move |req| {
+            let engine = engine.clone();
+            async move { engine.handle_request(req).await }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("http://127.0.0.1:{}/stream", addr.port()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            Bytes::from_static(b"hello world"),
+            "client must still receive every byte unmodified"
+        );
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        assert_eq!(recorded.len(), 1, "the streamed exchange must be recorded");
+        let exchange = &recorded[0];
+        let response_ctx = exchange
+            .response
+            .as_ref()
+            .expect("response must be recorded");
+        assert_eq!(
+            response_ctx.body,
+            Bytes::from_static(b"hello world"),
+            "streamed response body must be captured, not left empty"
+        );
+        let metrics = exchange.metrics.as_ref().expect("metrics must be recorded");
+        assert_eq!(
+            metrics.response_size_bytes, 11,
+            "response size must reflect the real transfer size"
+        );
+        assert!(
+            exchange.tags.iter().any(|t| t == "streamed"),
+            "streamed responses must be tagged so the body-mutating-middleware \
+no-op is visible instead of silent"
+        );
+    }
+
+    /// Streaming responses must include the configured `alt-svc` header.
+    #[tokio::test]
+    async fn streamed_response_still_advertises_alt_svc() {
+        use axum::routing::get;
+        use bytes::Bytes;
+
+        let upstream = Router::new().route(
+            "/stream",
+            get(|| async {
+                let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+                    Ok(Bytes::from_static(b"hello ")),
+                    Ok(Bytes::from_static(b"world")),
+                ];
+                axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let mut chain = MiddlewareChain::new();
+        chain.add_middleware(Arc::new(InspectionMiddleware::new(sessions.clone())));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
+        engine
+            .set_short_circuit_session_manager(sessions.clone())
+            .await;
+        engine.set_alt_svc_header("h3=\":8443\"; ma=86400".to_string());
+
+        let app = Router::new().fallback(move |req| {
+            let engine = engine.clone();
+            async move { engine.handle_request(req).await }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("http://127.0.0.1:{}/stream", addr.port()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("alt-svc")
+                .expect("streamed responses must advertise alt-svc once configured"),
+            "h3=\":8443\"; ma=86400",
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            Bytes::from_static(b"hello world"),
+            "client must still receive every byte unmodified"
+        );
+    }
+
+    /// Requests above the capture limit must be forwarded without buffering.
+    #[tokio::test]
+    async fn oversized_upload_is_streamed_through_instead_of_rejected() {
+        use axum::extract::State as AxumState;
+        use axum::routing::post;
+        use bytes::Bytes;
+
+        // Upstream echoes back the exact byte count it received, so the test
+        // can confirm the full (over-the-cap) body actually arrived intact.
+        let received_len = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let upstream_state = received_len.clone();
+        let upstream = Router::new()
+            .route(
+                "/upload",
+                post(
+                    |AxumState(counter): AxumState<Arc<std::sync::atomic::AtomicUsize>>,
+                     body: Bytes| async move {
+                        counter.store(body.len(), std::sync::atomic::Ordering::SeqCst);
+                        "ok"
+                    },
+                ),
+            )
+            .with_state(upstream_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        // Tiny cap so a small test payload can still exceed it deterministically.
+        const CAP: usize = 16;
+        const PAYLOAD_LEN: usize = 64;
+        let payload = vec![b'x'; PAYLOAD_LEN];
+
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            max_body_bytes: CAP,
+            ..Default::default()
+        }));
+
+        let app = Router::new().fallback(move |req| {
+            let engine = engine.clone();
+            async move { engine.handle_request(req).await }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("http://127.0.0.1:{}/upload", addr.port()))
+                    .header("content-length", PAYLOAD_LEN.to_string())
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "oversized upload must be forwarded, not rejected with 413"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body, Bytes::from_static(b"ok"));
+        assert_eq!(
+            received_len.load(std::sync::atomic::Ordering::SeqCst),
+            PAYLOAD_LEN,
+            "upstream must receive the full, unbuffered body intact"
+        );
     }
 
     #[tokio::test]

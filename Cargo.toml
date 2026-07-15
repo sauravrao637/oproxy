@@ -1,11 +1,17 @@
 [package]
 name = "oproxy"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 build = "build.rs"
 license = "MIT"
 description = "Programmable HTTP/HTTPS proxy for inspecting, debugging, and manipulating network traffic"
 repository = "https://github.com/sauravrao637/oproxy"
+
+# `xtask` is deliberately not a default member, so plain `cargo build` /
+# `cargo test` here don't build it — only `cargo xtask ...` or
+# `--workspace` do.
+[workspace]
+members = ["xtask"]
 
 # Lint policy lives here so every contributor gets the same bar locally, not
 # only in CI. `unsafe_code = "warn"` forces a documented `#[allow(unsafe_code)]`
@@ -70,15 +76,15 @@ similar = "3"
 graphql-parser = "0.4"
 prost = "0.14"
 http-body-util = "0.1"
-mlua = { version = "0.11", features = ["lua54", "vendored", "async", "send"] }
+mlua = { version = "0.12.0", features = ["lua54", "vendored", "async", "send"] }
 hmac = "0.13"
 sha2 = "0.11"
 time = "0.3.47"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 quinn        = { version = "0.11", optional = true }
 h3           = { version = "0.0.8", optional = true }
 h3-quinn     = { version = "0.0.10", optional = true }
-webpki-roots = { version = "0.26", optional = true }
+webpki-roots = { version = "1.0.8", optional = true }
 
 
 [profile.dev]

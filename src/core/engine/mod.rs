@@ -10,8 +10,32 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 
-// Responses larger than this are streamed rather than fully buffered.
-const STREAM_THRESHOLD_BYTES: u64 = 512 * 1024; // 512 KB
+/// Default for `Config.stream_threshold_bytes` / `ProxyEngineConfig.stream_threshold_bytes`:
+/// responses larger than this (or chunked, regardless of size) are streamed
+/// rather than fully buffered. Kept as the fallback for tests and the config
+/// default function rather than a hardcoded engine-level constant. Configure it
+/// with `OPROXY_STREAM_THRESHOLD_BYTES`; see
+/// `docs/configuration.md`.
+pub const DEFAULT_STREAM_THRESHOLD_BYTES: u64 = 512 * 1024; // 512 KB
+
+/// Whether `OPROXY_INSECURE_UPSTREAM` is set, disabling upstream TLS
+/// certificate verification (mitmproxy's `--ssl-insecure` equivalent). Off by
+/// default. Exposed as a free function (rather than inlined only in
+/// `build_clients`) so the startup security banner can
+/// report the same value it actually acted on, instead of re-deriving it or
+/// going silent about it.
+pub fn insecure_upstream_enabled() -> bool {
+    std::env::var("OPROXY_INSECURE_UPSTREAM")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn tag_rewritten(response: &mut ResponseContext, request: &RequestContext) {
+    if request.rewritten {
+        response.tags.push("rewrite".to_string());
+    }
+}
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -45,18 +69,23 @@ struct StreamRequest {
     protocol_context: ProtocolContext,
 }
 
-struct RequestMetadata<'a> {
-    uri: &'a str,
-    host: &'a str,
-    method: &'a str,
+// Compose (`control_plane/forward.rs`) reuses
+// execute_request_middleware/prepare_upstream below to resolve DNS
+// override/Map Remote/Map Local/Mock/Access Control the same way real
+// proxy traffic does, instead of sending straight to the literal request
+// URL. These were private (engine-internal) until then.
+pub(crate) struct RequestMetadata<'a> {
+    pub(crate) uri: &'a str,
+    pub(crate) host: &'a str,
+    pub(crate) method: &'a str,
 }
 
-struct PreparedUpstream {
-    url: String,
-    headers: reqwest::header::HeaderMap,
-    method: reqwest::Method,
-    session_id: Option<String>,
-    protocol_context: Option<ProtocolContext>,
+pub(crate) struct PreparedUpstream {
+    pub(crate) url: String,
+    pub(crate) headers: reqwest::header::HeaderMap,
+    pub(crate) method: reqwest::Method,
+    pub(crate) session_id: Option<String>,
+    pub(crate) protocol_context: Option<ProtocolContext>,
 }
 
 /// Derived, owned view of an incoming request's head: method, target, headers,
@@ -94,6 +123,10 @@ pub struct ProxyEngine {
     pub mitm_enabled: bool,
     short_circuit_session_manager: Arc<RwLock<Option<crate::session::SharedSessionManager>>>,
     max_body_bytes: Arc<AtomicUsize>,
+    /// Responses at or below this size (and not chunked/SSE) are buffered;
+    /// larger ones are streamed straight through instead. Not currently
+    /// hot-reloadable (config/env-only), unlike `max_body_bytes`.
+    stream_threshold_bytes: u64,
     /// Retained so hot-reload can rebuild clients with same base settings.
     timeout_secs: u64,
     pool_max_idle_per_host: usize,
@@ -132,6 +165,7 @@ pub struct ProxyEngine {
 ///     bind_host: "127.0.0.1".to_string(),
 ///     timeout_secs: 30,
 ///     max_body_bytes: 10 * 1024 * 1024,
+///     stream_threshold_bytes: 512 * 1024,
 ///     pool_max_idle_per_host: 10,
 ///     pool_idle_timeout_secs: 30,
 ///     upstream_proxy: None,
@@ -146,6 +180,9 @@ pub struct ProxyEngineConfig {
     pub bind_host: String,
     pub timeout_secs: u64,
     pub max_body_bytes: usize,
+    /// Configured streaming threshold; responses above this size are relayed
+    /// without full buffering.
+    pub stream_threshold_bytes: u64,
     pub pool_max_idle_per_host: usize,
     pub pool_idle_timeout_secs: u64,
     pub upstream_proxy: Option<String>,
@@ -164,6 +201,7 @@ impl Default for ProxyEngineConfig {
             bind_host: "127.0.0.1".to_string(),
             timeout_secs: 30,
             max_body_bytes: 10 * 1024 * 1024,
+            stream_threshold_bytes: DEFAULT_STREAM_THRESHOLD_BYTES,
             pool_max_idle_per_host: 10,
             pool_idle_timeout_secs: 30,
             upstream_proxy: None,
@@ -200,9 +238,7 @@ impl ProxyEngine {
         // Off by default; enabled via OPROXY_INSECURE_UPSTREAM=1. Read here (rather
         // than threaded through the constructor) so every existing call site and
         // the hot-reload path pick it up without signature churn.
-        let insecure_upstream = std::env::var("OPROXY_INSECURE_UPSTREAM")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
+        let insecure_upstream = insecure_upstream_enabled();
         if insecure_upstream {
             tracing::warn!(
                 "OPROXY_INSECURE_UPSTREAM is set: upstream TLS certificate verification is DISABLED"
@@ -240,6 +276,7 @@ impl ProxyEngine {
             bind_host,
             timeout_secs,
             max_body_bytes,
+            stream_threshold_bytes,
             pool_max_idle_per_host,
             pool_idle_timeout_secs,
             upstream_proxy,
@@ -258,6 +295,7 @@ impl ProxyEngine {
             mitm_enabled,
             short_circuit_session_manager: Arc::new(RwLock::new(None)),
             max_body_bytes: Arc::new(AtomicUsize::new(max_body_bytes)),
+            stream_threshold_bytes,
             timeout_secs,
             pool_max_idle_per_host,
             pool_idle_timeout_secs,
@@ -302,6 +340,13 @@ impl ProxyEngine {
     /// Hot-updates the max body buffer size without restarting.
     pub fn set_max_body_bytes(&self, v: usize) {
         self.max_body_bytes.store(v, Ordering::Relaxed);
+    }
+
+    /// Returns the response-size threshold above which (or when chunked/SSE,
+    /// regardless of size) a response is streamed rather than buffered.
+    /// See `Config.stream_threshold_bytes`.
+    pub fn stream_threshold_bytes(&self) -> u64 {
+        self.stream_threshold_bytes
     }
 
     /// Sets the `alt-svc` header value advertised on forwarded responses
@@ -360,6 +405,25 @@ impl ProxyEngine {
     }
 
     async fn record_short_circuit_response(&self, res_ctx: &ResponseContext) {
+        self.record_response_with_optional_size(res_ctx, None).await;
+    }
+
+    /// Records a response whose body was streamed straight to the client and
+    /// teed into a capped in-memory buffer as it went (see the streaming
+    /// branch in `handle_request_with_destination`). `res_ctx.body`
+    /// holds that (possibly truncated) retained copy, but `response_size_bytes`
+    /// must reflect the *real* transfer size, not the capped retained length -
+    /// hence the explicit `total_bytes` override.
+    async fn record_streamed_response(&self, res_ctx: ResponseContext, total_bytes: usize) {
+        self.record_response_with_optional_size(&res_ctx, Some(total_bytes))
+            .await;
+    }
+
+    async fn record_response_with_optional_size(
+        &self,
+        res_ctx: &ResponseContext,
+        size_override: Option<usize>,
+    ) {
         let Some(session_id) = res_ctx.session_id.clone() else {
             return;
         };
@@ -375,13 +439,15 @@ impl ProxyEngine {
         }
 
         let latency_ms = (chrono::Utc::now() - session.timestamp).num_milliseconds() as u64;
-        let response_size_bytes = if res_ctx.body.is_empty() {
-            header_value(&res_ctx.headers, "content-length")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0)
-        } else {
-            res_ctx.body.len()
-        };
+        let response_size_bytes = size_override.unwrap_or_else(|| {
+            if res_ctx.body.is_empty() {
+                header_value(&res_ctx.headers, "content-length")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0)
+            } else {
+                res_ctx.body.len()
+            }
+        });
         let metrics = crate::session::InspectionMetrics {
             latency_ms,
             request_size_bytes: session.request.body.len(),
@@ -463,7 +529,7 @@ impl ProxyEngine {
             .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mock error").into_response())
     }
 
-    async fn execute_request_middleware(
+    pub(crate) async fn execute_request_middleware(
         &self,
         request: &mut RequestContext,
         metadata: RequestMetadata<'_>,
@@ -517,7 +583,7 @@ impl ProxyEngine {
         builder
     }
 
-    fn prepare_upstream(
+    pub(crate) fn prepare_upstream(
         &self,
         request: &mut RequestContext,
         uri: &axum::http::Uri,
@@ -570,9 +636,17 @@ impl ProxyEngine {
             source = next.source();
         }
         tracing::error!(error = %source_chain, "Proxy error");
+
+        // Include a specific upstream failure cause because a generic error does
+        // not distinguish DNS, refused connections, timeouts, or (the most
+        // common first-run stumble) an untrusted upstream TLS certificate.
+        // Classify it so both the recorded session and the client response
+        // say what actually went wrong.
+        let cause = classify_forward_error(error, &source_chain);
+        let client_message = format!("Proxy error: {cause}");
         let mut response = ResponseContext {
             status: 502,
-            body: Bytes::from(format!("Proxy error: {error}")),
+            body: Bytes::from(client_message.clone()),
             request_uri: metadata.uri.to_string(),
             session_id,
             ttfb_ms,
@@ -583,7 +657,7 @@ impl ProxyEngine {
         };
         let chain = self.middleware_chain.read().await.clone();
         chain.execute_response(&mut response).await;
-        (StatusCode::BAD_GATEWAY, "Error forwarding request").into_response()
+        (StatusCode::BAD_GATEWAY, client_message).into_response()
     }
 
     async fn append_session_event(&self, session_id: &str, event: crate::session::SessionEvent) {
@@ -756,7 +830,7 @@ impl ProxyEngine {
             req.version(),
             request_scheme(&uri, mitm_destination),
             infer_application_protocol(&req_headers),
-            infer_body_mode(&method, &req_headers),
+            infer_body_mode(&method, &req_headers, self.stream_threshold_bytes()),
         )
         .with_identity(connection_id.clone(), stream_id);
 
@@ -874,9 +948,19 @@ impl ProxyEngine {
                 .await;
         }
 
-        let req_body_bytes =
+        // Forward requests whose declared body exceeds the capture limit without
+        // buffering so large uploads remain transparent. Chunked bodies that
+        // exceed the limit while buffering still return 413.
+        let declared_content_length =
+            header_value(&req_headers, "content-length").and_then(|v| v.trim().parse::<u64>().ok());
+        let request_streamed_unbuffered =
+            declared_content_length.is_some_and(|len| len > self.max_body_bytes() as u64);
+
+        let (req_body_bytes, streamed_request_body) = if request_streamed_unbuffered {
+            (Bytes::new(), Some(req.into_body().into_data_stream()))
+        } else {
             match axum::body::to_bytes(req.into_body(), self.max_body_bytes()).await {
-                Ok(b) => b,
+                Ok(b) => (b, None),
                 Err(_) => {
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
@@ -888,7 +972,8 @@ impl ProxyEngine {
                     )
                         .into_response();
                 }
-            };
+            }
+        };
 
         let mut req_ctx = RequestContext {
             method: req_method.clone(),
@@ -937,10 +1022,14 @@ impl ProxyEngine {
             .request(upstream.method, &upstream.url)
             .headers(upstream.headers);
 
-        // Avoid attaching an empty body to methods like GET if the original request didn't specify one.
-        // reqwest automatically adds `Content-Length: 0` if we call `.body()`, which strict servers reject.
-        if !req_ctx.body.is_empty() || req_ctx.headers.contains_key("content-length") {
-            request_builder = request_builder.body(reqwest::Body::from(req_ctx.body));
+        if let Some(stream) = streamed_request_body {
+            // Relay the oversized request body unbuffered instead of
+            // the (empty, since it was never read) req_ctx.body.
+            request_builder = request_builder.body(reqwest::Body::wrap_stream(stream));
+        } else if !req_ctx.body.is_empty() || req_ctx.headers.contains_key("content-length") {
+            // Avoid attaching an empty body to methods like GET if the original request didn't specify one.
+            // reqwest automatically adds `Content-Length: 0` if we call `.body()`, which strict servers reject.
+            request_builder = request_builder.body(reqwest::Body::from(req_ctx.body.clone()));
         }
 
         let net_start = Instant::now();
@@ -974,7 +1063,7 @@ impl ProxyEngine {
                     .and_then(|v| v.to_str().ok())
                     .map(|v| v.to_ascii_lowercase().contains("chunked"))
                     .unwrap_or(false);
-                let force_stream = content_length > STREAM_THRESHOLD_BYTES || is_chunked;
+                let force_stream = content_length > self.stream_threshold_bytes() || is_chunked;
                 if content_type.contains("text/event-stream") || force_stream {
                     let mut res_ctx = ResponseContext {
                         status,
@@ -986,8 +1075,21 @@ impl ProxyEngine {
                         request_method: req_method.clone(),
                         protocol: Some(upstream_protocol.clone()),
                         protocol_context: req_ctx.protocol_context.clone(),
+                        // The body is not available at this point because
+                        // it's about to be relayed to the client as it streams
+                        // in, below, rather than buffered first. Recording is
+                        // deferred until after it's been teed into a capped
+                        // buffer, so tell InspectionMiddleware to skip its own
+                        // (would-be-empty-body) record here.
+                        response_body_observer_pending: true,
                         ..Default::default()
                     };
+                    // Response-mutating middleware (rewrite/mock/Lua
+                    // replace_body) cannot act on a body it can't see yet, so
+                    // it silently has no effect on streamed responses. Tag the
+                    // session so that's visible instead of a silent no-op.
+                    res_ctx.tags.push("streamed".to_string());
+                    tag_rewritten(&mut res_ctx, &req_ctx);
                     {
                         let chain = self.middleware_chain.read().await.clone();
                         let action = chain.execute_response(&mut res_ctx).await;
@@ -1002,11 +1104,42 @@ impl ProxyEngine {
                     for (name, value) in &res_ctx.headers {
                         builder = builder.header(name, value);
                     }
+                    // This branch builds its own response directly rather than
+                    // via `response_builder()` (which every other response path
+                    // uses), so it was the one place that never advertised the
+                    // HTTP/3 listener - chunked/SSE responses never carried
+                    // `alt-svc`, meaning clients could never discover HTTP/3
+                    // for exactly the traffic most likely to be a long-lived
+                    // connection worth upgrading. Match `response_builder()`'s
+                    // behavior here too.
+                    if let Some(alt_svc) = self.alt_svc_header.get() {
+                        builder = builder.header("alt-svc", alt_svc);
+                    }
+
+                    // Tee the streamed body into a capped buffer while relaying
+                    // every byte to the client unmodified; only what's
+                    // *retained* for the session record is capped, not what
+                    // the client receives.
+                    let max_retained = self.max_body_bytes();
+                    let engine = self.clone();
+                    let body_start = Instant::now();
                     let stream_body = axum::body::Body::from_stream(async_stream::stream! {
+                        let mut res_ctx = res_ctx;
                         let mut r = res;
+                        let mut retained: Vec<u8> = Vec::new();
+                        let mut total_bytes: usize = 0;
                         while let Ok(Some(chunk)) = r.chunk().await {
+                            total_bytes += chunk.len();
+                            if retained.len() < max_retained {
+                                let remaining = max_retained - retained.len();
+                                let take = remaining.min(chunk.len());
+                                retained.extend_from_slice(&chunk[..take]);
+                            }
                             yield Ok::<_, reqwest::Error>(chunk);
                         }
+                        res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
+                        res_ctx.body = Bytes::from(retained);
+                        engine.record_streamed_response(res_ctx, total_bytes).await;
                     });
                     return builder
                         .body(stream_body)
@@ -1037,6 +1170,14 @@ impl ProxyEngine {
                     protocol_context: req_ctx.protocol_context.clone(),
                     ..Default::default()
                 };
+                if request_streamed_unbuffered {
+                    // The request body was relayed unbuffered because
+                    // it exceeded max_body_bytes, so request-side body-mutating
+                    // middleware couldn't see it either. Tag the session so
+                    // that's visible, same as the response-streaming case.
+                    res_ctx.tags.push("streamed".to_string());
+                }
+                tag_rewritten(&mut res_ctx, &req_ctx);
 
                 debug!("Executing response middleware chain");
                 if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
@@ -1226,6 +1367,7 @@ impl ProxyEngine {
                     response_body_observer_pending: true,
                     ..Default::default()
                 };
+                tag_rewritten(&mut res_ctx, &req_ctx);
 
                 if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
                     return response;
@@ -1289,6 +1431,8 @@ impl ProxyEngine {
                     )
                         .into_response();
                 }
+
+                res_ctx.tags.push("streamed".to_string());
 
                 // Observers stay inside the shared Arc for the rest of the
                 // exchange: for bidirectional streams (gRPC bidi) the response
@@ -1369,13 +1513,149 @@ impl ProxyEngine {
     }
 }
 
+/// Classify a failed upstream request into a short, actionable cause
+/// for client-facing errors. `reqwest` and rustls
+/// don't expose a single stable typed cause across DNS/connect/TLS failures,
+/// so this is a best-effort match on well-known substrings in the error's
+/// `Display` and its `source()` chain (already flattened into
+/// `source_chain` by the caller) - falling back to the raw error text when
+/// nothing recognisable matches.
+fn classify_forward_error(error: &reqwest::Error, source_chain: &str) -> String {
+    if error.is_timeout() {
+        return "the upstream connection timed out".to_string();
+    }
+    let haystack = source_chain.to_ascii_lowercase();
+    if haystack.contains("certificate")
+        || haystack.contains("unknownissuer")
+        || haystack.contains("invalid peer certificate")
+        || haystack.contains("invalidcertificate")
+    {
+        return "TLS certificate verification failed for the upstream server \
+                (it may be using a self-signed or otherwise untrusted \
+                certificate). If this is expected, e.g. a dev/staging \
+                upstream, set OPROXY_INSECURE_UPSTREAM=1 - see \
+                docs/configuration.md for the tradeoffs."
+            .to_string();
+    }
+    if haystack.contains("dns error")
+        || haystack.contains("failed to lookup address")
+        || haystack.contains("nodename nor servname")
+        || haystack.contains("name or service not known")
+        || haystack.contains("no such host")
+    {
+        return "DNS resolution failed for the upstream host".to_string();
+    }
+    // "actively refused" covers Windows' WSAECONNREFUSED wording ("...the
+    // target machine actively refused it"), which doesn't contain the
+    // literal phrase "connection refused" the way Linux/macOS errors do.
+    if haystack.contains("connection refused") || haystack.contains("actively refused") {
+        return "the upstream server refused the connection (nothing appears \
+                to be listening on that host/port)"
+            .to_string();
+    }
+    if haystack.contains("connection reset") {
+        return "the upstream server reset the connection".to_string();
+    }
+    if haystack.contains("no route to host") || haystack.contains("network is unreachable") {
+        return "the upstream host is unreachable".to_string();
+    }
+    if error.is_connect() {
+        return format!("failed to connect to the upstream server: {error}");
+    }
+    format!("{error}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decoded_response_body, display_request_uri};
+    use super::{classify_forward_error, decoded_response_body, display_request_uri};
     use axum::http::Uri;
     use bytes::Bytes;
     use flate2::{Compression, write::ZlibEncoder};
     use std::io::Write as _;
+
+    // ── Upstream error classification ───────────────────────────────────────
+    //
+    // `classify_forward_error` only calls `error.is_timeout()`/`is_connect()`
+    // before falling through to substring matching on the (separately
+    // constructed) `source_chain` string, so any real, non-timeout
+    // `reqwest::Error` is enough to drive every branch below - what matters
+    // for these tests is the crafted `source_chain` text, not how the error
+    // itself was produced. A connect-refused-on-loopback request is a cheap,
+    // deterministic way to get a real `reqwest::Error` without any network
+    // dependency (nothing external is contacted).
+    async fn any_real_forward_error() -> reqwest::Error {
+        reqwest::Client::new()
+            .get("http://127.0.0.1:1/unreachable")
+            .send()
+            .await
+            .expect_err("port 1 should refuse the connection")
+    }
+
+    #[tokio::test]
+    async fn classify_forward_error_recognises_tls_certificate_failures() {
+        let error = any_real_forward_error().await;
+        let msg = classify_forward_error(&error, "invalid peer certificate: UnknownIssuer");
+        assert!(msg.contains("TLS certificate verification failed"), "{msg}");
+        assert!(
+            msg.contains("OPROXY_INSECURE_UPSTREAM"),
+            "must point at the escape hatch: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_forward_error_recognises_dns_failures() {
+        let error = any_real_forward_error().await;
+        let msg = classify_forward_error(
+            &error,
+            "dns error: failed to lookup address information: Name or service not known",
+        );
+        assert!(msg.contains("DNS resolution failed"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn classify_forward_error_recognises_connection_refused_both_platforms() {
+        let error = any_real_forward_error().await;
+        for text in [
+            "Connection refused (os error 111)",
+            "No connection could be made because the target machine actively refused it. (os error 10061)",
+        ] {
+            let msg = classify_forward_error(&error, text);
+            assert!(msg.contains("refused the connection"), "{text} -> {msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_forward_error_recognises_connection_reset_and_unreachable() {
+        let error = any_real_forward_error().await;
+        assert!(
+            classify_forward_error(&error, "Connection reset by peer (os error 104)")
+                .contains("reset the connection")
+        );
+        assert!(
+            classify_forward_error(&error, "No route to host (os error 113)")
+                .contains("unreachable")
+        );
+        assert!(
+            classify_forward_error(&error, "Network is unreachable (os error 101)")
+                .contains("unreachable")
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_forward_error_falls_back_for_connect_errors() {
+        let error = any_real_forward_error().await;
+        assert!(
+            error.is_connect(),
+            "test setup: connecting to port 1 should produce a connect-class error"
+        );
+        let msg = classify_forward_error(&error, "some totally unrecognised diagnostic text");
+        assert_eq!(
+            msg,
+            format!("failed to connect to the upstream server: {error}"),
+            "an unrecognised connect-class cause must still say *something* \
+             actionable, not swallow it"
+        );
+    }
 
     #[test]
     fn display_request_uri_uses_mitm_destination_for_origin_form_requests() {

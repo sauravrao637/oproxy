@@ -382,9 +382,25 @@ fn is_management_host(
     let host_port = authority_port(host_header);
 
     if matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") {
-        // For localhost, check both that the peer is loopback AND that the port matches the proxy port
-        // (to distinguish between forward-proxy requests to 127.0.0.1:OTHER_PORT vs the proxy itself at 127.0.0.1:PROXY_PORT)
-        return peer_ip.is_some_and(|ip| ip.is_loopback()) && host_port.unwrap_or(80) == proxy_port;
+        if host_port.unwrap_or(80) != proxy_port {
+            return false;
+        }
+        if peer_ip.is_some_and(|ip| ip.is_loopback()) {
+            return true;
+        }
+        // Under Docker (bridge networking + published port, the common case on
+        // Docker Desktop), the container never observes a genuinely loopback
+        // peer for this request even when the browser really is on the same
+        // host - the port-publishing NAT rewrites the source address. There is
+        // no signal left at this layer to tell that apart from a remote LAN
+        // client spoofing a "Host: 127.0.0.1" header. Rather than a
+        // new dedicated flag, fall back to the same opt-in trust model already
+        // used for the LAN bind_host branch below: both allow_remote_admin and
+        // a configured admin_token are required, and the token is still
+        // checked for anything beyond the small public-path allowlist, so
+        // this doesn't grant more than what an attacker could already reach
+        // via the correct LAN hostname/IP once that combination is enabled.
+        return allow_remote_admin && remote_admin_token_configured;
     }
 
     if !allow_remote_admin || !remote_admin_token_configured {
@@ -516,12 +532,39 @@ mod tests {
             "loopback peer with Host: 0.0.0.0 should reach admin UI"
         );
         assert!(
-            !is_management_host("0.0.0.0:8080", "0.0.0.0", true, true, remote, proxy_port),
-            "remote clients must not reach admin by sending Host: 0.0.0.0"
+            !is_management_host("0.0.0.0:8080", "0.0.0.0", false, false, remote, proxy_port),
+            "remote clients must not reach admin by sending Host: 0.0.0.0 when remote admin is not opted into"
         );
         assert!(
-            !is_management_host("localhost:8080", "0.0.0.0", true, true, remote, proxy_port),
-            "remote clients must not reach admin by spoofing a localhost Host header"
+            !is_management_host(
+                "localhost:8080",
+                "0.0.0.0",
+                false,
+                false,
+                remote,
+                proxy_port
+            ),
+            "remote clients must not reach admin by spoofing a localhost Host header when remote admin is not opted into"
+        );
+        // Under Docker port publishing, a host-local browser request
+        // is indistinguishable at this layer from a non-loopback peer, so once an
+        // operator has explicitly opted into allow_remote_admin + a token (the same
+        // combination already required for the LAN-bind_host branch below), a
+        // loopback-family Host header must be accepted rather than permanently
+        // 502ing the Web UI in bridge-networked containers. Anything sensitive
+        // still requires the token via admin_auth_layer.
+        assert!(
+            is_management_host("127.0.0.1:8080", "0.0.0.0", true, true, remote, proxy_port),
+            "loopback-family Host header must be trusted once remote admin + token are opted \
+             into, so Docker Desktop bridge-networked deployments can reach the Web UI"
+        );
+        assert!(
+            !is_management_host("127.0.0.1:8080", "0.0.0.0", true, false, remote, proxy_port),
+            "opting into allow_remote_admin without a token must not unlock the loopback fallback"
+        );
+        assert!(
+            !is_management_host("127.0.0.1:9999", "0.0.0.0", true, true, remote, proxy_port),
+            "the loopback fallback still requires the port to match the proxy's own port"
         );
         // Forward-proxy request to localhost on different port should not be admin
         assert!(

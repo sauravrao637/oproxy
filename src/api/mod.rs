@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFileRequest {
+    #[serde(default = "default_session_filename")]
     pub path: String,
 }
 
@@ -230,6 +231,10 @@ impl ApiHandler {
     }
 }
 
+fn default_session_filename() -> String {
+    "sessions.json".to_string()
+}
+
 fn matches_since(session: &Exchange, since: Option<chrono::DateTime<chrono::Utc>>) -> bool {
     match since {
         Some(since_dt) => {
@@ -444,6 +449,19 @@ mod tests {
     use crate::middleware::{RequestContext, ResponseContext};
     use crate::session::SessionManager;
     use std::sync::Arc;
+
+    #[test]
+    fn session_file_request_defaults_path_when_omitted() {
+        let req: SessionFileRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(req.path, "sessions.json");
+    }
+
+    #[test]
+    fn session_file_request_uses_provided_path() {
+        let req: SessionFileRequest =
+            serde_json::from_value(serde_json::json!({ "path": "custom.json" })).unwrap();
+        assert_eq!(req.path, "custom.json");
+    }
 
     fn make_handler() -> ApiHandler {
         let sm = Arc::new(SessionManager::new(10_000));

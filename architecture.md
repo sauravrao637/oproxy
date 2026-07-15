@@ -98,19 +98,18 @@ ProxyEngine::handle_request()
   ├─ 1. Buffer request body (up to max_body_bytes)
   ├─ 2. Build RequestContext {method, uri, headers, body, host}
   ├─ 3. Run Request Middleware Chain ──────────────────────────────────────────┐
-  │       RoutingMiddleware        sets x-proxy-destination header             │
+  │       RoutingMiddleware        sets RequestContext.destination             │
   │       ThrottlingMiddleware     injects artificial latency                  │
   │       RewriteMiddleware        regex rewrite on headers/body               │
   │       BreakpointMiddleware     may Pause (blocks until UI resolves)        │
-  │       InspectionMiddleware     opens session entry, injects session ID     │
+  │       InspectionMiddleware     opens session entry, sets session_id        │
   │       ModificationMiddleware   static header mutations                     │
   │                                                                            │
   │  MiddlewareAction::StopAndReturn → 403                                     │
   │  MiddlewareAction::Pause         → 202 (client waits)                      │
   │  MiddlewareAction::Continue      → forward ──────────────────────────────┘ │
   │                                                                            │
-  ├─ 4. Strip internal headers (x-proxy-destination, x-oproxy-session-id,     │
-  │       accept-encoding)                                                     │
+  ├─ 4. Strip client-supplied internal headers and accept-encoding             │
   ├─ 5. Resolve target URL (route table or Host header passthrough)            │
   ├─ 6. Forward via reqwest (timeout from config, separate no-timeout client   │
   │       for SSE/event-stream responses)                                      │
@@ -169,12 +168,21 @@ Runtime state is persisted to JSON files in `storage_path` (default `./storage/`
 
 | File | Content |
 |---|---|
-| `routes.json` | Routing table `{ "host": "destination" }` |
-| `throttle.json` | ThrottlingConfig (enabled, latency_ms, per-host overrides) |
-| `rewrites.json` | Array of RewriteRule |
-| `breakpoints.json` | Array of BreakpointRule |
+| `rule_sets.json` | Rewrite rule sets |
+| `map_remote_rules.json` | Remote mapping rules |
+| `map_local_rules.json` | Local file mapping rules |
+| `access_rules.json` | Access-control rules |
+| `throttle.json` | Throttling configuration |
+| `dns_overrides.json` | DNS overrides |
+| `breakpoints.json` | Breakpoint rules |
+| `capture_filter.json` | Capture-filter configuration |
+| `upstream_proxy.json` | Upstream proxy configuration |
+| `hot_config.json` | Runtime configuration overrides |
+| `lua_scripts.json` | Lua scripts |
+| `mock_rules.json` | Mock response rules |
+| `webhooks.json` | Webhook configuration |
 
-All files are written synchronously on mutation. The session log is in-memory only and is lost on restart.
+Save operations use asynchronous same-directory temporary writes followed by rename. The session log remains in memory unless it is explicitly saved.
 
 ---
 
@@ -204,11 +212,11 @@ CONNECT handling requires access to the raw TCP socket via `hyper::upgrade::on`.
 **CA always initialised regardless of `mitm_enabled`**
 `mitm_enabled` controls only whether CONNECT requests are intercepted. The CA is always started so `GET /admin/ca` works for certificate download even when MITM is off. Users can trust the cert in advance and flip the flag later without restarting.
 
-**Session ID header for response correlation**
-`InspectionMiddleware::on_request` injects `x-oproxy-session-id` into the request headers. The engine reads this value before forwarding and strips it from the upstream request. `on_response` uses the session ID for exact session lookup, avoiding correlation bugs under concurrent requests to the same URI.
+**Session ID correlation**
+`InspectionMiddleware::on_request` assigns `RequestContext.session_id`. The engine passes this in-memory value to the response context so `on_response` can update the exact session under concurrent same-URI traffic.
 
 **Binary body forwarding**
-The middleware chain operates on a lossy UTF-8 string copy of the body. The engine keeps the original bytes separately. At forwarding time it compares the string copy against the original; if no middleware modified it, the original bytes are forwarded intact, preventing corruption of images, protobuf, zip, etc.
+`RequestContext.body` stores the original bytes. Text-oriented middleware uses `body_text` and `set_body_text`, which read and update the same byte buffer. Unmodified binary bodies therefore remain intact.
 
 ---
 

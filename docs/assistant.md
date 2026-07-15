@@ -72,6 +72,6 @@ This keeps product knowledge maintainable: new oproxy features should add or upd
 
 ## Limitations
 
-- V1 targets OpenAI-compatible chat/tool-calling APIs.
+- The assistant currently supports OpenAI-compatible chat and tool-calling APIs.
 - Server-side key vault and fully automatic mutation are not included.
 - If a provider does not support tool calls, the assistant can still answer plain chat but cannot reliably inspect or propose oproxy actions.

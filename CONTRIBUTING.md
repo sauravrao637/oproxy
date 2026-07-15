@@ -52,14 +52,17 @@ For questions, support, or general discussion, use [GitHub Discussions](https://
 2. **Install git hooks** (recommended):
    ```bash
    make setup
+   # equivalent to: cargo xtask setup
    ```
-   This installs a pre-commit hook that runs `cargo fmt --all -- --check`.
+   This checks for required tooling (Node, Python, bash, yarn) and installs
+   a pre-commit hook that runs `cargo fmt --all -- --check`. On Windows,
+   `cargo xtask setup` works from a plain cmd.exe/PowerShell — no Git
+   Bash/WSL required.
 
 3. **Build the UI:**
    ```bash
-   corepack enable
-   yarn --cwd src/design install --frozen-lockfile
-   yarn --cwd src/design build
+   make ui
+   # equivalent to: cargo xtask build-ui
    ```
 
 4. **Build and run:**
@@ -102,7 +105,31 @@ make build-release
 
 # Build UI only
 make ui
+
+# Verify src/design/dist has no dev-only/CDN leakage (also runs in CI before release)
+make check-dist
 ```
+
+### Repo automation (`cargo xtask`)
+
+Tasks that need real logic rather than a one-line shell command live in the
+`xtask` crate (`xtask/src/main.rs`) instead of the Makefile, so local dev and
+CI run the exact same Rust code:
+
+```bash
+cargo xtask setup                         # same as `make setup` — works without bash on Windows
+cargo xtask build-ui                      # same as `make ui`
+cargo xtask check-dist                    # same as `make check-dist`
+cargo xtask verify-release-version <tag>  # what CI checks before publishing a release
+```
+
+`xtask` is a workspace member but not a default one — it only builds when
+you run `cargo xtask ...` explicitly, so it has no effect on `cargo build`
+or `cargo test`. The `make` targets above are thin wrappers around it; use
+whichever you're more comfortable with. If you're adding new automation
+that involves more than a couple of lines of shell (parsing files, walking
+directories, anything you'd want a unit test for), prefer adding a
+subcommand to `xtask` over growing the Makefile.
 
 ### Formatting
 

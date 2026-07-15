@@ -102,6 +102,8 @@ impl ProxySocks5Service {
                 tracing::debug!(error=%e, "SOCKS5 success reply failed");
                 return;
             }
+            // SOCKS5 does not provide the full `TransportContext`, so MITM'd
+            // WebSocket upgrades on this path still use buffered forwarding.
             mitm_intercept(
                 stream,
                 target.host.clone(),
@@ -109,6 +111,7 @@ impl ProxySocks5Service {
                 self.engine.clone(),
                 ca,
                 self.handshake_timeout,
+                None,
             )
             .await;
         }

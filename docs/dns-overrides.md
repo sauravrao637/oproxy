@@ -12,6 +12,23 @@ For HTTP proxy traffic, oproxy:
 
 For CONNECT and SOCKS5, overrides are also checked before dialing the target.
 
+## API
+
+- `GET /admin/dns` — returns the current overrides as
+  `{"<host>": "<ip>"}` for enabled entries, or
+  `{"<host>": {"ip": "<ip>", "enabled": false}}` for disabled ones.
+- `POST /admin/dns` — accepts either of two body shapes:
+  - A single entry: `{"host": "<host>", "ip": "<ip>", "enabled": true}`
+    (`enabled` optional, defaults to `true`). Applied *additively* — only
+    that host's entry is added/updated, the rest of the table is untouched.
+  - A whole-map replace: `{"<host>": {"ip": "<ip>", "enabled": true}, ...}`
+    (or the legacy plain-string form `{"<host>": "<ip>"}`). This **replaces
+    the entire table** with exactly what's provided.
+- `PUT /admin/dns/{host}` — upserts a single entry for `{host}` from body
+  `{"ip": "<ip>", "enabled": true}` (`enabled` optional, defaults to `true`).
+  Additive, like the single-entry `POST` shape above.
+- `DELETE /admin/dns/{host}` — removes the override for `{host}`.
+
 ## Caveats
 
 - Matching is exact on the hostname key, not wildcard or substring.

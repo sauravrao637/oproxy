@@ -797,6 +797,8 @@ function MapLocalPathField({ value, onChange, onInline, inlineBody, hint, placeh
 function SimpleRuleModal({ title, rule, extraFields, onClose, onSave }) {
   const isNew = !rule;
   const [name, setName] = React.useState(rule?.name || '');
+  // Show the required marker immediately and validate after blur or save.
+  const [nameTouched, setNameTouched] = React.useState(false);
   const [enabled, setEnabled] = React.useState(rule ? rule.enabled : true);
   const [loc, setLoc] = React.useState(rule?.location ? { ...EMPTY_LOCATION, ...rule.location } : { ...EMPTY_LOCATION });
   const [extra, setExtra] = React.useState(() => {
@@ -805,9 +807,10 @@ function SimpleRuleModal({ title, rule, extraFields, onClose, onSave }) {
     return init;
   });
   const setE = (k, v) => setExtra(p => ({ ...p, [k]: v }));
+  const nameMissing = nameTouched && !name.trim();
 
   const save = async () => {
-    if (!name.trim()) { notifyError('Name is required'); return; }
+    if (!name.trim()) { setNameTouched(true); notifyError('Name is required'); return; }
     try {
       await onSave({ name: name.trim(), enabled, location: loc, ...extra });
     } catch (e) { notifyError(e.message || e); }
@@ -816,13 +819,21 @@ function SimpleRuleModal({ title, rule, extraFields, onClose, onSave }) {
   return (
     <Modal title={title} onClose={onClose} onSave={save}>
       {/* Name + Enabled on one row */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10 }}>
-        <input className="cmp-input" style={{ flex: 1 }} value={name} onChange={e => setName(e.target.value)} placeholder="Name" autoFocus />
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: nameMissing ? 4 : 10 }}>
+        <input className={'cmp-input' + (nameMissing ? ' invalid' : '')} style={{ flex: 1 }} value={name}
+               onChange={e => setName(e.target.value)}
+               onBlur={() => setNameTouched(true)}
+               placeholder="Name *" aria-required="true" autoFocus />
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', flexShrink: 0 }}>
           <Toggle on={enabled} onChange={setEnabled} label="Enabled" />
           Enabled
         </label>
       </div>
+      {nameMissing && (
+        <div style={{ fontSize: 11, color: 'var(--c-5xx)', marginTop: -6, marginBottom: 10 }}>
+          Name is required
+        </div>
+      )}
       <LocationEditor loc={loc} onChange={setLoc} />
       {(extraFields || []).map(f => (
         <div key={f.key} style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '5px 10px', alignItems: f.type === 'file' ? 'start' : 'center' }}>

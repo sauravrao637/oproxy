@@ -63,6 +63,7 @@ pub(super) fn infer_application_protocol(
 pub(super) fn infer_body_mode(
     method: &axum::http::Method,
     headers: &crate::middleware::HeaderMap,
+    stream_threshold_bytes: u64,
 ) -> BodyMode {
     if header_value(headers, "upgrade")
         .map(|v| v.eq_ignore_ascii_case("websocket"))
@@ -86,7 +87,7 @@ pub(super) fn infer_body_mode(
         .unwrap_or(false);
     let large = header_value(headers, "content-length")
         .and_then(|v| v.parse::<u64>().ok())
-        .map(|len| len > super::STREAM_THRESHOLD_BYTES)
+        .map(|len| len > stream_threshold_bytes)
         .unwrap_or(false);
     if chunked || large {
         BodyMode::StreamBytes
@@ -219,4 +220,55 @@ pub(super) fn upstream_headers(
         }
     }
     upstream
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with_content_length(len: u64) -> crate::middleware::HeaderMap {
+        let mut headers = crate::middleware::HeaderMap::new();
+        headers.insert("content-length".to_string(), len.to_string());
+        headers
+    }
+
+    /// The streaming threshold used by `infer_body_mode` must
+    /// track the caller-supplied (i.e. configured) `stream_threshold_bytes`,
+    /// not a hardcoded constant - otherwise raising `stream_threshold_bytes`
+    /// in config wouldn't actually change this protocol-inference decision.
+    #[test]
+    fn infer_body_mode_respects_configured_threshold() {
+        let headers = headers_with_content_length(2000);
+
+        // Below a large configured threshold: full body, not streamed.
+        assert_eq!(
+            infer_body_mode(&axum::http::Method::POST, &headers, 10_000),
+            BodyMode::Full
+        );
+        // Above a small configured threshold: streamed.
+        assert_eq!(
+            infer_body_mode(&axum::http::Method::POST, &headers, 1_000),
+            BodyMode::StreamBytes
+        );
+    }
+
+    #[test]
+    fn infer_body_mode_chunked_streams_regardless_of_threshold() {
+        let mut headers = crate::middleware::HeaderMap::new();
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        assert_eq!(
+            infer_body_mode(&axum::http::Method::POST, &headers, u64::MAX),
+            BodyMode::StreamBytes,
+            "chunked requests must stream even with an enormous threshold"
+        );
+    }
+
+    #[test]
+    fn infer_body_mode_bodyless_get_is_empty() {
+        let headers = crate::middleware::HeaderMap::new();
+        assert_eq!(
+            infer_body_mode(&axum::http::Method::GET, &headers, 512 * 1024),
+            BodyMode::Empty
+        );
+    }
 }

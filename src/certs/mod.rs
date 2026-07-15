@@ -1,19 +1,46 @@
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, Issuer,
-    KeyPair,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use time::{Duration, OffsetDateTime};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
+// `warn!` is used only by the Unix permission-hardening path. Gate the import
+// so non-Unix builds remain clean under `-D warnings`.
+#[cfg(unix)]
+use tracing::warn;
 
 type CertCache = Arc<RwLock<HashMap<String, (Vec<u8>, Vec<u8>)>>>;
 type CertResult<T> = Result<T, Box<dyn std::error::Error>>;
-type RootMaterial = (CertificateParams, Certificate, KeyPair);
+// The root cert is kept as its PEM text (not a live `rcgen::Certificate`)
+// because it must be served byte-for-byte identical to what's on disk in
+// `root.crt` across restarts - see the note on `load_root_ca`.
+type RootMaterial = (CertificateParams, String, KeyPair);
 const MAX_CERT_CACHE_ENTRIES: usize = 1024;
+
+// rcgen's own defaults (notBefore 1975-01-01, notAfter 4096-01-01, a ~121-year
+// window) are far outside what modern platforms accept and can trigger
+// outright rejection or warnings. Apple platforms (iOS 13+/macOS
+// 10.15+) reject *leaf* certificates whose validity exceeds 825 days, and
+// Chrome enforces a 398-day cap for publicly-trusted leafs; tools like
+// mitmproxy/Charles issue short-lived (~1 year) leaves for the same reason.
+// A small backdated `not_before` absorbs clock skew between the CA/client.
+const VALIDITY_CLOCK_SKEW_BUFFER: Duration = Duration::days(1);
+const ROOT_CA_VALIDITY_DAYS: i64 = 20 * 365;
+const LEAF_CERT_VALIDITY_DAYS: i64 = 397; // stay under the 398-day cap
+
+/// A `(not_before, not_after)` window starting just before now, sized to
+/// `validity_days`, so it's honored consistently by both the root CA and
+/// leaf certificates.
+fn validity_window(validity_days: i64) -> (OffsetDateTime, OffsetDateTime) {
+    let not_before = OffsetDateTime::now_utc() - VALIDITY_CLOCK_SKEW_BUFFER;
+    let not_after = not_before + Duration::days(validity_days);
+    (not_before, not_after)
+}
 
 struct RootPaths {
     directory: PathBuf,
@@ -37,7 +64,7 @@ impl RootPaths {
 
 pub struct CertificateAuthority {
     root_params: CertificateParams,
-    root_cert: Certificate,
+    root_cert_pem: String,
     root_key: KeyPair,
     cert_cache: CertCache,
 }
@@ -46,11 +73,11 @@ impl CertificateAuthority {
     pub async fn new(storage_path: &Path) -> CertResult<Self> {
         debug!(path = ?storage_path, "Initializing CA");
         let paths = RootPaths::new(storage_path);
-        let (root_params, root_cert, root_key) = Self::load_or_generate_root(&paths)?;
+        let (root_params, root_cert_pem, root_key) = Self::load_or_generate_root(&paths)?;
 
         Ok(Self {
             root_params,
-            root_cert,
+            root_cert_pem,
             root_key,
             cert_cache: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -74,8 +101,21 @@ impl CertificateAuthority {
         harden_private_key_permissions(&paths.key);
         let key_pair = KeyPair::from_pem(&fs::read_to_string(&paths.key)?)?;
         let params = Self::root_params();
-        let cert = params.self_signed(&key_pair)?;
-        Ok((params, cert, key_pair))
+
+        // Serve the persisted root.crt bytes verbatim instead of rebuilding a
+        // fresh self-signed certificate from the key + params. rcgen assigns
+        // a new random serial number (and fresh validity bounds) on every
+        // self_signed() call, so reconstructing the cert here produced a
+        // different fingerprint on every restart even though the signing key
+        // was stable - contradicting the documented "trust root.crt once, it
+        // never rotates" guarantee and breaking clients that pin by
+        // certificate thumbprint. `params` is still rebuilt below
+        // because it (together with `root_key`) is what `Issuer::from_params`
+        // needs to sign fresh leaf certificates - it doesn't need to
+        // byte-match the persisted cert, only to describe the same issuer DN.
+        let cert_pem = fs::read_to_string(&paths.cert)?;
+
+        Ok((params, cert_pem, key_pair))
     }
 
     fn root_params() -> CertificateParams {
@@ -89,6 +129,10 @@ impl CertificateAuthority {
         params
             .distinguished_name
             .push(DnType::OrganizationName, "oproxy");
+        let (not_before, not_after) = validity_window(ROOT_CA_VALIDITY_DAYS);
+        params.not_before = not_before;
+        params.not_after = not_after;
+
         params
     }
 
@@ -96,11 +140,12 @@ impl CertificateAuthority {
         let params = Self::root_params();
         let key_pair = KeyPair::generate()?;
         let cert = params.self_signed(&key_pair)?;
+        let cert_pem = cert.pem();
 
         write_private_key(&paths.key, &key_pair.serialize_pem())?;
-        fs::write(&paths.cert, cert.pem())?;
+        fs::write(&paths.cert, &cert_pem)?;
 
-        Ok((params, cert, key_pair))
+        Ok((params, cert_pem, key_pair))
     }
 
     pub async fn get_certificate_for_domain(&self, domain: &str) -> CertResult<(Vec<u8>, Vec<u8>)> {
@@ -125,6 +170,11 @@ impl CertificateAuthority {
         params.distinguished_name = DistinguishedName::new();
         params.distinguished_name.push(DnType::CommonName, domain);
 
+        // Keep leaf validity below Chrome's 398-day limits.
+        let (not_before, not_after) = validity_window(LEAF_CERT_VALIDITY_DAYS);
+        params.not_before = not_before;
+        params.not_after = not_after;
+
         let cert_key = KeyPair::generate()?;
         let issuer = Issuer::from_params(&self.root_params, &self.root_key);
         let cert = params.signed_by(&cert_key, &issuer).map_err(|e| {
@@ -146,7 +196,7 @@ impl CertificateAuthority {
     }
 
     pub fn get_root_cert_pem(&self) -> String {
-        self.root_cert.pem()
+        self.root_cert_pem.clone()
     }
 }
 
@@ -284,10 +334,6 @@ mod tests {
         assert_ne!(cert_a, cert_b);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    /// Before the bug fix, CertificateAuthority::new always called generate_root_ca even when
-    /// existing files were present, silently overwriting root.key and root.crt on every restart.
-    /// After the fix the files must be left untouched on a second construction.
     #[tokio::test]
     async fn loading_existing_ca_does_not_overwrite_key_or_cert_files() {
         let dir = temp_ca_dir();
@@ -319,5 +365,53 @@ mod tests {
             "root.crt must not be overwritten on reload"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn served_root_cert_pem_is_stable_across_restarts_and_matches_disk() {
+        let dir = temp_ca_dir();
+
+        let ca1 = CertificateAuthority::new(&dir)
+            .await
+            .expect("first CA failed");
+        let pem1 = ca1.get_root_cert_pem();
+        let on_disk = std::fs::read_to_string(dir.join("root.crt")).expect("root.crt missing");
+        assert_eq!(pem1, on_disk, "served PEM must match root.crt on disk");
+
+        let ca2 = CertificateAuthority::new(&dir)
+            .await
+            .expect("second CA failed");
+        let pem2 = ca2.get_root_cert_pem();
+        assert_eq!(
+            pem1, pem2,
+            "served root CA PEM must be stable across restarts"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validity_windows_are_within_reasonable_bounds() {
+        let (root_before, root_after) = validity_window(ROOT_CA_VALIDITY_DAYS);
+        let root_span = root_after - root_before;
+        assert!(
+            root_span > Duration::days(365 * 5),
+            "root CA validity window should be multi-year, got {root_span:?}"
+        );
+        assert!(
+            root_span < Duration::days(365 * 50),
+            "root CA validity window should not be absurdly long, got {root_span:?}"
+        );
+
+        let (leaf_before, leaf_after) = validity_window(LEAF_CERT_VALIDITY_DAYS);
+        let leaf_span = leaf_after - leaf_before;
+        assert!(
+            leaf_span <= Duration::days(398),
+            "leaf cert validity must stay at or under Chrome's 398-day cap, got {leaf_span:?}"
+        );
+        assert!(
+            leaf_span <= Duration::days(825),
+            "leaf cert validity must stay under Apple's 825-day cap, got {leaf_span:?}"
+        );
     }
 }

@@ -39,7 +39,7 @@ cargo run
 
 1. **Transport** (`main.rs`, `core/engine.rs`) — hyper accept loop, CONNECT handling, MITM TLS, reqwest forwarding  
 2. **Traffic manipulation** (`middleware/`) — inspect, rewrite, throttle, pause, mock  
-3. **Control plane** (`management.rs`, `api/`, `storage.rs`) — axum REST API, web UI, JSON persistence
+3. **Control plane** (`control_plane/`, `api/`, `storage.rs`) — axum REST API, web UI, JSON persistence
 
 ### Request lifecycle
 
@@ -71,7 +71,7 @@ pub trait Middleware: Send + Sync {
 // MiddlewareAction: Continue | StopAndReturn | Pause
 ```
 
-`StopAndReturn` returns 403 by default. To return a custom response (mock, Lua abort), embed a JSON payload in `ctx.headers["x-oproxy-mock-response"]` before returning `StopAndReturn`. The engine reads and serves it.
+`StopAndReturn` returns 403 by default. To return a custom response, set `ctx.mock_response` before returning `StopAndReturn`.
 
 **Middleware chain insertion order** (`runtime/state.rs`):
 1. AccessControl (block/allow rules)
@@ -145,10 +145,10 @@ routing_table       Arc<RwLock<HashMap<...>>>
 Storage files in `./storage/` (default):
 
 ```
-routes.json, throttle.json, rewrites.json, breakpoints.json,
-header_maps.json, modifications.json, hot_config.json,
-capture_filter.json, dns_overrides.json, map_local.json,
-upstream_proxy.json, webhooks.json, mock_rules.json, lua_scripts.json
+rule_sets.json, map_remote_rules.json, map_local_rules.json,
+access_rules.json, throttle.json, dns_overrides.json, breakpoints.json,
+capture_filter.json, upstream_proxy.json, hot_config.json,
+lua_scripts.json, mock_rules.json, webhooks.json
 ```
 
 ### Configuration
@@ -177,7 +177,7 @@ Key env vars: `OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_
 
 ### Lua scripting
 
-`middleware/plugins/lua_engine.rs` creates a fresh sandboxed `Lua` state per request (no shared state). Globals `io`, `os`, `package`, `require`, `load`, `loadfile`, `dofile`, `debug` are removed. Scripts interact via `request`/`response` table globals. `abort(status, body)` sets `x-oproxy-mock-response` and returns `StopAndReturn`. mlua uses `vendored` feature (bundles Lua 5.4 — no system Lua needed).
+`middleware/plugins/lua_engine.rs` creates a fresh sandboxed `Lua` state per request. Globals `io`, `os`, `package`, `require`, `load`, `loadfile`, `dofile`, and `debug` are removed. Scripts interact through the `request` and `response` tables. `abort(status, body)` sets a typed mock response and returns `StopAndReturn`. The `vendored` feature bundles Lua 5.4.
 
 ### Map Local (file mocking)
 
@@ -207,7 +207,7 @@ Key env vars: `OPROXY_PORT`, `OPROXY_BIND_HOST`, `OPROXY_MITM_ENABLED`, `OPROXY_
 
 ## UI
 
-The current app shell is built from `src/design` with Vite. `management.rs` serves the built files from `src/design/dist` via `include_str!`, so clean Rust builds need those assets. `build.rs` generates them automatically when missing; Docker and GitHub workflows build the UI explicitly before compiling Rust.
+The current app shell is built from `src/design` with Vite. `src/control_plane/assets.rs` serves assets embedded from `src/design/dist`; `build.rs` builds missing assets and copies them into Cargo’s output directory. Docker and GitHub workflows build the UI explicitly before compiling Rust.
 
 The legacy static files under `src/index.html`, `src/app.css`, and `src/js/` are still present for older surfaces and compatibility, but `/` serves the built design app. The design app includes Sessions, Compose, Rules, Breakpoints, Mock, Lua, Inspectors, DNS, Capture Filter, Webhooks, Root CA, Map Local, and Settings surfaces.
 

@@ -1,0 +1,57 @@
+# QA test matrix — maps each configs/qa-*.yaml profile to what it takes to run
+# (cargo features, extra env vars) and which test scripts to point at it, with
+# the args each script needs for that profile's port/token/etc.
+#
+# Adding a new profile = one entry here + a configs/qa-*.yaml file. No changes
+# needed to qa_runner.py.
+#
+# Run with:
+#   python tests/qa_runner.py <profile>
+#   python tests/qa_runner.py all
+#   python tests/qa_runner.py --list
+
+profiles:
+  e2e:
+    description: Full-surface smoke test (MITM, SOCKS5, HTTP/3, admin auth)
+    config: configs/qa-e2e.yaml
+    port: 8080
+    features: [http3]
+    env:
+      OPROXY_INSECURE_UPSTREAM: "1"   # proxy_tester.py's HTTP/2/gRPC test servers use self-signed certs
+    run:
+      - script: e2e_protocol_test.py
+        args: ["--host", "127.0.0.1", "--port", "8080", "--socks-port", "1080",
+               "--admin-token", "qa-e2e-token"]
+      - script: proxy_tester.py
+        args: ["--http-proxy", "http://127.0.0.1:8080", "--socks-proxy", "socks5://127.0.0.1:1080",
+               "--h3-proxy", "h3://127.0.0.1:8443", "--admin-token", "qa-e2e-token"]
+
+  admin:
+    description: >
+      Remote-admin gating (allow_remote_admin + admin_token) on a non-loopback
+      bind. Hitting it from 127.0.0.1 on the same machine still presents as a
+      loopback peer, so this doesn't exercise the "real remote peer" path - it
+      mainly confirms the token-auth mechanics on this profile's port.
+    config: configs/qa-admin.yaml
+    port: 8081
+    run:
+      - script: e2e_protocol_test.py
+        args: ["--host", "127.0.0.1", "--port", "8081", "--admin-token", "qa-admin-token"]
+
+  listeners:
+    description: MITM'd HTTP(S)/CONNECT + SOCKS5 from one instance
+    config: configs/qa-listeners.yaml
+    port: 8082
+    run:
+      - script: e2e_protocol_test.py
+        args: ["--host", "127.0.0.1", "--port", "8082", "--socks-port", "1081"]
+      - script: proxy_tester.py
+        args: ["--http-proxy", "http://127.0.0.1:8082", "--socks-proxy", "socks5://127.0.0.1:1081"]
+
+  limits:
+    description: Tight body/session/connection limits, edge-case behavior
+    config: configs/qa-limits.yaml
+    port: 8083
+    run:
+      - script: proxy_tester.py
+        args: ["--http-proxy", "http://127.0.0.1:8083"]

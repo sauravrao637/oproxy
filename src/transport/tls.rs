@@ -1,9 +1,26 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::time::timeout;
 
 use crate::core::engine::ProxyEngine;
+use crate::transport::TransportContext;
+use crate::transport::websocket::{handle_websocket, is_websocket_upgrade};
+
+/// Bundles what's needed to hand a MITM'd WebSocket upgrade off to the same
+/// upgrade-aware handler the plain (non-MITM) HTTP listener uses. Optional
+/// because not every `mitm_intercept` caller has a full `TransportContext`
+/// available (the SOCKS5 MITM path does not plumb one through), in which case
+/// WS upgrades over that path fall through to the generic forward path, which
+/// cannot perform an HTTP Upgrade and drops the Upgrade/Connection headers.
+#[derive(Clone)]
+pub struct WebSocketUpgradeContext {
+    pub transport: TransportContext,
+    pub peer: Option<SocketAddr>,
+    pub shutdown: watch::Receiver<bool>,
+}
 
 /// Install the rustls crypto provider used by oproxy.
 ///
@@ -51,6 +68,7 @@ pub async fn mitm_intercept<IO>(
     engine: Arc<ProxyEngine>,
     ca: Arc<crate::certs::CertificateAuthority>,
     handshake_timeout: Duration,
+    ws_context: Option<WebSocketUpgradeContext>,
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -66,7 +84,10 @@ pub async fn mitm_intercept<IO>(
         .unwrap_or_else(|| "http/1.1".to_string());
     tracing::debug!(host = %hostname, alpn = %negotiated, "MITM TLS established");
 
-    serve_intercepted_http(tls_stream, hostname, authority, engine, negotiated).await;
+    serve_intercepted_http(
+        tls_stream, hostname, authority, engine, negotiated, ws_context,
+    )
+    .await;
 }
 
 async fn accept_mitm_tls<IO>(
@@ -111,6 +132,7 @@ async fn serve_intercepted_http<IO>(
     authority: String,
     engine: Arc<ProxyEngine>,
     negotiated: String,
+    ws_context: Option<WebSocketUpgradeContext>,
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -128,8 +150,31 @@ async fn serve_intercepted_http<IO>(
     let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
         let eng = engine_ref.clone();
         let dest = dest_ref.clone();
+        let ws_context = ws_context.clone();
         req.extensions_mut().insert(conn.clone());
         async move {
+            // Mirror the plain (non-MITM) HTTP listener's dispatch: a WS upgrade
+            // must be handed to the upgrade-aware handler *before* it's funneled
+            // into the generic reqwest-based forward path below, which cannot
+            // perform an HTTP Upgrade and silently drops the Upgrade/Connection
+            // headers on the upstream leg.
+            if is_websocket_upgrade(&req)
+                && let Some(WebSocketUpgradeContext {
+                    transport,
+                    peer,
+                    shutdown,
+                }) = ws_context
+            {
+                let session_id = uuid::Uuid::new_v4().to_string();
+                // `dest` (`https://{authority}`) is the same MITM-resolved
+                // destination the buffered path uses below; a decrypted WS
+                // upgrade's own request line carries no scheme, so without
+                // this `handle_websocket` would misdial `ws://host:80`
+                // instead of `wss://` on the real CONNECT'd port.
+                return Ok::<_, std::convert::Infallible>(
+                    handle_websocket(req, transport, session_id, peer, shutdown, Some(dest)).await,
+                );
+            }
             let req = req.map(axum::body::Body::new);
             Ok::<_, std::convert::Infallible>(
                 eng.handle_request_with_destination(req, Some(dest)).await,
@@ -186,8 +231,7 @@ mod tests {
         let (cert_der, key_der) = self_signed_der();
         let cfg = build_mitm_server_config(cert_der, key_der)
             .expect("server config should build from a valid self-signed cert");
-        // The interceptor must advertise ALPN so HTTP/2 can be negotiated;
-        // previously this list was empty and every site was forced to h1.
+        // The interceptor must advertise ALPN so HTTP/2 can be negotiated.
         assert_eq!(
             cfg.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]

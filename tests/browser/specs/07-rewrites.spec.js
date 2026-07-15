@@ -33,7 +33,18 @@ test.describe('Rules / rewrites', () => {
     }
   });
 
-  test('rules view exposes current location-based tabs', async ({ page }) => {
+  test('rules view exposes current location-based tabs', async ({ page, request }) => {
+    // First-run seeding (src/examples.rs) writes one disabled "Example: Map
+    // api.test.com to github.com" rule to map_remote_rules.json the first
+    // time oproxy starts against a storage dir that doesn't have that file
+    // yet - which is exactly the state of a fresh CI checkout, since
+    // Clear Map Remote rules so the empty state is deterministic in fresh and
+    // reused test environments. This is the only spec that changes these rules.
+    const existing = await (await request.get('/admin/map-remote-rules')).json();
+    for (const rule of existing) {
+      await request.delete(`/admin/map-remote-rules/${rule.id}`);
+    }
+
     await gotoRail(page, 'Rules');
     await expect(page.getByRole('button', { name: 'Rule sets', exact: true })).toHaveClass(/on/);
     await page.getByRole('button', { name: 'Map Remote', exact: true }).click();

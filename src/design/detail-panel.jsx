@@ -216,9 +216,24 @@ function HeadersTab({ s, raw }) {
   );
 }
 
+// Streamed exchanges may contain only a capped body copy. Use the `streamed`
+// tag to distinguish incomplete capture from a genuinely empty body.
+function NotCapturedNotice({ sizeBytes }) {
+  return (
+    <span className="mute">
+      body not captured (streamed past the proxy{sizeBytes ? ` — ${fmtBytes(sizeBytes)} transferred` : ''})
+    </span>
+  );
+}
+
 function RequestTab({ s, raw }) {
   const body = raw ? (s.reqBodyRaw || s.reqBody) : s.reqBody;
-  if (!body) return <div className="mute" style={{ padding: 14 }}>(no request body)</div>;
+  if (!body) {
+    if (s.tags.includes('streamed')) {
+      return <div style={{ padding: 14 }}><NotCapturedNotice sizeBytes={s.reqSize} /></div>;
+    }
+    return <div className="mute" style={{ padding: 14 }}>(no request body)</div>;
+  }
   const lang = typeof body === 'object' ? 'application/json' : 'text/plain';
   return <CodeBlock title={`Request Body (${raw ? 'raw' : 'redacted'})`} lang={lang} content={body} />;
 }
@@ -226,20 +241,29 @@ function RequestTab({ s, raw }) {
 function ResponseTab({ s, raw }) {
   const body = raw ? (s.resBodyRaw || s.resBody) : s.resBody;
   if (s.resSize === 0 || !body) {
+    const streamed = s.tags.includes('streamed');
     return (
       <div className="section">
         <h4>Response Body <span className="meta">{fmtBytes(s.resSize)}</span></h4>
-        <div className="sec-body"><span className="mute">(empty body)</span></div>
+        <div className="sec-body">
+          {streamed ? <NotCapturedNotice sizeBytes={s.resSize} /> : <span className="mute">(empty body)</span>}
+        </div>
       </div>
     );
   }
   const lang = typeof body === 'object' ? 'application/json' : (s.type === 'sse' ? 'text/event-stream' : 'text/plain');
+  const streamedNotice = s.tags.includes('streamed') && (
+    <div className="mute" style={{ padding: '6px 14px 0' }}>
+      streamed past the proxy — body shown may be truncated at the configured capture limit, not the full transfer
+    </div>
+  );
   if (['image'].includes(s.type)) {
     return (
       <div className="section">
         <h4>Response Body <span className="meta">{fmtBytes(s.resSize)} · binary/base64</span></h4>
         <div className="sec-body">
           <span className="mute">Binary response body is stored as base64 for export and replay-safe inspection.</span>
+          {streamedNotice}
           <div style={{ marginTop: 10 }}>
             <CodeBlock title={`Response Body (${raw ? 'raw' : 'redacted'})`} lang="base64" content={body} />
           </div>
@@ -247,7 +271,12 @@ function ResponseTab({ s, raw }) {
       </div>
     );
   }
-  return <CodeBlock title={`Response Body (${raw ? 'raw' : 'redacted'})`} lang={lang} content={body} />;
+  return (
+    <>
+      {streamedNotice}
+      <CodeBlock title={`Response Body (${raw ? 'raw' : 'redacted'})`} lang={lang} content={body} />
+    </>
+  );
 }
 
 function TimingTab({ s }) {

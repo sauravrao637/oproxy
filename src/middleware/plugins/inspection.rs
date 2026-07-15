@@ -6,9 +6,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use uuid::Uuid;
 
+/// Fallback cap on the streamed-response body retained for session recording
+/// when a middleware chain is built without an explicit value (matches
+/// `Config::default().max_body_bytes` / `ProxyEngineConfig`'s own default).
+/// Production wiring (`runtime/state.rs`) passes the real configured value via
+/// `with_max_retained_body_bytes` instead of relying on this constant.
+const DEFAULT_MAX_RETAINED_BODY_BYTES: usize = 10 * 1024 * 1024;
+
 pub struct InspectionMiddleware {
     session_manager: SharedSessionManager,
     label: &'static str,
+    max_retained_body_bytes: usize,
 }
 
 impl InspectionMiddleware {
@@ -16,6 +24,7 @@ impl InspectionMiddleware {
         Self {
             session_manager,
             label: "InspectionMiddleware",
+            max_retained_body_bytes: DEFAULT_MAX_RETAINED_BODY_BYTES,
         }
     }
 
@@ -25,7 +34,18 @@ impl InspectionMiddleware {
         Self {
             session_manager,
             label: "InspectionMiddleware:response-pass",
+            max_retained_body_bytes: DEFAULT_MAX_RETAINED_BODY_BYTES,
         }
+    }
+
+    /// Caps how much of a streamed response body `InspectionObserver` retains
+    /// for the session record (the client still receives every byte
+    /// regardless of this cap - only what's kept in the in-memory log is
+    /// bounded). Mirrors the equivalent cap the engine's own manual
+    /// SSE/chunked-buffering path enforces via `max_body_bytes`.
+    pub fn with_max_retained_body_bytes(mut self, max: usize) -> Self {
+        self.max_retained_body_bytes = max;
+        self
     }
 }
 
@@ -52,6 +72,8 @@ impl Middleware for InspectionMiddleware {
             res_ctx: None,
             start: None,
             byte_count: 0,
+            retained: Vec::new(),
+            max_retained_body_bytes: self.max_retained_body_bytes,
         }))
     }
 
@@ -174,6 +196,11 @@ struct InspectionObserver {
     res_ctx: Option<ResponseContext>,
     start: Option<std::time::Instant>,
     byte_count: u64,
+    /// Body bytes retained so far for the session record. Bounded by
+    /// `max_retained_body_bytes`; the client still receives every byte
+    /// regardless (this only caps what's kept in memory for the log).
+    retained: Vec<u8>,
+    max_retained_body_bytes: usize,
 }
 
 #[async_trait]
@@ -185,13 +212,21 @@ impl BodyObserver for InspectionObserver {
 
     async fn on_chunk(&mut self, chunk: Bytes) -> Option<Bytes> {
         self.byte_count += chunk.len() as u64;
+        if self.retained.len() < self.max_retained_body_bytes {
+            let remaining = self.max_retained_body_bytes - self.retained.len();
+            let take = remaining.min(chunk.len());
+            self.retained.extend_from_slice(&chunk[..take]);
+        }
         Some(chunk)
     }
 
     async fn finish(self: Box<Self>) {
-        let Some(res_ctx) = self.res_ctx else { return };
+        let Some(mut res_ctx) = self.res_ctx else {
+            return;
+        };
         let start = self.start.unwrap_or_else(std::time::Instant::now);
         let latency_ms = start.elapsed().as_millis() as u64;
+        res_ctx.body = Bytes::from(self.retained);
         let metrics = crate::session::InspectionMetrics {
             latency_ms,
             request_size_bytes: 0, // body not buffered on streaming path
@@ -469,7 +504,6 @@ mod tests {
             "on_response must not record when observer is pending"
         );
 
-        // Create the observer and feed chunks.
         let start = std::time::Instant::now();
         let mut obs = mw
             .stream_observer(&rq)

@@ -1121,9 +1121,18 @@ function App() {
     );
   }, [sessions, wireFilter, appFilter]);
 
+  // Value-based keys, not the Set objects themselves — those get rebuilt with
+  // new references on every workspace sync even when unchanged, which used to
+  // spuriously reset pagination below.
+  const methodFilterKey = [...methodFilter].sort().join(',');
+  const statusFilterKey = [...statusFilter].sort().join(',');
+  const wireFilterKey = [...wireFilter].sort().join(',');
+  const appFilterKey = [...appFilter].sort().join(',');
+  const sortKey = `${sort.key}:${sort.dir}`;
+
   React.useEffect(() => {
     setRenderLimit(SESSION_RENDER_PAGE_SIZE);
-  }, [search, methodFilter, statusFilter, wireFilter, appFilter, hostFilter, hostFocus, sort, regexMode, viewMode]);
+  }, [search, methodFilterKey, statusFilterKey, wireFilterKey, appFilterKey, hostFilter, hostFocus, sortKey, regexMode, viewMode]);
 
   const renderedSessions = React.useMemo(
     () => filtered.slice(0, renderLimit),
@@ -1393,10 +1402,30 @@ function App() {
   }, [activeRail, t.split]);
 
   React.useEffect(() => {
-    const check = () => setTinyViewport(window.innerHeight < 420);
-    check();
-    window.addEventListener('resize', check);
-    return () => window.removeEventListener('resize', check);
+    // Defer the initial height check until the viewport settles, debounce resize
+    // events, and observe `visualViewport` so transient startup and mobile
+    // viewport changes do not trigger the small-window warning.
+    // the banner, just a little later.
+    let raf1 = 0;
+    let raf2 = 0;
+    let debounceTimer;
+    const measure = () => setTinyViewport(window.innerHeight < 420);
+    const debouncedMeasure = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(measure, 150);
+    };
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(measure);
+    });
+    window.addEventListener('resize', debouncedMeasure);
+    window.visualViewport?.addEventListener('resize', debouncedMeasure);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      clearTimeout(debounceTimer);
+      window.removeEventListener('resize', debouncedMeasure);
+      window.visualViewport?.removeEventListener('resize', debouncedMeasure);
+    };
   }, []);
 
   return (

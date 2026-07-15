@@ -31,6 +31,7 @@ async fn main() {
         bind_host: "127.0.0.1".to_string(),
         timeout_secs: 30,
         max_body_bytes: 10 * 1024 * 1024,
+        stream_threshold_bytes: 10 * 1024 * 1024,
         pool_max_idle_per_host: 10,
         pool_idle_timeout_secs: 30,
         upstream_proxy: None,

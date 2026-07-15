@@ -653,13 +653,15 @@ body.col-resizing .t tbody tr { background: inherit !important; }
   margin-left: 6px;
   background: transparent;
 }
-.tag-badge.replay { color: var(--c-paused); }
-.tag-badge.mock   { color: var(--c-3xx); }
-.tag-badge.rewrite{ color: var(--c-4xx); }
-.tag-badge.bp     { color: var(--c-paused); }
-.tag-badge.mitm   { color: var(--accent); }
-.tag-badge.ws     { color: var(--c-2xx); }
-.tag-badge.sse    { color: var(--c-3xx); }
+.tag-badge.replay   { color: var(--c-paused); }
+.tag-badge.mock     { color: var(--c-3xx); }
+.tag-badge.rewrite  { color: var(--c-4xx); }
+.tag-badge.bp       { color: var(--c-paused); }
+.tag-badge.mitm     { color: var(--accent); }
+.tag-badge.ws       { color: var(--c-2xx); }
+.tag-badge.sse      { color: var(--c-3xx); }
+/* Streamed capture is informational, so use the neutral pending tone. */
+.tag-badge.streamed { color: var(--c-pending); }
 
 /* Compact protocol badge used by the Sessions APP and WIRE columns. */
 .proto-badge {
@@ -2546,6 +2548,9 @@ body.col-resizing .t tbody tr { background: inherit !important; }
   outline: none;
 }
 .cmp-input:focus { border-color: var(--accent); }
+/* Visible validation state for required form fields. */
+.cmp-input.invalid { border-color: var(--c-5xx); }
+.cmp-input.invalid:focus { border-color: var(--c-5xx); }
 
 .cmp-response {
   border-top: 2px solid var(--accent);

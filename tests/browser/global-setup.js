@@ -4,6 +4,8 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
+const { resolveOproxyBinary } = require('./oproxy-binary');
+
 const STARTUP_TIMEOUT_MS = 15000;
 
 // Keep the spawned port in sync with the Playwright baseURL.
@@ -28,7 +30,7 @@ function portInUse(port) {
 }
 
 module.exports = async function globalSetup() {
-  const bin = path.resolve(__dirname, '../../target/debug/oproxy');
+  const bin = resolveOproxyBinary(__dirname);
 
   if (!fs.existsSync(bin)) {
     throw new Error(
@@ -40,9 +42,14 @@ module.exports = async function globalSetup() {
   // oproxy is spawned with cwd = this directory, so its relative `./storage` and
   // `./certs` resolve to the fixtures here. But `Config::load()` defaults to
   // `./configs/default.yaml` and panics if it's missing, so point it at the
-  // repo's config explicitly (absolute path). Respect a caller-set OPROXY_CONFIG.
-  const configPath =
-    process.env.OPROXY_CONFIG || path.resolve(__dirname, '../../configs/default.yaml');
+  // repo's config explicitly (absolute path). Respect a caller-set OPROXY_CONFIG,
+  // resolved against the repo root (not process.cwd()) so a value like
+  // "configs/qa-e2e.yaml" - typed the same way it's used with `cargo run` from
+  // the repo root - still works no matter where this test runner is invoked from.
+  const repoRoot = path.resolve(__dirname, '../..');
+  const configPath = process.env.OPROXY_CONFIG
+    ? path.resolve(repoRoot, process.env.OPROXY_CONFIG)
+    : path.resolve(repoRoot, 'configs/default.yaml');
   if (!fs.existsSync(configPath)) {
     throw new Error(`oproxy config not found at ${configPath}.`);
   }

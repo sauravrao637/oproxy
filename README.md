@@ -33,15 +33,20 @@ It is for developers testing browsers, CLIs, mobile apps, API clients, services,
 ```bash
 docker run --rm \
   --name oproxy \
-  --network host \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:8443:8443/udp \
   -e OPROXY_BIND_HOST=0.0.0.0 \
   -e OPROXY_MITM_ENABLED=true \
+  -e OPROXY_HTTP3_ENABLED=true \
+  -e OPROXY_HTTP3_PORT=8443 \
+  -e OPROXY_ALLOW_REMOTE_ADMIN=true \
+  -e OPROXY_ADMIN_TOKEN=<change-me-to-a-strong-secret> \
   -v oproxy-certs:/app/certs \
   -v oproxy-storage:/app/storage \
   ghcr.io/sauravrao637/oproxy:latest
 ```
 
-Open `http://127.0.0.1:8080`.
+Open `http://127.0.0.1:8080` and sign in with the token.
 
 Or build locally:
 
@@ -55,7 +60,7 @@ docker build -t oproxy:latest .
 docker compose up --build
 ```
 
-The included Compose file uses host networking, persists `/app/certs` and `/app/storage`, and sets `OPROXY_BIND_HOST=0.0.0.0`.
+The included Compose file uses bridge networking with loopback-published ports, persists `/app/certs` and `/app/storage`, and sets `OPROXY_BIND_HOST=0.0.0.0`. Linux users may optionally enable host networking.
 
 ### Source
 

@@ -67,5 +67,5 @@ export ALL_PROXY=socks5h://127.0.0.1:1080
 - Only CONNECT is implemented; BIND and UDP ASSOCIATE are rejected.
 - In tunnel-only mode, SOCKS5 does not capture full HTTP sessions.
 - `captures_sessions` is true only when SOCKS5 is enabled and MITM is active.
-- SOCKS5 has no environment variable override; configure `socks5_port` in YAML.
+- `OPROXY_SOCKS5_PORT` overrides `socks5_port` at startup (env vars win over YAML, per the standard precedence). Set it to `0` or leave it empty to disable the listener even if YAML sets a port.
 

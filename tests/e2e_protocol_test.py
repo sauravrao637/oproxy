@@ -6,10 +6,13 @@ Admin Token, Lua, Breakpoints against a running oproxy instance.
 
 Usage:
     python3 tests/e2e_protocol_test.py
+    python3 tests/e2e_protocol_test.py --admin-token change-me-to-a-strong-secret
+    python3 tests/e2e_protocol_test.py --port 8082 --socks-port 1081
 
-Requires: requests, websocket-client, PySocks
+Requires: requests, websocket-client, websockets, PySocks
 """
 
+import argparse
 import sys
 import json
 import time
@@ -30,12 +33,25 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 import os
-PROXY_HOST = "127.0.0.1"
-PROXY_PORT = 8080
-SOCKS5_PORT = 1080
+
+_arg_parser = argparse.ArgumentParser(description="oproxy E2E Protocol Test Suite")
+_arg_parser.add_argument(
+    "--admin-token", default=os.environ.get("OPROXY_ADMIN_TOKEN"),
+    help="Admin token for the running oproxy instance, required when admin auth "
+         "is enabled (OPROXY_ADMIN_TOKEN configured server-side). Also read from "
+         "the OPROXY_ADMIN_TOKEN env var.",
+)
+_arg_parser.add_argument("--host", default="127.0.0.1", help="oproxy bind/admin host")
+_arg_parser.add_argument("--port", type=int, default=8080, help="oproxy HTTP proxy/admin port")
+_arg_parser.add_argument("--socks-port", type=int, default=1080, help="oproxy SOCKS5 port")
+_args = _arg_parser.parse_args()
+
+PROXY_HOST = _args.host
+PROXY_PORT = _args.port
+SOCKS5_PORT = _args.socks_port
 BASE_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
 PROXY_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
-ADMIN_TOKEN = os.environ.get("OPROXY_ADMIN_TOKEN")  # If set, pass to admin API calls
+ADMIN_TOKEN = _args.admin_token  # If set, pass to admin API calls
 
 RESULTS = []
 PASS = "PASS"
@@ -118,8 +134,8 @@ def admin(method, path, **kwargs):
 
 def proxied(method, url, **kwargs):
     proxies = {"http": PROXY_URL, "https": PROXY_URL}
-    return requests.request(method, url, proxies=proxies,
-                            timeout=10, **kwargs)
+    kwargs.setdefault("timeout", 10)
+    return requests.request(method, url, proxies=proxies, **kwargs)
 
 def echo_url(path=""):
     return f"http://127.0.0.1:{ECHO_PORT}{path}"
@@ -130,6 +146,19 @@ def get_ca_cert(path="/tmp/oproxy_test_ca.crt"):
     with open(path, "w") as f:
         f.write(r.text)
     return path
+
+def socks5_enabled():
+    """Best-effort capability check so profiles without a SOCKS5 listener
+    (e.g. configs/qa-limits.yaml) skip that section instead of failing with
+    connection-refused. Defaults to True (attempt it) if the check itself
+    is inconclusive, preserving prior behavior."""
+    try:
+        r = admin("GET", "/socks5/status")
+        if r.ok:
+            return bool(r.json().get("enabled", True))
+    except Exception:
+        pass
+    return True
 
 def clear_sessions():
     admin("DELETE", "/sessions")
@@ -307,9 +336,13 @@ def section_https_mitm():
         # Use curl which works with the CA cert (Python requests rejects cert due to missing AKID)
         try:
             result = subprocess.run(
+                # --ssl-revoke-best-effort: Windows curl (Schannel) otherwise rejects
+                # the MITM leaf with CERT_TRUST_REVOCATION_STATUS_UNKNOWN, since
+                # oproxy's generated certs carry no CRL/OCSP URL (see docs/troubleshooting.md).
                 ["curl", "-s", "--max-time", "12",
                  "--proxy", PROXY_URL,
                  "--cacert", ca_path,
+                 "--ssl-revoke-best-effort",
                  "https://httpbin.org/get"],
                 capture_output=True, text=True, timeout=15,
             )
@@ -337,6 +370,7 @@ def section_https_mitm():
                 ["curl", "-s", "--max-time", "12",
                  "--proxy", PROXY_URL,
                  "--cacert", ca_path,
+                 "--ssl-revoke-best-effort",
                  "https://httpbin.org/ip"],
                 capture_output=True, text=True, timeout=15,
             )
@@ -396,6 +430,12 @@ def section_https_mitm():
 # ──────────────────────────────────────────────────────────────────────────────
 def section_socks5():
     print("\n── 4. SOCKS5 Proxy ──────────────────────────────────────────────")
+
+    if not socks5_enabled():
+        for t in ("SOCKS5 no-auth handshake completes", "SOCKS5 HTTP GET through tunnel",
+                  "SOCKS5 traffic session captured", "SOCKS5 rejects invalid version"):
+            record(t, SKIP, "SOCKS5 not enabled on this oproxy instance")
+        return
 
     def socks5_connect_raw(target_host, target_port, src_host=PROXY_HOST, src_port=SOCKS5_PORT):
         """Perform RFC 1928 no-auth SOCKS5 handshake. Return connected socket."""
@@ -536,7 +576,11 @@ def section_websocket():
         async def server_main():
             async with websockets.serve(ws_handler, "127.0.0.1", 0) as srv:
                 port_holder[0] = list(srv.sockets)[0].getsockname()[1]
-                stop_event.wait()
+                # stop_event is a threading.Event set from another thread; a blocking
+                # .wait() here would freeze this coroutine's event loop, so the
+                # server could accept the TCP connection but never service it.
+                while not stop_event.is_set():
+                    await asyncio.sleep(0.05)
 
         def runner():
             asyncio.run(server_main())
@@ -620,6 +664,11 @@ def section_websocket():
                 record(name, PASS, f"WebSocket echo: '{echo_msg}'")
             else:
                 record(name, FAIL, f"short WS response header: {header.hex()}")
+            # Send a proper masked WebSocket Close frame (opcode 0x8) before dropping
+            # the TCP connection - otherwise the server's websockets library logs a
+            # scary (but harmless) "no close frame received" traceback for every run.
+            close_mask = os.urandom(4)
+            sock.sendall(bytes([0x88, 0x80]) + close_mask)
             sock.close()
         except Exception as e:
             record(name, FAIL, f"{type(e).__name__}: {e}")
@@ -751,12 +800,13 @@ def section_admin_token():
 
     def t_token_enforcement_live(name):
         """Spin up a temporary oproxy on a free port with admin token set."""
-        binary = "/home/camo/Desktop/repos/rstP/oproxy/target/debug/oproxy"
-        import os
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        exe_name = "oproxy.exe" if os.name == "nt" else "oproxy"
+        binary = os.path.join(repo_root, "target", "debug", exe_name)
         if not os.path.exists(binary):
-            binary = "/home/camo/Desktop/repos/rstP/oproxy/target/release/oproxy"
+            binary = os.path.join(repo_root, "target", "release", exe_name)
         if not os.path.exists(binary):
-            record(name, SKIP, "oproxy binary not found for live token test")
+            record(name, SKIP, "oproxy binary not found for live token test (run `cargo build` first)")
             return
 
         # Find free port
@@ -765,7 +815,7 @@ def section_admin_token():
             test_port = s.getsockname()[1]
 
         token = "ua-test-secret-token-12345"
-        import tempfile, os
+        import tempfile
         tmpdir = tempfile.mkdtemp(prefix="oproxy_token_test_")
 
         proc = subprocess.Popen(
@@ -887,9 +937,13 @@ def section_lua():
         """Create a script that aborts requests to a specific path."""
         r = admin("POST", "/scripts", json={
             "id": "", "name": "ua-test-abort", "enabled": True,
-            # Lua gets request.uri (full URI), not request.path — check by string.find
+            # Lua gets request.uri (full URI), not request.path — check by string.find.
+            # `-` is a Lua pattern quantifier (lazy repeat), not a literal dash, so the
+            # 4th arg (plain-text find) is required for a path containing dashes to
+            # ever match. Scripts run on both the request and response pass, so guard
+            # on `request` being non-nil (it's nil during the response pass).
             "code": """
-if string.find(request.uri, "/lua-abort-test") then
+if request and string.find(request.uri, "/lua-abort-test", 1, true) then
   abort(418, "lua blocked this")
 end
 """,
@@ -919,8 +973,13 @@ end
         """Create a script that injects a response header."""
         r = admin("POST", "/scripts", json={
             "id": "", "name": "ua-test-header-inject", "enabled": True,
+            # Scripts run on both the request and response pass; guard on `response`
+            # being non-nil (it's nil during the request pass) to avoid a spurious
+            # "nil value" warning every request.
             "code": """
-response.headers["x-lua-injected"] = "yes"
+if response then
+  response.headers["x-lua-injected"] = "yes"
+end
 """,
         })
         assert r.ok, f"create header inject script failed: {r.status_code}"
