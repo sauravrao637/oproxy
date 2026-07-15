@@ -71,7 +71,9 @@ impl ProxyHttpService {
 
         if is_websocket_upgrade(&req) {
             let session_id = uuid::Uuid::new_v4().to_string();
-            return Ok(handle_websocket(req, self.context, session_id, peer, shutdown).await);
+            // Not MITM'd - the request's own URI/Host already reflect the
+            // real upstream, so no destination override is needed here.
+            return Ok(handle_websocket(req, self.context, session_id, peer, shutdown, None).await);
         }
 
         let req = req.map(Body::new);

@@ -15,7 +15,11 @@ WORKDIR /build
 
 # Cache dependency compilation separately from application code.
 # Copy manifests first; only re-run cargo fetch / compile when they change.
+# xtask/Cargo.toml must exist too: cargo needs every workspace member's
+# manifest on disk just to parse the workspace, even though xtask (not a
+# default member) isn't actually built here.
 COPY Cargo.toml Cargo.lock build.rs ./
+COPY xtask ./xtask
 
 # Build a throw-away binary to warm the dependency cache
 RUN mkdir -p src && \
@@ -33,9 +37,13 @@ RUN touch src/main.rs src/lib.rs && cargo build --release --all-features
 # ── Runtime stage ──────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
-# ca-certificates is needed for reqwest (rustls) to verify upstream TLS certs
+# ca-certificates is needed for reqwest (rustls) to verify upstream TLS certs.
+# wget backs the docker-compose.yml HEALTHCHECK so a crash-looping
+# container (e.g. from a typo'd env var - invalid values are fatal by design,
+# see docs/configuration.md) shows up as "unhealthy" instead of silently
+# restarting with no visible signal short of reading logs.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

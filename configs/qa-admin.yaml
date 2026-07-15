@@ -1,0 +1,36 @@
+# QA profile: remote admin / control-plane authentication.
+#
+# Each configs/*.yaml is parsed standalone (Config::load reads exactly one
+# file) — nothing here is "inherited" from configs/default.yaml. Any field
+# left out falls back to the Rust-side default in src/config/mod.rs, which
+# is not always the same as default.yaml's value (e.g. mitm.enabled defaults
+# to false there, vs. true in default.yaml). So fields that matter for this
+# profile's purpose are restated explicitly below rather than left implicit.
+#
+# Exercises: allow_remote_admin + admin_token gating on a non-loopback bind
+# (see validate_admin_security in src/config/mod.rs). Distinct port/storage/
+# log so it can run alongside the default instance without collisions:
+#
+#   OPROXY_CONFIG=configs/qa-admin.yaml cargo run
+
+port: 8081
+
+# Remote-admin QA needs a non-loopback bind to be meaningful; admin_token is
+# set below so this doesn't fall into the "wildcard bind without token" or
+# "remote admin enabled without token" warning paths.
+bind_host: "0.0.0.0"
+
+storage_path: ./storage-qa-admin
+
+log:
+  level: info
+  dir: .
+  file: server-qa-admin.log
+
+mitm:
+  enabled: true
+  root_ca_path: ./certs
+
+allow_remote_admin: true
+admin_token: qa-admin-token
+allow_private_admin_egress: false

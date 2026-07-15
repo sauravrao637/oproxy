@@ -337,7 +337,7 @@ async fn proxy_fallback(
 }
 
 async fn get_network_info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let lan_ip = crate::setup::public_lan_ip_for_setup();
+    let lan_ip = crate::setup::advertised_lan_ip(state.config.advertised_host.as_deref());
     let port = state.config.port;
     let socks5_port = state.config.socks5_port;
     let remote_ip = lan_ip.clone().unwrap_or_else(|| "127.0.0.1".to_string());

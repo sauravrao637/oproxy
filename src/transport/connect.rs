@@ -10,7 +10,7 @@ use tokio::time::timeout;
 
 use crate::transport::TransportContext;
 use crate::transport::lifecycle::wait_for_shutdown;
-use crate::transport::tls::mitm_intercept;
+use crate::transport::tls::{WebSocketUpgradeContext, mitm_intercept};
 
 /// First byte of a TLS record carrying a handshake (ClientHello). Used to tell
 /// a real TLS connection from a cleartext CONNECT tunnel (e.g. `ws://`).
@@ -174,6 +174,11 @@ pub async fn handle_connect(
     let handshake_timeout = context.handshake_timeout;
 
     let target = ConnectTarget::resolve(&req, &context).await;
+    // Cloned so a MITM'd WebSocket upgrade can be handed to the same
+    // upgrade-aware handler the plain (non-MITM) listener uses,
+    // without disturbing the original `context`/`shutdown` used below.
+    let ws_transport_context = context.clone();
+    let ws_shutdown = shutdown.clone();
 
     let is_mitm = engine.mitm_enabled && engine.ca.is_some();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -188,6 +193,8 @@ pub async fn handle_connect(
     let start = std::time::Instant::now();
 
     connections.spawn_tracked("connect-tunnel", peer, async move {
+        let ws_transport_context = ws_transport_context;
+        let ws_shutdown = ws_shutdown;
         let tunnel = async {
             match on_upgrade.await {
                 Ok(upgraded) => {
@@ -222,6 +229,11 @@ pub async fn handle_connect(
                                     engine.clone(),
                                     ca,
                                     handshake_timeout,
+                                    Some(WebSocketUpgradeContext {
+                                        transport: ws_transport_context,
+                                        peer,
+                                        shutdown: ws_shutdown,
+                                    }),
                                 )
                                 .await;
                                 return;

@@ -308,13 +308,14 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
                 <td className="cell-host" title={s.host}>{s.host}</td>
                 <td className="cell-path" title={s.path + s.query}>
                   {s.path}{s.query && <span className="dim">{s.query}</span>}
-                  {s.tags.includes('replay')  && <span className="tag-badge replay">REPLAY</span>}
-                  {s.tags.includes('mock')    && <span className="tag-badge mock">MOCK</span>}
-                  {s.tags.includes('rewrite') && <span className="tag-badge rewrite">REWRITE</span>}
-                  {s.tags.includes('bp')      && <span className="tag-badge bp">BP</span>}
-                  {s.tags.includes('mitm')    && <span className="tag-badge mitm">MITM</span>}
-                  {s.tags.includes('ws')      && <span className="tag-badge ws">WS</span>}
-                  {s.tags.includes('sse')     && <span className="tag-badge sse">SSE</span>}
+                  {s.tags.includes('replay')   && <span className="tag-badge replay">REPLAY</span>}
+                  {s.tags.includes('mock')     && <span className="tag-badge mock">MOCK</span>}
+                  {s.tags.includes('rewrite')  && <span className="tag-badge rewrite">REWRITE</span>}
+                  {s.tags.includes('bp')       && <span className="tag-badge bp">BP</span>}
+                  {s.tags.includes('mitm')     && <span className="tag-badge mitm">MITM</span>}
+                  {s.tags.includes('ws')       && <span className="tag-badge ws">WS</span>}
+                  {s.tags.includes('sse')      && <span className="tag-badge sse">SSE</span>}
+                  {s.tags.includes('streamed') && <span className="tag-badge streamed" title="Body streamed past the proxy; not fully captured">STREAMED</span>}
                 </td>
                 <td>
                   {(s.paused || s.pending) ? <span className="dim">—</span>

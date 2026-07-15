@@ -12,6 +12,8 @@ tests/certs/
 # ── Runtime state ──────────────────────────────────────────────────────────────
 # Created and managed by the proxy at runtime; user-specific.
 storage/
+storage-qa-e2e/
+storage-qa-limits/
 
 # ── Log files ──────────────────────────────────────────────────────────────────
 server.log
@@ -46,7 +48,10 @@ tests/browser/.yarn/install-state.gz
 .roo/
 .claude/
 .commandcode/
-
+.codex/
+.agents/
+.gstack/
+.tokensave/
 # ── Environment overrides ──────────────────────────────────────────────────────
 .env
 .env.*
@@ -61,10 +66,11 @@ plans/
 PRD.md
 .mcp.json
 ROADMAP.md
+AGENTS.md
+
 src/design/certs/root.crt
 src/design/certs/root.key
-.gstack/
 tests/__generated_grpc__/
-
 tests/__pycache__/
 tests/fixtures/__pycache__/
+tests/browser/.pid

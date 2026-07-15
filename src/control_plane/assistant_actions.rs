@@ -950,6 +950,17 @@ struct AssistantForwardReq {
     /// with an `application/grpc+proto` content type.
     #[serde(default)]
     kind: AssistantForwardKind,
+    /// Mirrors `ForwardReq.apply_proxy_rules` on `/admin/forward`: defaults to
+    /// true so an assistant-initiated forward behaves
+    /// like real proxied traffic (DNS override, Map Remote/Local, Mock,
+    /// Access Control, Rewrite, Breakpoint) unless the assistant explicitly
+    /// asks to bypass those rules and hit the literal URL directly.
+    #[serde(default = "default_true")]
+    apply_proxy_rules: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -979,6 +990,7 @@ async fn execute_forward_action(
             body: req.body,
             note: None,
             tags: None,
+            apply_proxy_rules: req.apply_proxy_rules,
         },
     )
     .await

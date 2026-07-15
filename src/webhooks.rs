@@ -31,6 +31,8 @@ impl WebhookEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
+    // Default missing IDs so create handlers can assign them.
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
@@ -213,6 +215,18 @@ mod tests {
         let sig1 = hmac_sha256_hex("key", "data1");
         let sig2 = hmac_sha256_hex("key", "data2");
         assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn webhook_config_deserializes_without_id() {
+        let json = serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["request_captured"],
+            "enabled": true,
+            "secret": null
+        });
+        let hook: WebhookConfig = serde_json::from_value(json).expect("id must be optional");
+        assert_eq!(hook.id, "");
     }
 
     #[test]

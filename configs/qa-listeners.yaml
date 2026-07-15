@@ -1,0 +1,27 @@
+# QA profile: exercise every ingress listener from one instance.
+#
+# Standalone file — see configs/qa-admin.yaml for why fields are restated
+# here rather than assumed "inherited" from configs/default.yaml.
+#
+# Exercises: MITM'd HTTP(S)/CONNECT on `port`, a dedicated TLS listener on
+# `https_port`, and a SOCKS5 listener on `socks5_port` at once — useful for
+# QA that needs to hit the same proxy through more than one transport in a
+# single session. Distinct port/storage/log so it can run alongside the
+# default instance and configs/qa-admin.yaml without collisions:
+#
+#   OPROXY_CONFIG=configs/qa-listeners.yaml cargo run
+
+port: 8082
+https_port: 8444
+socks5_port: 1081
+
+storage_path: ./storage-qa-listeners
+
+log:
+  level: info
+  dir: .
+  file: server-qa-listeners.log
+
+mitm:
+  enabled: true
+  root_ca_path: ./certs

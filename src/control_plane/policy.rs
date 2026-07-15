@@ -219,8 +219,8 @@ fn map_local_fixtures_dir(state: &AppState) -> std::path::PathBuf {
 /// managed `storage/map-local/` fixtures directory).
 fn validate_map_local_path(
     rule: &MapLocalRule,
-    _base_path: &Option<std::path::PathBuf>,
-    _fixtures_dir: &std::path::Path,
+    base_path: &Option<std::path::PathBuf>,
+    fixtures_dir: &std::path::Path,
 ) -> Option<axum::response::Response> {
     if rule.file_path.trim().is_empty() {
         return Some(
@@ -233,10 +233,43 @@ fn validate_map_local_path(
                 .into_response(),
         );
     }
-    // Path existence is checked at serve time by the middleware (returns 502 when
-    // missing). We intentionally do NOT block rule creation here — users commonly
-    // pre-create rules for files they will place on disk or mount into the container
-    // after the rule is saved. A missing file at creation time is not an error.
+    // Validate the resolved path at rule creation so invalid rules return 422
+    // instead of failing when matching traffic arrives.
+    let path = crate::middleware::plugins::map_local::resolve_map_local_path(
+        &rule.file_path,
+        base_path.as_deref(),
+        Some(fixtures_dir),
+    );
+
+    if !path.exists() {
+        let hint = if base_path.is_some() && !rule.file_path.starts_with('/') {
+            format!(
+                "relative paths resolve from base path '{}' or the managed fixtures dir '{}'",
+                base_path.as_ref().unwrap().display(),
+                fixtures_dir.display()
+            )
+        } else if !rule.file_path.starts_with('/') {
+            format!(
+                "relative paths resolve from the managed fixtures dir '{}' — upload a file first",
+                fixtures_dir.display()
+            )
+        } else {
+            "In containerized deployments ensure the path is mounted inside the container."
+                .to_string()
+        };
+        return Some(
+            (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({
+                    "error": format!(
+                        "file_path '{}' does not exist or is not accessible from this process. {}",
+                        rule.file_path, hint
+                    )
+                })),
+            )
+                .into_response(),
+        );
+    }
     None
 }
 
@@ -602,12 +635,54 @@ pub(super) async fn list_dns(State(state): State<Arc<AppState>>) -> impl IntoRes
     axum::Json(out)
 }
 
+/// `POST /admin/dns` accepts whole-map replacement and additive single-entry
+/// updates. A single-entry update does not replace the existing table.
+/// entry is almost certainly not what a caller sending this shape means.
+#[derive(Debug, serde::Deserialize)]
+struct SingleDnsOverrideRequest {
+    host: String,
+    ip: String,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
 pub(super) async fn update_dns(
     State(state): State<Arc<AppState>>,
-    axum::extract::Json(new_map): axum::extract::Json<
-        std::collections::HashMap<String, crate::middleware::plugins::dns_override::DnsValue>,
-    >,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Ok(single) = serde_json::from_value::<SingleDnsOverrideRequest>(body.clone())
+        && !single.host.trim().is_empty()
+    {
+        let entry = crate::middleware::plugins::dns_override::DnsEntry {
+            ip: single.ip,
+            enabled: single.enabled.unwrap_or(true),
+        };
+        let mut overrides = state.dns_overrides.write().await;
+        overrides.insert(single.host, entry);
+        if let Err(e) = storage::save_dns_overrides(&state.storage_path, &overrides).await {
+            return storage_error_response(e);
+        }
+        return axum::http::StatusCode::OK.into_response();
+    }
+
+    let new_map = match serde_json::from_value::<
+        std::collections::HashMap<String, crate::middleware::plugins::dns_override::DnsValue>,
+    >(body)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({
+                    "error": format!(
+                        "expected either a single {{\"host\": ..., \"ip\": ..., \"enabled\": ...}} object, or a whole-map replace {{\"<host>\": {{\"ip\": ..., \"enabled\": ...}}, ...}}: {e}"
+                    )
+                })),
+            )
+                .into_response();
+        }
+    };
+
     let mut overrides = state.dns_overrides.write().await;
     *overrides = new_map
         .into_iter()
@@ -654,7 +729,10 @@ pub(super) async fn delete_dns(
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_inline_fixture, sanitize_fixture_name, validate_map_local_path};
+    use super::{
+        SingleDnsOverrideRequest, materialize_inline_fixture, sanitize_fixture_name,
+        validate_map_local_path,
+    };
     use crate::middleware::plugins::map_local::MapLocalRule;
 
     #[test]
@@ -672,6 +750,71 @@ mod tests {
             validate_map_local_path(&rule, &None, &dir).is_some(),
             "blank file_path must not resolve to the fixtures directory itself"
         );
+    }
+
+    #[test]
+    fn nonexistent_file_path_is_rejected_even_without_base_path() {
+        let dir = std::env::temp_dir().join(format!("oml_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rule = MapLocalRule {
+            id: "x".into(),
+            name: "n".into(),
+            enabled: true,
+            location: Default::default(),
+            file_path: "definitely-not-there.json".into(),
+            inline_body: None,
+        };
+        assert!(
+            validate_map_local_path(&rule, &None, &dir).is_some(),
+            "a file_path that resolves to nothing must be rejected at creation time"
+        );
+    }
+
+    #[test]
+    fn existing_file_path_is_accepted() {
+        let dir = std::env::temp_dir().join(format!("oml_present_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("users.json"), "{}").unwrap();
+        let rule = MapLocalRule {
+            id: "x".into(),
+            name: "n".into(),
+            enabled: true,
+            location: Default::default(),
+            file_path: "users.json".into(),
+            inline_body: None,
+        };
+        assert!(
+            validate_map_local_path(&rule, &None, &dir).is_none(),
+            "a file_path that resolves to an existing managed fixture must be accepted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_dns_override_shape_parses() {
+        let body = serde_json::json!({"host": "x", "ip": "127.0.0.1", "enabled": true});
+        let parsed: SingleDnsOverrideRequest = serde_json::from_value(body).expect("should parse");
+        assert_eq!(parsed.host, "x");
+        assert_eq!(parsed.ip, "127.0.0.1");
+        assert_eq!(parsed.enabled, Some(true));
+    }
+
+    #[test]
+    fn single_dns_override_shape_enabled_is_optional() {
+        let body = serde_json::json!({"host": "x", "ip": "127.0.0.1"});
+        let parsed: SingleDnsOverrideRequest = serde_json::from_value(body).expect("should parse");
+        assert_eq!(parsed.enabled, None);
+    }
+
+    /// The pre-existing whole-map replace shape must keep working unchanged.
+    #[test]
+    fn bulk_dns_map_shape_still_parses() {
+        let body = serde_json::json!({"api.internal": {"ip": "10.0.0.5", "enabled": true}});
+        let parsed: std::collections::HashMap<
+            String,
+            crate::middleware::plugins::dns_override::DnsValue,
+        > = serde_json::from_value(body).expect("bulk map shape should still parse");
+        assert_eq!(parsed.len(), 1);
     }
 
     #[tokio::test]

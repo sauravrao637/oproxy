@@ -229,24 +229,30 @@ fn apply_request_actions(
         match action {
             RewriteAction::SetHeader { name, value } => {
                 set_header(&mut ctx.headers, name, value.clone());
+                ctx.rewritten = true;
             }
             RewriteAction::AppendHeader { name, value } => {
                 append_header(&mut ctx.headers, name, value);
+                ctx.rewritten = true;
             }
             RewriteAction::RemoveHeader { name } => {
                 remove_header(&mut ctx.headers, name);
+                ctx.rewritten = true;
             }
             RewriteAction::SetQueryParam { name, value } => {
                 ctx.uri = set_query_param(&ctx.uri, name, value);
+                ctx.rewritten = true;
             }
             RewriteAction::RemoveQueryParam { name } => {
                 ctx.uri = remove_query_param(&ctx.uri, name);
+                ctx.rewritten = true;
             }
             RewriteAction::SetHost { value } => {
                 ctx.host = value.clone();
                 set_header(&mut ctx.headers, "host", value.clone());
                 // Clear any existing destination so the engine re-resolves from new host.
                 ctx.destination = None;
+                ctx.rewritten = true;
             }
             RewriteAction::SetPath {
                 pattern,
@@ -262,6 +268,7 @@ fn apply_request_actions(
                     } else {
                         format!("{new_path}?{query}")
                     };
+                    ctx.rewritten = true;
                 }
             }
             RewriteAction::ReplaceBody {
@@ -274,6 +281,7 @@ fn apply_request_actions(
                     if new_body != text {
                         ctx.set_body_text(new_body);
                         remove_header(&mut ctx.headers, "content-length");
+                        ctx.rewritten = true;
                     }
                 }
             }
@@ -284,7 +292,7 @@ fn apply_request_actions(
                     status: *status,
                     headers,
                     body: Bytes::new(),
-                    tags: Vec::new(),
+                    tags: vec!["rewrite".to_string()],
                     served_mock: None,
                 });
                 return Some(MiddlewareAction::StopAndReturn);
@@ -294,7 +302,7 @@ fn apply_request_actions(
                     status: *status,
                     headers: crate::middleware::HeaderMap::new(),
                     body: Bytes::new(),
-                    tags: Vec::new(),
+                    tags: vec!["rewrite".to_string()],
                     served_mock: None,
                 });
                 return Some(MiddlewareAction::StopAndReturn);
@@ -308,20 +316,33 @@ fn apply_request_actions(
 
 // ── Response action application ───────────────────────────────────────────────
 
+/// Add `tag` to `tags` unless it's already present (response tags are read
+/// once by `InspectionMiddleware::on_response`, so avoid piling up duplicate
+/// "rewrite" entries when several rules or actions touch the same response).
+fn push_tag_once(tags: &mut Vec<String>, tag: &str) {
+    if !tags.iter().any(|existing| existing == tag) {
+        tags.push(tag.to_string());
+    }
+}
+
 fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
     for action in &rule.actions {
         match action {
             RewriteAction::SetHeader { name, value } => {
                 set_header(&mut ctx.headers, name, value.clone());
+                push_tag_once(&mut ctx.tags, "rewrite");
             }
             RewriteAction::AppendHeader { name, value } => {
                 append_header(&mut ctx.headers, name, value);
+                push_tag_once(&mut ctx.tags, "rewrite");
             }
             RewriteAction::RemoveHeader { name } => {
                 remove_header(&mut ctx.headers, name);
+                push_tag_once(&mut ctx.tags, "rewrite");
             }
             RewriteAction::SetStatus { code } => {
                 ctx.status = *code;
+                push_tag_once(&mut ctx.tags, "rewrite");
             }
             RewriteAction::ReplaceBody {
                 pattern,
@@ -333,6 +354,7 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
                     if new_body != text {
                         ctx.set_body_text(new_body);
                         remove_header(&mut ctx.headers, "content-length");
+                        push_tag_once(&mut ctx.tags, "rewrite");
                     }
                 }
             }
@@ -596,6 +618,47 @@ mod tests {
         assert!(!ctx.headers.contains_key("content-length"));
     }
 
+    // ── Request rewrite tagging ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn request_mutation_sets_rewritten_flag() {
+        let mw = UnifiedRewriteMiddleware::new(vec![rule_set(
+            Location::default(),
+            AppliesTo::Request,
+            vec![RewriteAction::SetHeader {
+                name: "x-test".into(),
+                value: "1".into(),
+            }],
+        )]);
+        let mut ctx = req("GET", "h", "/", "");
+        assert!(!ctx.rewritten, "must start false");
+        mw.on_request(&mut ctx).await;
+        assert!(
+            ctx.rewritten,
+            "a request header mutation must set the rewritten flag so the \
+             engine can tag the recorded exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_replace_body_no_match_does_not_set_rewritten_flag() {
+        let mw = UnifiedRewriteMiddleware::new(vec![rule_set(
+            Location::default(),
+            AppliesTo::Request,
+            vec![RewriteAction::ReplaceBody {
+                pattern: "nomatch".into(),
+                replacement: "x".into(),
+            }],
+        )]);
+        let mut ctx = req("POST", "h", "/", "unrelated body");
+        mw.on_request(&mut ctx).await;
+        assert!(
+            !ctx.rewritten,
+            "a no-op ReplaceBody (pattern never matched) must not falsely \
+             claim the request was rewritten"
+        );
+    }
+
     // ── Redirect / Block ───────────────────────────────────────────────────
 
     #[tokio::test]
@@ -617,6 +680,11 @@ mod tests {
             mock.headers.get("Location").map(String::as_str),
             Some("https://new.example.com")
         );
+        assert_eq!(
+            mock.tags,
+            vec!["rewrite".to_string()],
+            "a rule-triggered redirect is itself a rewrite and should be tagged"
+        );
     }
 
     #[tokio::test]
@@ -629,7 +697,9 @@ mod tests {
         let mut ctx = req("GET", "h", "/admin/secret", "");
         let action = mw.on_request(&mut ctx).await;
         assert_eq!(action, MiddlewareAction::StopAndReturn);
-        assert_eq!(ctx.mock_response.unwrap().status, 403);
+        let mock = ctx.mock_response.unwrap();
+        assert_eq!(mock.status, 403);
+        assert_eq!(mock.tags, vec!["rewrite".to_string()]);
     }
 
     // ── multi-criteria Location ────────────────────────────────────────────
@@ -739,6 +809,50 @@ mod tests {
         mw.on_response(&mut ctx).await;
         assert_eq!(ctx.body_text(), "goodbye world");
         assert!(!ctx.headers.contains_key("content-length"));
+    }
+
+    #[tokio::test]
+    async fn response_mutation_tags_exchange_rewritten_once() {
+        let mw = UnifiedRewriteMiddleware::new(vec![rule_set(
+            Location::default(),
+            AppliesTo::Response,
+            vec![
+                RewriteAction::SetHeader {
+                    name: "x-a".into(),
+                    value: "1".into(),
+                },
+                RewriteAction::SetHeader {
+                    name: "x-b".into(),
+                    value: "2".into(),
+                },
+            ],
+        )]);
+        let mut ctx = res("h", "GET", "/", 200);
+        mw.on_response(&mut ctx).await;
+        assert_eq!(
+            ctx.tags,
+            vec!["rewrite".to_string()],
+            "two mutating actions in the same response must not produce \
+             duplicate \"rewritten\" tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_replace_body_no_match_does_not_tag_rewritten() {
+        let mw = UnifiedRewriteMiddleware::new(vec![rule_set(
+            Location::default(),
+            AppliesTo::Response,
+            vec![RewriteAction::ReplaceBody {
+                pattern: "nomatch".into(),
+                replacement: "x".into(),
+            }],
+        )]);
+        let mut ctx = res("h", "GET", "/", 200);
+        mw.on_response(&mut ctx).await;
+        assert!(
+            ctx.tags.is_empty(),
+            "a no-op ReplaceBody must not falsely tag the response as rewritten"
+        );
     }
 
     // ── Response host/method matching ─────────────────────────────────────

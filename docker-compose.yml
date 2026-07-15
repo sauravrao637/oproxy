@@ -3,15 +3,30 @@ services:
     image: oproxy:latest
     build: .
 
-    # host networking lets the proxy see real client IPs and forward traffic without
-    # NAT. Switch to bridge + ports: if you prefer explicit port mapping.
-    network_mode: host
-    # Uncomment for bridge networking instead:
-    # ports:
-    #   - "8080:8080"   # HTTP proxy + admin UI
-    #   - "8443:8443"   # HTTPS proxy listener (if OPROXY_HTTPS_PORT is set)
-    #   - "1080:1080"   # SOCKS5 listener (if socks5_port is set in YAML config)
-    #   - "8443:8443/udp" # HTTP/3 (QUIC) listener (OPROXY_HTTP3_PORT)
+    # Bridge networking + published ports (the default below) works on every
+    # Docker platform, including Docker Desktop for Windows/macOS. `network_mode:
+    # host` (commented out further down) sees real client IPs with zero port
+    # mapping, but only works on Linux hosts - on Docker Desktop it maps into the
+    # Docker Desktop VM, not the actual Windows/macOS host, so the quick-start
+    # is unreachable there. Ports below are bound to the host's
+    # loopback interface only; reaching the admin UI/API through them relies on
+    # OPROXY_ALLOW_REMOTE_ADMIN + OPROXY_ADMIN_TOKEN below - Docker's
+    # port-publishing NAT means the proxy never sees a genuinely loopback peer
+    # even for host-local traffic, so that opt-in + token combination is what
+    # unlocks the UI here instead of the loopback-peer check used on bare metal.
+    ports:
+      - "127.0.0.1:8080:8080"   # HTTP proxy + admin UI
+      # Both mappings below use port 8443, but they are two distinct listeners
+      # on two distinct transports, not a conflict: HTTP/3 is UDP-only (QUIC),
+      # while OPROXY_HTTPS_PORT is a TCP listener. The TCP mapping is only
+      # useful if you uncomment OPROXY_HTTPS_PORT below; HTTP/3 is enabled by
+      # default via OPROXY_HTTP3_ENABLED/OPROXY_HTTP3_PORT further down, so the
+      # UDP mapping is the one actually in use out of the box.
+      - "127.0.0.1:8443:8443"     # OPROXY_HTTPS_PORT (TCP) - unused unless uncommented below
+      - "127.0.0.1:8443:8443/udp" # HTTP/3 (QUIC) listener, UDP - active by default
+      # - "127.0.0.1:1080:1080" # SOCKS5 listener (uncomment with OPROXY_SOCKS5_PORT below)
+    # Uncomment for host networking instead (Linux only - see note above):
+    # network_mode: host
 
     environment:
       # ── Core ─────────────────────────────────────────────────────────────────
@@ -28,27 +43,41 @@ services:
       # HTTPS proxy listener: accepts CONNECT and plain requests over TLS on this port.
       # Clients must trust the generated root CA. Disabled when unset.
       # OPROXY_HTTPS_PORT: "8443"
-      # SOCKS5 and upstream proxy chain have no env var override; configure them
-      # in the YAML config file mounted at /app/configs/default.yaml (see volumes).
+      # upstream_proxy chaining has no env var override; configure it in the
+      # YAML config file mounted at /app/configs/default.yaml (see volumes).
       # HTTP/3 (QUIC) listener on a dedicated UDP port. The Docker image is built
       # with --all-features, so the http3 feature is available; both env vars are
       # required for the listener to start. Forwarded responses advertise it via
       # alt-svc. Clients must trust the oproxy root CA for QUIC TLS.
       OPROXY_HTTP3_ENABLED: "true"
       OPROXY_HTTP3_PORT: "8443"
-      # SOCKS5 port currently comes from YAML (`socks5_port`); if/when an env var
-      # override lands, keep it aligned with the bridge port mapping above.
+      # SOCKS5 listener port. Overrides `socks5_port` in YAML; set to "0" to
+      # disable. Keep aligned with the bridge port mapping above.
       # OPROXY_SOCKS5_PORT: "1080"
+      # The setup wizard (/setup, its QR code, /admin/setup/network-info) auto-detects
+      # a LAN IP by asking the OS which interface it would use to reach the internet -
+      # inside this container that's the Docker bridge address, not anything a phone
+      # or browser on your LAN can reach. Set this to your host machine's
+      # real LAN IP (e.g. what `ipconfig`/`ifconfig` shows) so the wizard advertises a
+      # working address instead. Leave unset if you only access oproxy from this host.
+      # OPROXY_ADVERTISED_HOST: "192.168.1.50"
 
       # ── Admin security ────────────────────────────────────────────────────────
-      # Allow the admin UI/API to be reached from non-loopback clients (phones, VMs).
-      # When false (default), admin routes are only accessible from loopback.
-      OPROXY_ALLOW_REMOTE_ADMIN: "false"
-      # Shared secret for the admin API. Strongly recommended when
-      # OPROXY_ALLOW_REMOTE_ADMIN is true or OPROXY_BIND_HOST is "0.0.0.0".
-      # Accepted via x-oproxy-admin-token header, Authorization: Bearer <token>,
-      # oproxy_admin_token cookie, or ?token=<token> query param.
-      # OPROXY_ADMIN_TOKEN: "change-me-to-a-strong-secret"
+      # Allow the admin UI/API to be reached from non-loopback clients (phones, VMs)
+      # AND from Host: 127.0.0.1 requests whose peer isn't verifiably loopback -
+      # which, under bridge networking + published ports, includes every request
+      # coming through the published port above, even from a browser on the same
+      # machine (Docker's port-publishing NAT means the container never sees true
+      # loopback for that traffic). Required for the Web UI to be reachable at all
+      # with the ports: mapping above; set back to "false" only if you
+      # switch to network_mode: host, where the loopback-only default is safe.
+      OPROXY_ALLOW_REMOTE_ADMIN: "true"
+      # Required once OPROXY_ALLOW_REMOTE_ADMIN is true - CHANGE THIS before
+      # exposing the container beyond your own machine. Accepted via the
+      # x-oproxy-admin-token header, Authorization: Bearer <token>, the
+      # oproxy_admin_token cookie, or a ?token=<token> query param; the Web UI
+      # login page also accepts it directly.
+      OPROXY_ADMIN_TOKEN: "change-me-to-a-strong-secret"
       # Allow admin-initiated requests (/admin/forward, webhooks, replay) to reach
       # private/local IPs. Disabled by default to reduce SSRF exposure.
       # OPROXY_ALLOW_PRIVATE_ADMIN_EGRESS: "false"
@@ -91,13 +120,16 @@ services:
       OPROXY_MAP_LOCAL_BASE_PATH: "/map-local"
 
       # ── TLS verification ──────────────────────────────────────────────────────
-      # Skip TLS certificate verification for upstream connections.
-      # Required when the proxy itself intercepts (MITM) upstream TLS and the
-      # upstream server's cert is signed by the CA which
-      # reqwest's certificate store does not trust by default. It is also useful when
-      # targeting dev servers with self-signed certs.
-      # WARNING: disables all upstream cert validation — do not use in production.
-      OPROXY_INSECURE_UPSTREAM: 1
+      # Skip TLS certificate verification for upstream connections. Off by
+      # default - uncomment only when you specifically need it, e.g. targeting
+      # a dev/staging upstream with a self-signed or private-CA cert that
+      # reqwest's certificate store doesn't trust. Ordinary HTTPS upstreams
+      # (anything with a publicly-trusted cert) work fine through MITM without
+      # this - it is not required for MITM interception in general.
+      # WARNING: disables ALL upstream cert validation for every request this
+      # proxy makes, not just the one upstream you're debugging. Do not leave
+      # this on for routine use or anything resembling production.
+      # OPROXY_INSECURE_UPSTREAM: 1
 
     volumes:
       # ── Persistent data ───────────────────────────────────────────────────────
@@ -114,10 +146,22 @@ services:
       - ./mock-responses:/map-local
       # ── YAML config (optional) ────────────────────────────────────────────────
       # Mount a YAML config file to set options that have no env var override:
-      #   socks5_port, upstream_proxy, timeout_secs, pool_max_idle_per_host,
+      #   upstream_proxy, timeout_secs, pool_max_idle_per_host,
       #   pool_idle_timeout_secs, log.file
+      # (socks5_port does have an override: OPROXY_SOCKS5_PORT, see above.)
       # OPROXY_CONFIG defaults to /app/configs/default.yaml.
       # - ./configs/default.yaml:/app/configs/default.yaml:ro
+
+    # Surfaces a crash-looping container (e.g. from a typo'd env var - invalid
+    # values are fatal by design, see docs/configuration.md) as "unhealthy" in
+    # `docker compose ps`/`docker ps` instead of a silent restart cycle with no
+    # obvious signal short of reading logs. /health is served without auth.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
     restart: unless-stopped
 

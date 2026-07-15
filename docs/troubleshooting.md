@@ -52,6 +52,36 @@ Common causes:
 - The CA volume or `certs` directory changed, so the client trusts an old CA.
 - The target app uses certificate pinning.
 
+## HTTPS Fails On Windows With `CERT_TRUST_REVOCATION_STATUS_UNKNOWN`
+
+Windows/Schannel-based clients (`curl.exe`, .NET `HttpClient`, and some other
+system components) validate certificate revocation status by default.
+oproxy's generated MITM certificates don't carry a CRL Distribution Point or
+OCSP URL, so Schannel treats revocation as "required but unavailable" and
+rejects the connection with an error like:
+
+```text
+schannel: CertGetCertificateChain trust error CERT_TRUST_REVOCATION_STATUS_UNKNOWN
+```
+
+This doesn't affect OpenSSL-based clients (curl on Linux/macOS, most
+browsers), only Schannel-based ones. Workarounds:
+
+- `curl.exe --ssl-revoke-best-effort --cacert oproxy-ca.crt -x http://127.0.0.1:8080 https://example.com`
+- In .NET, disable revocation checking on the `HttpClientHandler`/`SslOptions`
+  used for the request (e.g. `CertificateRevocationCheckMode.NoCheck`).
+
+Generated certificates already omit CRL Distribution Points and Authority Information Access extensions. `rcgen` provides no additional flag to declare the absence of revocation information.
+Fabricating a CRL/AIA extension that points nowhere would require
+hand-built ASN.1/DER (rcgen has no typed API for it) and there's no
+evidence it changes Schannel's behavior - Schannel treats "cannot
+determine revocation status" as a failure when
+`CheckCertificateRevocationList`/equivalent is on, regardless of
+whether that's because no extension is present or because an extension
+points at an unreachable responder. Other MITM tools (mitmproxy,
+Charles) rely on the same absence-based default and document the same
+client-side workarounds above rather than adding cert extensions.
+
 ## Docker UI Is Unreachable
 
 When using `docker run` with port publishing, the process inside the container must bind to `0.0.0.0`:
@@ -73,7 +103,7 @@ Check:
 curl http://127.0.0.1:8080/admin/socks5/status
 ```
 
-SOCKS5 is enabled only when `socks5_port` is set in YAML. The built-in default is disabled; `configs/default.yaml` sets `socks5_port: 1080`.
+SOCKS5 is enabled only when `socks5_port` is set (via YAML or the `OPROXY_SOCKS5_PORT` env var, which overrides YAML). The built-in default is disabled; `configs/default.yaml` sets `socks5_port: 1080`.
 
 ## Admin API Returns 403 On Forwarding Or Webhooks
 

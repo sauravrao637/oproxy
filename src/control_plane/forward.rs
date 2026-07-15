@@ -45,6 +45,19 @@ pub(super) struct ForwardReq {
     pub(super) note: Option<String>,
     #[serde(default)]
     pub(super) tags: Option<Vec<String>>,
+    /// When true, route the send through the same request middleware chain
+    /// (DNS override, Map Remote, Map Local, Mock, Access Control,
+    /// Capture Filter, Rewrite, Breakpoint), so a rule that works for
+    /// proxied traffic also works when replaying/testing via Compose. Set to
+    /// false to send exactly to the literal URL, bypassing all of that -
+    /// e.g. to deliberately check what the real upstream returns without a
+    /// Map Local/Mock rule intercepting it.
+    #[serde(default = "default_true")]
+    pub(super) apply_proxy_rules: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
@@ -250,7 +263,7 @@ pub(super) async fn forward_http_exchange(
 
     // Record request in session manager
     let protocol_context = protocol_context_for_kind(req.kind, url_parsed.scheme(), None);
-    let req_ctx = RequestContext {
+    let mut req_ctx = RequestContext {
         method: if is_grpc {
             "POST".to_string()
         } else {
@@ -262,13 +275,36 @@ pub(super) async fn forward_http_exchange(
         body: bytes::Bytes::from(body_bytes.clone()),
         downstream_protocol: Some(protocol_context.downstream.label().to_string()),
         protocol_context: Some(protocol_context),
+        // Pre-set so InspectionMiddleware's chain step (see CLAUDE.md's
+        // middleware order) no-ops instead of creating a second, duplicate
+        // session when apply_proxy_rules routes this through
+        // execute_request_middleware below - Compose does its own recording
+        // via record_request_with_source, same as before.
+        session_id: Some(session_id.clone()),
+        // Seed the real scheme+host the same way MITM'd HTTPS traffic does
+        // for real proxy requests (destination: mitm_destination in
+        // handle_request_with_destination). prepare_upstream()'s target_url()
+        // falls back to a hardcoded `http://` when destination is None - correct
+        // for real proxy traffic (destination is always populated by the time
+        // it gets there), but would silently downgrade an `https://` Compose
+        // request to plain HTTP if left unset. DNS override/Map Remote
+        // middleware below still overrides this when a rule actually matches.
+        destination: if req.apply_proxy_rules {
+            Some(format!("{}://{host}", url_parsed.scheme()))
+        } else {
+            None
+        },
         ..Default::default()
     };
     let request_size_bytes = req_ctx.body.len();
     state
         .api_handler
         .session_manager
-        .record_request_with_source(session_id.clone(), req_ctx, SessionSource::AdminForward);
+        .record_request_with_source(
+            session_id.clone(),
+            req_ctx.clone(),
+            SessionSource::AdminForward,
+        );
     if req.note.is_some() || req.tags.is_some() {
         state
             .api_handler
@@ -286,6 +322,83 @@ pub(super) async fn forward_http_exchange(
         );
     }
 
+    // Run request middleware before resolving the destination unless the caller
+    // opts out. A short circuit here (Access Control block,
+    // Map Local/Mock serving a canned response, Capture Filter, etc.) is
+    // converted into a Compose response instead of continuing to a real
+    // network call - scoped to request-side resolution only; Compose keeps
+    // its own response handling/timing/session-recording as before.
+    if req.apply_proxy_rules {
+        let method_str = req_ctx.method.clone();
+        if let Err(short_circuit) = state
+            .proxy_engine
+            .execute_request_middleware(
+                &mut req_ctx,
+                crate::core::engine::RequestMetadata {
+                    uri: &display_uri,
+                    host: &host,
+                    method: &method_str,
+                },
+            )
+            .await
+        {
+            return Ok(short_circuit_to_forward_resp(
+                state,
+                &session_id,
+                display_uri,
+                request_size_bytes,
+                short_circuit,
+            )
+            .await);
+        }
+    }
+
+    // Resolve the actual upstream target. DNS override/Map Remote may have
+    // rewritten req_ctx.destination during the chain above; fall back to the
+    // literal request URL when apply_proxy_rules is off (or nothing matched).
+    let (send_url, send_headers) = if req.apply_proxy_rules {
+        let axum_uri: axum::http::Uri = req.url.parse().map_err(|e| {
+            ForwardFailure::BadRequest(format!("Invalid URL for routing resolution: {e}"))
+        })?;
+        match state
+            .proxy_engine
+            .prepare_upstream(&mut req_ctx, &axum_uri, &req.url)
+        {
+            Ok(upstream) => {
+                // Re-check the admin egress policy against the *resolved*
+                // destination, not just the original URL - otherwise a DNS
+                // override/Map Remote rule could redirect this
+                // admin-initiated request into a private network that the
+                // check above already decided to block for the literal URL.
+                // Only actually restrictive when allow_remote_admin is on
+                // without allow_private_admin_egress (AdminEgressPolicy::
+                // from_config) - a no-op otherwise, same as the check above.
+                if let Ok(resolved) = reqwest::Url::parse(&upstream.url)
+                    && let Err(e) = enforce_admin_egress_policy(
+                        &resolved,
+                        AdminEgressPolicy::from_config(&state.config),
+                    )
+                    .await
+                {
+                    return Err(ForwardFailure::EgressBlocked(e));
+                }
+                (upstream.url, Some(upstream.headers))
+            }
+            Err(resp) => {
+                return Ok(short_circuit_to_forward_resp(
+                    state,
+                    &session_id,
+                    display_uri,
+                    request_size_bytes,
+                    *resp,
+                )
+                .await);
+            }
+        }
+    } else {
+        (req.url.clone(), None)
+    };
+
     // Build and send request using the proxy engine's http client
     let method = if is_grpc {
         reqwest::Method::POST
@@ -296,9 +409,13 @@ pub(super) async fn forward_http_exchange(
         .proxy_engine
         .http_client()
         .await
-        .request(method, &req.url);
-    for (k, v) in &req.headers {
-        builder = builder.header(k, v);
+        .request(method, &send_url);
+    if let Some(headers) = send_headers {
+        builder = builder.headers(headers);
+    } else {
+        for (k, v) in &req.headers {
+            builder = builder.header(k, v);
+        }
     }
     if is_grpc
         && !req
@@ -422,6 +539,73 @@ pub(super) async fn forward_http_exchange(
                 .record_response_with_metrics(session_id.clone(), res_ctx, metrics);
             Err(ForwardFailure::Upstream(e.to_string()))
         }
+    }
+}
+
+/// Convert a request-middleware short-circuit `Response` from
+/// `execute_request_middleware`/`prepare_upstream` (Access Control block,
+/// Map Local/Mock serving a canned response, "proxy loop detected", etc.)
+/// into a `ForwardResp`, recording it as the response side of the Compose
+/// session exactly like a real network response would be - so a rule that
+/// would block/mock real proxy traffic is visibly reflected in Compose too,
+/// not silently skipped.
+async fn short_circuit_to_forward_resp(
+    state: &Arc<AppState>,
+    session_id: &str,
+    display_uri: String,
+    request_size_bytes: usize,
+    response: axum::response::Response,
+) -> ForwardResp {
+    let status = response.status().as_u16();
+    let mut res_headers: HashMap<String, String> = HashMap::new();
+    for (k, v) in response.headers() {
+        res_headers.insert(k.to_string(), v.to_str().unwrap_or("").to_string());
+    }
+    let content_type = res_headers.get("content-type").cloned().unwrap_or_default();
+    let bytes = axum::body::to_bytes(response.into_body(), state.proxy_engine.max_body_bytes())
+        .await
+        .unwrap_or_default();
+    let (body, is_binary) = if is_binary_content_type(&content_type) {
+        (
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+            true,
+        )
+    } else {
+        (String::from_utf8_lossy(&bytes).to_string(), false)
+    };
+
+    let res_ctx = ResponseContext {
+        status,
+        headers: res_headers.clone().into(),
+        body: bytes.clone(),
+        request_uri: display_uri,
+        session_id: Some(session_id.to_string()),
+        ..Default::default()
+    };
+    let metrics = crate::session::InspectionMetrics {
+        request_size_bytes,
+        response_size_bytes: bytes.len(),
+        status_code: status,
+        ..Default::default()
+    };
+    state
+        .api_handler
+        .session_manager
+        .record_response_with_metrics(session_id.to_string(), res_ctx, metrics);
+
+    let status_text = reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("")
+        .to_string();
+    ForwardResp {
+        status,
+        status_text,
+        headers: res_headers,
+        body,
+        is_binary,
+        session_id: session_id.to_string(),
+        protocol: None,
     }
 }
 
@@ -583,15 +767,16 @@ fn websocket_message(frame: ForwardWsFrameReq) -> Message {
         "binary" => Message::Binary(
             base64::engine::general_purpose::STANDARD
                 .decode(frame.payload.as_bytes())
-                .unwrap_or_else(|_| frame.payload.into_bytes()),
+                .unwrap_or_else(|_| frame.payload.into_bytes())
+                .into(),
         ),
-        "ping" => Message::Ping(frame.payload.into_bytes()),
-        "pong" => Message::Pong(frame.payload.into_bytes()),
+        "ping" => Message::Ping(frame.payload.into_bytes().into()),
+        "pong" => Message::Pong(frame.payload.into_bytes().into()),
         "close" => Message::Close(Some(CloseFrame {
             code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
             reason: frame.payload.into(),
         })),
-        _ => Message::Text(frame.payload),
+        _ => Message::Text(frame.payload.into()),
     }
 }
 

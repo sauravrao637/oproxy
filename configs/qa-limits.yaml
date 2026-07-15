@@ -1,0 +1,31 @@
+# QA profile: tight resource limits to make edge-case behaviour reachable
+# without synthetic load.
+#
+# Standalone file — see configs/qa-admin.yaml for why fields are restated
+# here rather than assumed "inherited" from configs/default.yaml.
+#
+# Exercises: response streaming vs. buffering (stream_threshold_bytes),
+# request/response body rejection (max_body_bytes), and session-log
+# eviction (max_sessions) — all reachable with small, everyday test
+# payloads instead of load-testing tools. Distinct port/storage/log so it
+# can run alongside the default instance and the other qa-*.yaml profiles:
+#
+#   OPROXY_CONFIG=configs/qa-limits.yaml cargo run
+
+port: 8083
+
+storage_path: ./storage-qa-limits
+
+log:
+  level: info
+  dir: .
+  file: server-qa-limits.log
+
+mitm:
+  enabled: true
+  root_ca_path: ./certs
+
+max_body_bytes: 65536       # 64 KB - easy to exceed with a small test payload
+stream_threshold_bytes: 8192 # 8 KB - most fixture responses will stream, not buffer
+max_sessions: 20             # evicts quickly so oldest-session eviction is observable
+max_connections: 16

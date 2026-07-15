@@ -16,26 +16,26 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       # The running binary reports CARGO_PKG_VERSION; the in-app update check
       # compares it to the latest GitHub release tag. If Cargo.toml is not bumped
       # to match the tag being released, every build of this release would report
       # "update available" against itself. Fail the release early when they drift.
+      # `cargo xtask verify-release-version` (xtask/src/main.rs) is the same
+      # check run locally before tagging a release; see `cargo xtask --help`.
       - name: Verify Cargo.toml version matches release tag
         if: github.event_name == 'release'
-        run: |
-          tag="${{ github.event.release.tag_name }}"
-          tag="${tag#v}"
-          cargo_ver="$(sed -nE 's/^version = "([^"]+)".*/\1/p' Cargo.toml | head -n1)"
-          echo "release tag: $tag | Cargo.toml version: $cargo_ver"
-          if [ "$tag" != "$cargo_ver" ]; then
-            echo "::error::Release tag '$tag' does not match Cargo.toml version '$cargo_ver'. Bump the version in Cargo.toml to $tag before publishing the release."
-            exit 1
-          fi
+        run: cargo xtask verify-release-version "${{ github.event.release.tag_name }}"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22.x'
 
@@ -44,27 +44,18 @@ jobs:
           corepack enable
           corepack prepare yarn@4.15.0 --activate
 
+      # `cargo xtask build-ui` (xtask/src/main.rs) — same command as `make ui`
+      # locally, so this step can't drift from what contributors run.
       - name: Build UI
-        run: |
-          yarn --cwd src/design install --immutable
-          yarn --cwd src/design build
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        run: cargo xtask build-ui
 
       - name: Rust tests
         run: RUSTFLAGS="-D warnings" cargo test
 
+      # `cargo xtask check-dist` (xtask/src/main.rs) — same command as
+      # `make check-dist` locally.
       - name: Runtime asset sanity
-        run: |
-          test -f src/design/dist/index.html
-          test -f src/design/dist/assets/app.js
-          test -f src/design/dist/assets/app.css
-          ! grep -R "text/babel\\|unpkg\\|cdn.jsdelivr\\|fonts.googleapis\\|fonts.gstatic" src/design/dist src/management.rs
-          ! grep -R "Trust status\\|oproxy probes the OS keychain\\|Command palette\\|command palette\\|Save session log\\|Pause / resume recording" src/design/dist
+        run: cargo xtask check-dist
 
       - name: Resolve image tag
         id: image

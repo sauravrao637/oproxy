@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Repo automation for oproxy (cargo xtask <command>). See xtask/src/main.rs for the command list."
+
+# Intentionally std-only so `cargo xtask ...` stays fast to compile.
+[dependencies]
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"

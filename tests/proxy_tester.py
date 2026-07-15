@@ -14,6 +14,12 @@ gracefully when aioquic is unavailable or the proxy's H3 listener is unreachable
 Usage:
   python proxy_tester.py --http-proxy http://localhost:8080 --socks-proxy socks5://localhost:1080 [--verbose]
   python proxy_tester.py --http-proxy http://localhost:8080 --h3-proxy h3://localhost:8443 [--verbose]
+  python proxy_tester.py --http-proxy http://localhost:8080 --admin-token change-me-to-a-strong-secret
+
+--admin-token is required when the proxy has admin auth enabled (OPROXY_ADMIN_TOKEN
+configured server-side, e.g. the checked-in docker-compose.yml); it is sent as the
+x-oproxy-admin-token header on every /admin/* call the manipulation-feature tests
+make. Also read from the OPROXY_ADMIN_TOKEN env var.
 """
 
 import os
@@ -42,6 +48,7 @@ if RUN_TESTS_FLAG not in sys.argv:
     parser.add_argument('--target-host', default='127.0.0.1')
     parser.add_argument('--timeout', type=int, default=10)
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--admin-token', default=os.environ.get('OPROXY_ADMIN_TOKEN'))
     args, unknown = parser.parse_known_args()
 
     temp_dir = tempfile.mkdtemp(prefix='proxy_tester_venv_')
@@ -162,6 +169,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Global state
 # ----------------------------------------------------------------------
 server_manager = None
+ADMIN_TOKEN = None  # set from --admin-token / OPROXY_ADMIN_TOKEN in run_tests()
 _shutdown_event = threading.Event()
 
 def _handle_signal(signum, frame):
@@ -296,6 +304,10 @@ def _admin_request(proxy_url, method, path, timeout, **kwargs):
     admin_base = _admin_base_from_http_proxy(proxy_url)
     if not admin_base:
         raise ValueError("session assertions require an HTTP proxy/admin URL")
+    if ADMIN_TOKEN:
+        # Merge rather than skip when the caller already sets headers (e.g. the
+        # Map Local fixture upload's Content-Type), so the token isn't dropped.
+        kwargs['headers'] = {**kwargs.get('headers', {}), 'x-oproxy-admin-token': ADMIN_TOKEN}
     return requests.request(method, f"{admin_base}{path}", timeout=timeout, **kwargs)
 
 def _session_exchange(session_or_detail):
@@ -2803,6 +2815,9 @@ def run_tests():
     parser.add_argument('--target-host', default='127.0.0.1')
     parser.add_argument('--timeout', type=int, default=10)
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--admin-token', default=os.environ.get('OPROXY_ADMIN_TOKEN'),
+        help='Admin token for /admin/* API calls; required when the proxy has '
+             'admin auth enabled. Also read from OPROXY_ADMIN_TOKEN.')
     parser.add_argument('--run-tests', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -2812,6 +2827,9 @@ def run_tests():
     target_host = args.target_host
     timeout     = args.timeout
     verbose     = args.verbose
+
+    global ADMIN_TOKEN
+    ADMIN_TOKEN = args.admin_token
 
     # Derive h3_proxy from the HTTP proxy host + default H3 port 8443 when the
     # caller did not set --h3-proxy explicitly.  The H3 listener is gated behind

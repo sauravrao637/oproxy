@@ -68,10 +68,11 @@ struct RuntimeComponents {
     map_local_rules: SharedMapLocalRules,
     map_remote_rules: SharedMapRemoteRules,
     breakpoints: Arc<BreakpointManager>,
+    max_body_bytes: usize,
 }
 
 impl RuntimeComponents {
-    async fn load(storage_path: &std::path::Path) -> Self {
+    async fn load(storage_path: &std::path::Path, max_body_bytes: usize) -> Self {
         let breakpoints = Arc::new(BreakpointManager::new());
         for rule in storage::load_breakpoints(storage_path) {
             breakpoints.add_rule(rule).await;
@@ -85,6 +86,7 @@ impl RuntimeComponents {
             map_local_rules: Arc::new(RwLock::new(storage::load_map_local_rules(storage_path))),
             map_remote_rules: Arc::new(RwLock::new(storage::load_map_remote_rules(storage_path))),
             breakpoints,
+            max_body_bytes,
         }
     }
 
@@ -124,7 +126,10 @@ impl RuntimeComponents {
             session_manager: session_manager.clone(),
             breakpoint_manager: self.breakpoints.clone(),
         }));
-        chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager)));
+        chain.add_middleware(Arc::new(
+            InspectionMiddleware::new(session_manager)
+                .with_max_retained_body_bytes(self.max_body_bytes),
+        ));
         chain
     }
 }
@@ -167,6 +172,7 @@ async fn build_proxy_engine(
         bind_host: config.bind_host.clone(),
         timeout_secs: config.timeout_secs,
         max_body_bytes,
+        stream_threshold_bytes: config.stream_threshold_bytes,
         pool_max_idle_per_host: config.pool_max_idle_per_host,
         pool_idle_timeout_secs: config.pool_idle_timeout_secs,
         upstream_proxy: stored_proxy.or_else(|| config.upstream_proxy.clone()),
@@ -220,7 +226,7 @@ pub(super) async fn build_runtime_services(
 
     crate::examples::seed_first_run_examples(&storage_path).await;
 
-    let components = RuntimeComponents::load(&storage_path).await;
+    let components = RuntimeComponents::load(&storage_path, config.max_body_bytes).await;
     let middleware_chain = Arc::new(RwLock::new(
         components.build_request_chain(session_manager.clone()),
     ));

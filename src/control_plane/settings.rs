@@ -75,8 +75,8 @@ pub(super) async fn get_ca_qr(State(state): State<Arc<AppState>>) -> impl IntoRe
     if state.proxy_engine.ca.is_none() {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
-    let remote_ip =
-        crate::setup::public_lan_ip_for_setup().unwrap_or_else(|| "127.0.0.1".to_string());
+    let remote_ip = crate::setup::advertised_lan_ip(state.config.advertised_host.as_deref())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     let url = format!("http://{}:{}/admin/ca", remote_ip, state.config.port);
 
     match qrcode::QrCode::new(url.as_bytes()) {

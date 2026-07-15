@@ -53,6 +53,27 @@ Set a token. The server warns if remote admin is enabled without one.
 
 When remote admin is enabled, `/admin/forward`, playback, and webhooks cannot target private, loopback, link-local, multicast, or unspecified IP ranges unless `allow_private_admin_egress` is true.
 
+### `allow_remote_admin` and containerized deployments
+
+On bare metal, `Host: 127.0.0.1`/`localhost`/`::1`/`0.0.0.0` requests are only
+treated as management traffic when the TCP peer is verifiably loopback - a
+remote client cannot get in just by sending a spoofed Host header. Under
+Docker's bridge networking with a published port, the container never
+observes a genuinely loopback peer for that traffic, even when the request
+really is coming from a browser on the same machine (Docker's port-publishing
+NAT rewrites the source address). To make the Web UI reachable there anyway,
+`allow_remote_admin=true` + a configured `admin_token` extends the same
+trust-the-token-not-the-peer model already used for LAN-hostname admin access
+to this loopback-family case too: once both are set, a loopback-family Host
+header is accepted as management traffic regardless of peer address, and the
+token is still required for anything beyond the small public-path allowlist
+(`/`, `/login`, `/health`, `/admin/ca`, `/setup`, `/setup/mobile`,
+`/admin/setup/network-info`, static assets). This only changes behavior for
+non-loopback peers; a real loopback peer is still trusted without a token, as
+before. Don't enable `allow_remote_admin` without a strong `admin_token`, and
+don't publish the port beyond host loopback (`-p 127.0.0.1:8080:8080`, not
+`-p 8080:8080`) unless you intend the admin UI to be reachable from the LAN.
+
 ## Storage Considerations
 
 Server-side `storage_path` persists rule and control-plane state. Live sessions are in memory unless explicitly saved or exported.
@@ -69,6 +90,8 @@ Sensitive locations:
 - webhook destination logs
 
 Default exports redact common sensitive headers and body fields. Raw exports are intentionally unredacted.
+
+`GET /api/sessions/{id}/export?format=<curl|fetch|python>&raw=true` requests the unredacted variant; the intuitive `redact=false` is not accepted. `raw` defaults to `false` (redacted) when omitted.
 
 ## Lua Scripts
 

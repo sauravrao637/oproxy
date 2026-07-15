@@ -37,14 +37,32 @@ struct MockWebSocketContext {
 
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-impl WebSocketRequest {
-    fn prepare(req: &Request<Incoming>) -> Self {
-        let uri = req.uri();
-        let headers = req.headers().clone();
-        let header_host = headers
-            .get("host")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
+/// Resolves the (host, port, scheme) triple a WS upgrade should dial upstream.
+///
+/// A MITM'd (TLS-decrypted) request line carries no scheme of its own - the
+/// client sent an origin-form request (`GET /path HTTP/1.1` + `Host:`) inside
+/// what is, from hyper's perspective, just another plaintext connection, so
+/// `uri.scheme_str()`/`uri.port_u16()` are always `None` here even though the
+/// real upstream is `wss://` on whatever port the CONNECT tunnel targeted.
+/// Without this, `connect_upstream` would dial `ws://host:80` instead of
+/// `wss://host:<real-port>`.
+/// (the `https://{authority}` the MITM TLS layer already resolved for the
+/// buffered HTTP path) is authoritative when present, mirroring
+/// `core::engine::wire::request_scheme`.
+fn resolve_ws_target(
+    uri: &hyper::Uri,
+    header_host: &str,
+    mitm_destination: Option<&str>,
+) -> (String, u16, &'static str) {
+    if let Some(destination) = mitm_destination {
+        let authority = destination
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(destination);
+        let (host, port_str) = authority.rsplit_once(':').unwrap_or((authority, "443"));
+        let port = port_str.parse::<u16>().unwrap_or(443);
+        (host.to_string(), port, "wss")
+    } else {
         let host = uri.host().map(str::to_string).unwrap_or_else(|| {
             header_host
                 .split(':')
@@ -64,6 +82,19 @@ impl WebSocketRequest {
         } else {
             "ws"
         };
+        (host, port, scheme)
+    }
+}
+
+impl WebSocketRequest {
+    fn prepare(req: &Request<Incoming>, mitm_destination: Option<&str>) -> Self {
+        let uri = req.uri();
+        let headers = req.headers().clone();
+        let header_host = headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let (host, port, scheme) = resolve_ws_target(uri, header_host, mitm_destination);
         let path = uri
             .path_and_query()
             .map(hyper::http::uri::PathAndQuery::as_str)
@@ -217,6 +248,7 @@ pub async fn handle_websocket(
     session_id: String,
     peer: Option<std::net::SocketAddr>,
     mut shutdown: watch::Receiver<bool>,
+    mitm_destination: Option<String>,
 ) -> Response<Body> {
     let sm = context.session_manager.clone();
     let breakpoint_manager = context.breakpoint_manager.clone();
@@ -226,7 +258,7 @@ pub async fn handle_websocket(
     let connect_timeout = context.connect_timeout;
     let handshake_timeout = context.handshake_timeout;
 
-    let prepared = WebSocketRequest::prepare(&req);
+    let prepared = WebSocketRequest::prepare(&req, mitm_destination.as_deref());
     let request_context = prepared.request_context();
 
     if let Some(script) = select_ws_mock_script(&mock_rules, &request_context).await {
@@ -562,15 +594,15 @@ async fn run_ws_mock_script(
 
 fn ws_action_to_message(action: &WsFrameAction) -> Message {
     match action.opcode {
-        0x1 => Message::Text(action.payload.clone()),
-        0x2 => Message::Binary(action.payload.as_bytes().to_vec()),
+        0x1 => Message::Text(action.payload.clone().into()),
+        0x2 => Message::Binary(action.payload.as_bytes().to_vec().into()),
         0x8 => Message::Close(Some(CloseFrame {
             code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
             reason: action.payload.clone().into(),
         })),
-        0x9 => Message::Ping(action.payload.as_bytes().to_vec()),
-        0xA => Message::Pong(action.payload.as_bytes().to_vec()),
-        _ => Message::Text(action.payload.clone()),
+        0x9 => Message::Ping(action.payload.as_bytes().to_vec().into()),
+        0xA => Message::Pong(action.payload.as_bytes().to_vec().into()),
+        _ => Message::Text(action.payload.clone().into()),
     }
 }
 
@@ -777,8 +809,8 @@ fn message_body(msg: &Message) -> bytes::Bytes {
 
 fn message_with_body(original: Message, body: bytes::Bytes) -> Message {
     match original {
-        Message::Text(_) => Message::Text(String::from_utf8_lossy(&body).into_owned()),
-        Message::Binary(_) => Message::Binary(body.to_vec()),
+        Message::Text(_) => Message::Text(String::from_utf8_lossy(&body).into_owned().into()),
+        Message::Binary(_) => Message::Binary(body),
         other => other,
     }
 }
@@ -833,9 +865,50 @@ mod tests {
         assert!(!is_websocket_upgrade(&req));
     }
 
+    /// Origin-form WebSocket upgrades require the MITM destination to supply
+    /// the `wss` scheme and CONNECT port.
+    #[test]
+    fn resolve_ws_target_uses_mitm_destination_to_force_wss_and_real_port() {
+        let uri: hyper::Uri = "/socket".parse().unwrap();
+
+        let (host, port, scheme) =
+            resolve_ws_target(&uri, "echo.test", Some("https://echo.test:8443"));
+
+        assert_eq!(host, "echo.test");
+        assert_eq!(port, 8443);
+        assert_eq!(
+            scheme, "wss",
+            "a MITM'd upgrade must dial the real upstream over TLS, not plaintext ws://"
+        );
+    }
+
+    #[test]
+    fn resolve_ws_target_mitm_destination_defaults_to_443_without_explicit_port() {
+        let uri: hyper::Uri = "/socket".parse().unwrap();
+
+        let (host, port, scheme) = resolve_ws_target(&uri, "echo.test", Some("https://echo.test"));
+
+        assert_eq!(host, "echo.test");
+        assert_eq!(port, 443);
+        assert_eq!(scheme, "wss");
+    }
+
+    #[test]
+    fn resolve_ws_target_without_mitm_destination_falls_back_to_uri_and_host_header() {
+        // Plain (non-MITM) ws:// upgrade: no destination override, so the
+        // request's own URI/Host must still be used exactly as before.
+        let uri: hyper::Uri = "ws://echo.test:9000/socket".parse().unwrap();
+
+        let (host, port, scheme) = resolve_ws_target(&uri, "echo.test:9000", None);
+
+        assert_eq!(host, "echo.test");
+        assert_eq!(port, 9000);
+        assert_eq!(scheme, "ws");
+    }
+
     #[test]
     fn text_message_maps_to_opcode_1() {
-        let msg = Message::Text("hello".to_string());
+        let msg = Message::Text("hello".to_string().into());
         let (opcode, len, text, hex) = map_tungstenite_message_to_record(&msg).unwrap();
         assert_eq!(opcode, 0x1);
         assert_eq!(len, 5);
@@ -845,7 +918,7 @@ mod tests {
 
     #[test]
     fn binary_message_maps_to_opcode_2_with_hex() {
-        let msg = Message::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let msg = Message::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF].into());
         let (opcode, len, text, hex) = map_tungstenite_message_to_record(&msg).unwrap();
         assert_eq!(opcode, 0x2);
         assert_eq!(len, 4);
@@ -863,7 +936,7 @@ mod tests {
     #[test]
     fn large_text_preview_truncated_to_512_chars() {
         let big = "x".repeat(1000);
-        let msg = Message::Text(big);
+        let msg = Message::Text(big.into());
         let (_, len, text, _) = map_tungstenite_message_to_record(&msg).unwrap();
         assert_eq!(len, 1000);
         assert_eq!(text.unwrap().len(), 512);
@@ -1040,6 +1113,6 @@ mod tests {
             payload: "bin".to_string(),
             delay_ms: 0,
         });
-        assert!(matches!(binary, Message::Binary(bytes) if bytes == b"bin"));
+        assert!(matches!(binary, Message::Binary(bytes) if bytes.as_ref() == b"bin"));
     }
 }

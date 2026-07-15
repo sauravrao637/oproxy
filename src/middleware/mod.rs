@@ -274,6 +274,12 @@ pub struct RequestContext {
     /// in-memory protocol side channel; the legacy flattened fields above remain
     /// for current UI/API compatibility.
     pub protocol_context: Option<crate::core::forward::ProtocolContext>,
+    /// Set by `UnifiedRewriteMiddleware::on_request` when a matched rule
+    /// actually mutated the request (headers, query, host, path, or body).
+    /// The engine seeds the corresponding `ResponseContext.tags` with
+    /// `"rewrite"` from this flag so the recorded exchange is tagged even
+    /// when the rewrite only touched the request side. In-memory only.
+    pub rewritten: bool,
 }
 
 impl RequestContext {

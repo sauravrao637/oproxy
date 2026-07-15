@@ -61,7 +61,7 @@ impl PlaybackEngine {
             SessionSource::Playback,
         );
         self.session_manager.record_response(
-            new_id,
+            new_id.clone(),
             crate::middleware::ResponseContext {
                 status,
                 body: response.bytes().await.unwrap_or_default(),
@@ -69,6 +69,11 @@ impl PlaybackEngine {
                 ..Default::default()
             },
         );
+        // Apply the replay tag explicitly because this path bypasses
+        // `InspectionMiddleware`, which normally merges response tags.
+        self.session_manager
+            .annotate(&new_id, None, Some(vec!["replay".to_string()]))
+            .await;
         info!(status, uri=%replay.uri, "Playback: replayed");
     }
 
@@ -131,4 +136,94 @@ fn is_hop_by_hop_header(name: &str) -> bool {
             | "trailer"
             | "upgrade"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionManager;
+    use axum::Router;
+    use axum::routing::get;
+
+    fn empty_exchange(id: &str, uri: String) -> Exchange {
+        Exchange {
+            id: id.to_string(),
+            timestamp: chrono::Utc::now(),
+            updated_at: None,
+            request: crate::middleware::RequestContext {
+                method: "GET".to_string(),
+                uri,
+                headers: crate::middleware::HeaderMap::new(),
+                body: bytes::Bytes::new(),
+                host: "127.0.0.1".to_string(),
+                ..Default::default()
+            },
+            response: None,
+            metrics: None,
+            source: SessionSource::Proxy,
+            ws_frames: vec![],
+            events: vec![],
+            note: None,
+            tags: vec![],
+            inspector_data: None,
+            paused_at: None,
+            connection_id: None,
+            stream_id: None,
+            downstream_protocol: None,
+            protocol_context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_tags_the_new_session_as_replayed() {
+        let upstream = Router::new().route("/echo", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = std::sync::Arc::new(SessionManager::new(10_000));
+        let engine = PlaybackEngine::new(
+            sessions.clone(),
+            crate::security::AdminEgressPolicy::default(),
+        );
+
+        let original = empty_exchange("orig", format!("http://127.0.0.1:{}/echo", addr.port()));
+        engine.replay(vec![original]).await;
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        let replayed = recorded
+            .iter()
+            .find(|e| matches!(e.source, SessionSource::Playback))
+            .expect("the replayed request must be recorded as a new Playback-sourced session");
+        assert!(
+            replayed.tags.iter().any(|t| t == "replay"),
+            "replayed sessions must carry the \"replayed\" tag, got {:?}",
+            replayed.tags
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_of_unreachable_target_records_no_session() {
+        let sessions: SharedSessionManager = std::sync::Arc::new(SessionManager::new(10_000));
+        let engine = PlaybackEngine::new(
+            sessions.clone(),
+            crate::security::AdminEgressPolicy::default(),
+        );
+
+        // Port 1 is very unlikely to have anything listening.
+        let original = empty_exchange("orig", "http://127.0.0.1:1/unreachable".to_string());
+        engine.replay(vec![original]).await;
+
+        sessions.flush().await;
+        assert!(
+            sessions
+                .get_all_sessions()
+                .iter()
+                .all(|e| !matches!(e.source, SessionSource::Playback)),
+            "a failed replay must not record a spurious empty session"
+        );
+    }
 }

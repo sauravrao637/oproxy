@@ -1,4 +1,4 @@
-.PHONY: help setup fmt build build-release test lint clean
+.PHONY: help setup fmt build build-release ui check-dist test lint clean soak-test
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -8,13 +8,8 @@ help: ## Show this help
 
 # ── Dev setup ─────────────────────────────────────────────────────────────────
 
-setup: ## Install git hooks (pre-commit: cargo fmt --all)
-	@mkdir -p .git/hooks
-	@printf '#!/usr/bin/env sh\nset -e\necho "Running cargo fmt --all..."\ncargo fmt --all -- --check\n' > .git/hooks/pre-commit
-	@chmod +x .git/hooks/pre-commit
-	@echo "✓ Pre-commit hook installed (.git/hooks/pre-commit)"
-	@echo "  Runs: cargo fmt --all -- --check"
-	@echo "  Fix:  make fmt"
+setup: ## Verify required tooling, then install git hooks (pre-commit: cargo fmt --all)
+	cargo xtask setup
 
 # ── Formatting ────────────────────────────────────────────────────────────────
 
@@ -30,16 +25,21 @@ build-release: ## Release build (includes UI assets)
 	cargo build --release
 
 ui: ## Build the React UI assets (requires Node + Yarn)
-	corepack enable
-	yarn --cwd src/design install --immutable
-	yarn --cwd src/design build
+	cargo xtask build-ui
+
+check-dist: ## Verify src/design/dist exists and has no dev-only/CDN leakage
+	cargo xtask check-dist
+
+audit:
+	cargo audit
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 
 test: test-rust test-ui ## Run all tests (Rust + Playwright browser tests)
 
+test-rust: export RUSTFLAGS := -D warnings
 test-rust: ## Run Rust unit/integration tests
-	RUSTFLAGS="-D warnings" cargo test --all-features
+	cargo test --all-features
 
 test-ui: ## Run Playwright browser tests (builds debug binary first)
 	@echo "Building debug binary for browser tests..."
@@ -51,7 +51,10 @@ test-ui: ## Run Playwright browser tests (builds debug binary first)
 lint: ## Run Clippy (warnings as errors)
 	cargo clippy --all-targets -- -D warnings
 
-check: fmt lint test ## fmt + lint + test (full pre-release check)
+check: fmt lint test audit## fmt + lint + test (full pre-release check)
+
+soak-test: build-release ## Baseline latency + sustained-load/memory-ceiling check (see docs/performance.md)
+	bash scripts/soak-test.sh
 
 # ── Housekeeping ──────────────────────────────────────────────────────────────
 

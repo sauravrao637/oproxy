@@ -24,6 +24,10 @@ fn default_max_body_bytes() -> usize {
     10 * 1024 * 1024
 }
 
+fn default_stream_threshold_bytes() -> u64 {
+    crate::core::engine::DEFAULT_STREAM_THRESHOLD_BYTES
+}
+
 fn default_pool_max_idle_per_host() -> usize {
     10
 }
@@ -141,6 +145,14 @@ pub struct Config {
     /// Maximum request/response body buffered in memory (bytes). Default 10 MB.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    /// Responses at or below this size are buffered (so inspection/rewrite
+    /// middleware can see the full body); larger ones - and any chunked/SSE
+    /// response regardless of size - are streamed straight through instead.
+    /// Default 512 KB. Raising this lets more responses be captured/rewritten
+    /// at the cost of buffering more per exchange; see "max_body_bytes and
+    /// large request/response bodies" in docs/configuration.md.
+    #[serde(default = "default_stream_threshold_bytes")]
+    pub stream_threshold_bytes: u64,
     /// Max idle connections kept per upstream host.
     #[serde(default = "default_pool_max_idle_per_host")]
     pub pool_max_idle_per_host: usize,
@@ -213,6 +225,15 @@ pub struct Config {
     /// `OPROXY_UPDATE_CHECK=false` to disable it.
     #[serde(default = "default_update_check")]
     pub update_check: bool,
+    /// Explicit host/IP to advertise in the setup wizard (`/admin/setup/network-info`,
+    /// the CA-download QR code) instead of auto-detecting one. Auto-detection opens a
+    /// UDP socket to infer this machine's outbound LAN IP, which inside a container
+    /// resolves to the container's own bridge/internal address - unreachable from the
+    /// host or a real LAN client. Set via `OPROXY_ADVERTISED_HOST` in
+    /// containerized/NAT deployments to the address phones/browsers can actually reach
+    /// (e.g. the Docker host's LAN IP).
+    #[serde(default)]
+    pub advertised_host: Option<String>,
     /// Logging configuration.
     #[serde(default)]
     pub log: LogConfig,
@@ -236,6 +257,7 @@ impl Default for Config {
             handshake_timeout_secs: default_handshake_timeout_secs(),
             shutdown_grace_secs: default_shutdown_grace_secs(),
             max_body_bytes: default_max_body_bytes(),
+            stream_threshold_bytes: default_stream_threshold_bytes(),
             pool_max_idle_per_host: default_pool_max_idle_per_host(),
             pool_idle_timeout_secs: default_pool_idle_timeout_secs(),
             max_sessions: default_max_sessions(),
@@ -255,6 +277,7 @@ impl Default for Config {
             otel_endpoint: None,
             map_local_base_path: default_map_local_base_path(),
             update_check: default_update_check(),
+            advertised_host: None,
         }
     }
 }
@@ -268,26 +291,94 @@ impl Config {
     ///   3. Built-in defaults
     ///
     /// Config file path: `OPROXY_CONFIG` env var -> `./configs/default.yaml`.
-    /// Loading panics if the selected file cannot be read or parsed.
+    ///
+    /// Loading panics if `OPROXY_CONFIG` is set explicitly but the file it
+    /// points at cannot be read, or if the selected file cannot be parsed.
+    /// If `OPROXY_CONFIG` is *not* set and the default `./configs/default.yaml`
+    /// is missing, this falls back to [`Config::default()`] with a warning
+    /// because built-in defaults are the final documented precedence tier.
+    ///
+    /// Emits config-phase diagnostics (loaded-from-file / validation warnings)
+    /// via `tracing` immediately. Callers that run before the tracing
+    /// subscriber is installed (i.e. the main startup path) should use
+    /// [`Config::load_with_diagnostics`] instead so these messages aren't
+    /// silently dropped.
     pub fn load() -> Self {
-        let path =
-            env_value("OPROXY_CONFIG").unwrap_or_else(|| "./configs/default.yaml".to_string());
+        let (config, infos, warnings) = Self::load_with_diagnostics();
 
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Failed to read config file '{path}': {e}"));
-
-        let mut config = serde_yaml::from_str::<Config>(&contents)
-            .unwrap_or_else(|e| panic!("Failed to parse config file '{path}': {e}"));
-
-        info!(path = %path, "Loaded config from file");
-
-        config.apply_env_overrides();
-
-        for w in config.validate() {
+        for m in &infos {
+            info!("{m}");
+        }
+        for w in &warnings {
             warn!(warning = %w, "Config validation");
         }
 
         config
+    }
+
+    /// Like [`Config::load`], but returns config-phase diagnostics (informational
+    /// messages and validation warnings) instead of emitting them via `tracing`
+    /// immediately. The caller decides when/how to log them.
+    ///
+    /// This exists because `tracing` isn't initialised until after the config
+    /// is loaded (logging needs `config.log.*`) - anything logged inside
+    /// `load()` itself is silently dropped on the real startup path. The
+    /// runtime entry point calls this, sets up logging, then flushes the
+    /// returned diagnostics.
+    pub fn load_with_diagnostics() -> (Self, Vec<String>, Vec<String>) {
+        let explicit_path = env_value("OPROXY_CONFIG");
+        let is_explicit = explicit_path.is_some();
+        let path = explicit_path.unwrap_or_else(|| "./configs/default.yaml".to_string());
+
+        Self::load_from_path(&path, is_explicit)
+    }
+
+    /// Core of [`Config::load_with_diagnostics`], parameterised on the resolved
+    /// path and whether it was explicitly requested (via `OPROXY_CONFIG`) so
+    /// the fallback-to-defaults behaviour is unit-testable without touching
+    /// the process environment or working directory.
+    fn load_from_path(path: &str, explicit: bool) -> (Self, Vec<String>, Vec<String>) {
+        let mut infos = Vec::new();
+        let mut warnings = Vec::new();
+
+        let mut config = match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let parsed = serde_yaml::from_str::<Config>(&contents)
+                    .unwrap_or_else(|e| panic!("Failed to parse config file '{path}': {e}"));
+                infos.push(format!("Loaded config from file: {path}"));
+                parsed
+            }
+            Err(e) if !explicit => {
+                // Default config path missing (e.g. running the bare binary
+                // outside Docker/without a YAML present) - fall back to
+                // built-in defaults instead of panicking. An explicitly-set
+                // OPROXY_CONFIG pointing at a missing file is still fatal
+                // (the user asked for that specific file).
+                warnings.push(format!(
+                    "Config file '{path}' not found - using built-in defaults ({e})"
+                ));
+                Config::default()
+            }
+            Err(e) => panic!("Failed to read config file '{path}': {e}"),
+        };
+
+        config.apply_env_overrides();
+
+        // max_connections: 0 silently breaks the proxy - every downstream
+        // connection is accepted then immediately dropped by the connection
+        // supervisor, with no indication why. Clamp to a usable
+        // floor instead of shipping a proxy that accepts no traffic.
+        if config.max_connections == 0 {
+            warnings.push(
+                "max_connections was 0 (all downstream connections would be rejected) - clamped to 1"
+                    .to_string(),
+            );
+            config.max_connections = 1;
+        }
+
+        warnings.extend(config.validate());
+
+        (config, infos, warnings)
     }
 
     /// Override config values from environment variables
@@ -319,11 +410,17 @@ impl Config {
         if let Some(value) = env_value("OPROXY_SOCKS5_PORT") {
             self.socks5_port = parse_optional_port("OPROXY_SOCKS5_PORT", &value);
         }
+        if let Some(value) = env_value("OPROXY_ADVERTISED_HOST") {
+            self.advertised_host = non_empty(value);
+        }
     }
 
     fn apply_runtime_env(&mut self) {
         if let Some(value) = env_value("OPROXY_MAX_BODY_BYTES") {
             self.max_body_bytes = parse_env("OPROXY_MAX_BODY_BYTES", &value);
+        }
+        if let Some(value) = env_value("OPROXY_STREAM_THRESHOLD_BYTES") {
+            self.stream_threshold_bytes = parse_env("OPROXY_STREAM_THRESHOLD_BYTES", &value);
         }
         if let Some(value) = env_value("OPROXY_MAX_SESSIONS") {
             self.max_sessions = parse_env("OPROXY_MAX_SESSIONS", &value);
@@ -428,6 +525,14 @@ impl Config {
                 "max_body_bytes is 0 - request/response bodies will not be buffered".to_string(),
             );
         }
+        if self.stream_threshold_bytes == 0 {
+            warnings.push(
+                "stream_threshold_bytes is 0 - every non-empty response will be streamed, so \
+                 response-mutating middleware (rewrite/mock/lua replace_body) will have no \
+                 effect on any response"
+                    .to_string(),
+            );
+        }
         if self.max_connections == 0 {
             warnings.push(
                 "max_connections is 0 - all downstream connections will be rejected".to_string(),
@@ -510,8 +615,12 @@ impl Config {
             .as_deref()
             .is_none_or(|token| token.trim().is_empty());
         if self.allow_remote_admin && admin_token_missing {
+            // Remote admin remains blocked without a token; warn because the
+            // setting is ineffective until a token is configured.
             warnings.push(
-                "allow_remote_admin is enabled without admin_token - management APIs are exposed"
+                "allow_remote_admin is enabled without admin_token - remote admin access is \
+                 blocked (fails closed) until OPROXY_ADMIN_TOKEN is set; the feature has no \
+                 effect yet"
                     .to_string(),
             );
         }
@@ -899,6 +1008,7 @@ mod tests {
         let mut env = EnvGuard::new();
         env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
         env.set("OPROXY_MAX_BODY_BYTES", "4096");
+        env.set("OPROXY_STREAM_THRESHOLD_BYTES", "2048");
         env.set("OPROXY_MAX_SESSIONS", "123");
         env.set("OPROXY_MAX_RETAINED_BODY_BYTES", "8192");
         env.set("OPROXY_MAX_CONNECTIONS", "44");
@@ -908,6 +1018,7 @@ mod tests {
         let cfg = Config::load();
         env.remove("OPROXY_CONFIG");
         env.remove("OPROXY_MAX_BODY_BYTES");
+        env.remove("OPROXY_STREAM_THRESHOLD_BYTES");
         env.remove("OPROXY_MAX_SESSIONS");
         env.remove("OPROXY_MAX_RETAINED_BODY_BYTES");
         env.remove("OPROXY_MAX_CONNECTIONS");
@@ -915,12 +1026,32 @@ mod tests {
         env.remove("OPROXY_HANDSHAKE_TIMEOUT_SECS");
         env.remove("OPROXY_SHUTDOWN_GRACE_SECS");
         assert_eq!(cfg.max_body_bytes, 4096);
+        assert_eq!(cfg.stream_threshold_bytes, 2048);
         assert_eq!(cfg.max_sessions, 123);
         assert_eq!(cfg.max_retained_body_bytes, 8192);
         assert_eq!(cfg.max_connections, 44);
         assert_eq!(cfg.connect_timeout_secs, 3);
         assert_eq!(cfg.handshake_timeout_secs, 4);
         assert_eq!(cfg.shutdown_grace_secs, 5);
+    }
+
+    #[test]
+    fn stream_threshold_bytes_defaults_to_512kb() {
+        assert_eq!(Config::default().stream_threshold_bytes, 512 * 1024);
+    }
+
+    #[test]
+    fn stream_threshold_bytes_zero_warns() {
+        let cfg = Config {
+            stream_threshold_bytes: 0,
+            ..Config::default()
+        };
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|w| w.contains("stream_threshold_bytes")),
+            "a 0 threshold silently streams every response and should warn"
+        );
     }
 
     #[test]
@@ -1002,6 +1133,7 @@ mod tests {
         assert_eq!(cfg.handshake_timeout_secs, 10);
         assert_eq!(cfg.shutdown_grace_secs, 10);
         assert_eq!(cfg.max_body_bytes, 10 * 1024 * 1024);
+        assert_eq!(cfg.stream_threshold_bytes, 512 * 1024);
         assert_eq!(cfg.max_sessions, 10_000);
         assert_eq!(cfg.max_retained_body_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.max_connections, 1024);
@@ -1046,6 +1178,57 @@ mod tests {
             .unwrap_or_default();
         assert!(message.contains("Failed to parse config file"));
         assert!(message.contains(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn load_from_path_falls_back_to_defaults_when_default_missing() {
+        // A missing default config file falls back to built-in defaults with
+        // a warning. An explicitly configured path remains required.
+        let _env = EnvGuard::new();
+        let (cfg, _infos, warnings) =
+            Config::load_from_path("/tmp/oproxy_definitely_missing_default.yaml", false);
+
+        assert_eq!(cfg.port, Config::default().port);
+        assert_eq!(cfg.max_connections, Config::default().max_connections);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("not found") && w.contains("built-in defaults"))
+        );
+    }
+
+    #[test]
+    fn load_from_path_panics_when_explicit_path_missing() {
+        // An explicitly-set OPROXY_CONFIG pointing at a missing file is still
+        // fatal - the user asked for that specific file.
+        let _env = EnvGuard::new();
+        let result = std::panic::catch_unwind(|| {
+            Config::load_from_path("/tmp/oproxy_definitely_missing_explicit.yaml", true)
+        });
+
+        let panic = result.expect_err("explicit missing config should panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(message.contains("Failed to read config file"));
+    }
+
+    #[test]
+    fn max_connections_zero_is_clamped_to_one() {
+        // Clamp zero to the minimum usable connection limit and emit a warning.
+        let mut env = EnvGuard::new();
+        env.set("OPROXY_CONFIG", DEFAULT_CONFIG_PATH);
+        env.set("OPROXY_MAX_CONNECTIONS", "0");
+
+        let (cfg, _infos, warnings) = Config::load_with_diagnostics();
+
+        env.remove("OPROXY_CONFIG");
+        env.remove("OPROXY_MAX_CONNECTIONS");
+
+        assert_eq!(cfg.max_connections, 1);
+        assert!(warnings.iter().any(|w| w.contains("clamped to 1")));
     }
 
     #[test]

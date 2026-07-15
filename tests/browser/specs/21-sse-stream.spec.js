@@ -4,8 +4,7 @@ const { resetWorkspace } = require('./helpers');
 
 test.describe('SSE session stream', () => {
   test('/api/sessions/stream returns event-stream content-type', async ({ request }) => {
-    // We just verify the endpoint is reachable and returns SSE headers
-    // (we can't hold the connection open in a request context, so abort quickly)
+    // The request client cannot keep an SSE connection open, so use a short timeout.
     const res = await request.get('/api/sessions/stream', { timeout: 2000 }).catch(e => e);
     // Either ok with text/event-stream, or a timeout (also acceptable — means endpoint exists)
     if (res && res.headers) {

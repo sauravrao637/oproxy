@@ -41,6 +41,7 @@ pub(super) enum ApiError {
 }
 
 impl ApiError {
+    #[allow(dead_code)]
     fn parts(&self) -> (StatusCode, &str) {
         match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),

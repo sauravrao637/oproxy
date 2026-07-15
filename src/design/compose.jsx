@@ -79,6 +79,7 @@ function normalizeComposeRequest(req = {}) {
     authToken: req.authToken || '',
     authUser: req.authUser || '',
     authPass: req.authPass || '',
+    applyProxyRules: req.applyProxyRules !== false,
     wsFrames: Array.isArray(req.wsFrames) && req.wsFrames.length ? req.wsFrames : DEFAULT_WS_FRAMES.map(f => ({ ...f, id: 'wf_' + Math.random().toString(36).slice(2, 8) })),
   };
 }
@@ -411,6 +412,7 @@ function ComposeSurface({ incomingRequest }) {
         body: active.body,
         bodyMode: active.bodyMode,
         contentType: active.contentType,
+        applyProxyRules: active.applyProxyRules,
         wsFrames: active.wsFrames,
       };
       return {
@@ -469,6 +471,7 @@ function ComposeSurface({ incomingRequest }) {
             url,
             headers,
             body: active.body ? resolveVars(active.body) : null,
+            apply_proxy_rules: active.applyProxyRules !== false,
           };
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -757,6 +760,14 @@ function ComposeEditor({ tab, updateActive, send, saveActive, openSaveBar, resol
           <Icon name="resume" size={10} /> Send
         </button>
         <button className="btn" onClick={() => copyText(buildComposeCurl(tab, resolveVars))}>cURL</button>
+        {tab.kind !== 'websocket' && (
+          <label className="cmp-rules-toggle"
+                 style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-faint)', flexShrink: 0, cursor: 'pointer' }}
+                 title="When on, this request is routed through your proxy's rules (DNS override, Map Remote, Map Local, Mock, Access Control, Rewrite, Breakpoints) before sending - same as real proxied traffic. Turn off to send straight to the URL as typed, bypassing all of that.">
+            <Toggle on={tab.applyProxyRules !== false} onChange={v => updateActive({ applyProxyRules: v })} label="Apply proxy rules" />
+            Rules
+          </label>
+        )}
         {tab.savedId
           ? <>
               <button className="btn" onClick={saveActive} title="Save changes to current collection">Save</button>

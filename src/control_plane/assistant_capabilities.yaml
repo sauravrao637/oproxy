@@ -370,6 +370,7 @@ features:
       - "HTTP forward: propose_action POST /admin/forward with method, url, headers, body."
       - "gRPC forward: propose_action POST /admin/forward with kind=grpc, url, and body (the message payload); the body is wrapped in a gRPC frame and sent as POST with content-type application/grpc+proto."
       - "WebSocket forward: propose_action POST /admin/forward/websocket with url (ws:// or wss://), optional headers, and frames (array of {opcode: text|binary|ping|pong|close, payload}); binary payloads are base64. Up to 10 server frames are collected before the socket is closed."
+      - "HTTP/gRPC forwards accept an optional apply_proxy_rules boolean (default true): when true the request is routed through the same rules real proxied traffic uses (DNS override, Map Remote, Map Local, Mock, Access Control, Rewrite, Breakpoint) before being sent, so a rule that affects proxied traffic affects this forward too; set apply_proxy_rules=false to send straight to the literal URL instead, e.g. to check what the real upstream returns without a Map Local/Mock rule intercepting it. Not available for WebSocket forwards."
 
   - id: dns_overrides
     title: DNS Overrides
