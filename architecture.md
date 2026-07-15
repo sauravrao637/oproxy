@@ -1,6 +1,6 @@
 # oproxy — Architecture
 
-_Last updated: 2026-05-26. Reflects the current `dev` branch._
+_Reflects oproxy v0.1.10._
 
 ---
 
@@ -220,19 +220,19 @@ CONNECT handling requires access to the raw TCP socket via `hyper::upgrade::on`.
 
 ---
 
-## Known limitations / planned work
+## Current limitations
 
 | Area | Status |
 |---|---|
 | WebSocket proxying | **Implemented** — plain `ws://` proxied via TCP tunnel in `transport::websocket::handle_websocket()`; `wss://` works via CONNECT tunnel |
 | Brotli decompression | **Implemented** — `Content-Encoding: br` decoded using `brotli` crate alongside gzip/deflate |
 | Non-SSE response streaming | **Implemented** — responses with `Content-Length > 512 KB` use streaming path; smaller responses still buffered |
-| Binary body in middleware | Partial — original bytes forwarded intact when no middleware modifies the body; if a rewrite rule edits the body, the binary is lossy-decoded then re-encoded as UTF-8, silently corrupting it |
+| Binary body in middleware | Partial — original bytes forward intact when no middleware modifies the body; if a rewrite rule edits the body, it is lossy-decoded then re-encoded as UTF-8, corrupting non-text payloads. See "Binary body forwarding" above; no regression test covers the corrupting path yet |
 | Async file I/O | **Implemented** — `save_to_file` / `load_from_file` use `tokio::fs` |
 | Session pagination | **Implemented** — `GET /api/sessions?limit=N&offset=M&since=<timestamp>` |
 | HTTPS listener | **Implemented** — `https_port` config field (or `OPROXY_HTTPS_PORT` env var); when set, a second TLS listener accepts HTTPS proxy connections; client must trust the CA |
-| HTTP/2 downstream | Partial — listener uses hyper's auto builder, but HTTP/2 CONNECT, gRPC, and extended CONNECT behavior still need protocol compliance tests |
-| Config hot reload | Config is read once at startup; changing the YAML file requires a restart (Low priority) |
+| HTTP/2 downstream | Partial — listener uses hyper's auto builder; HTTP/2 CONNECT and gRPC are covered by `tests/e2e_protocol_test.py`, but extended CONNECT behavior still needs protocol compliance tests |
+| Config hot reload | Config is read once at startup; changing the YAML file requires a restart |
 | Metrics endpoint | **Implemented** — `GET /admin/metrics` returns aggregate latency/size stats |
 | SSE polling | **Implemented** — `GET /api/sessions/stream` (SSE); UI subscribes once and refreshes on each event |
 | Session save/load | **Implemented** — `POST /admin/sessions/save` and `POST /admin/sessions/load` |

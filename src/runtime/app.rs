@@ -472,12 +472,10 @@ mod tests {
     }
 
     #[test]
-    fn security_summary_reports_insecure_upstream_status_from_env() {
-        // Not exercising the OPROXY_INSECURE_UPSTREAM=1 branch here: it's a
-        // process-wide env var and other tests in this binary run in
-        // parallel, so mutating it here would be racy. Default (unset) is
-        // covered, matching the "safe by default" behaviour that matters
-        // most for this banner.
+    fn security_summary_reports_insecure_upstream_status_default() {
+        // OPROXY_INSECURE_UPSTREAM is a process-wide env var read by other
+        // parallel tests in this binary, so only the default (unset, safe) path
+        // is covered here; see docs/configuration.md for the enabled-branch behaviour.
         let config = base_config();
         let lines = security_summary_lines(&config, "localhost");
         assert!(

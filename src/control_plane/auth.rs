@@ -463,11 +463,9 @@ mod tests {
 
     #[test]
     fn configured_admin_token_treats_absent_empty_and_whitespace_as_no_token() {
-        // This is the function that drives the no-token bypass in admin_auth_layer.
-        // When it returns None, the middleware lets ALL admin requests through without
-        // authentication. Confirm all "empty" variants produce None so that operators
-        // who set admin_token: (no value) or admin_token: "" get the expected bypass,
-        // not a silent 401 caused by a partially-matched token.
+        // Security-critical: None here means admin_auth_layer allows all admin
+        // requests through unauthenticated. Every "empty" variant of admin_token
+        // must map to None, not just a literal absence.
         let mut cfg = crate::config::Config::default();
         assert!(configured_admin_token(&cfg).is_none(), "None → no-token");
 
