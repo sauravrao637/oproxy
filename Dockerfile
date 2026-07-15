@@ -53,8 +53,12 @@ COPY configs ./configs
 
 # Directories created at runtime; declaring them makes intent explicit and
 # allows volume mounts to overlay them cleanly.
-RUN groupadd --system oproxy && \
-    useradd --system --gid oproxy --home-dir /app --no-create-home oproxy && \
+# uid/gid pinned (not auto-assigned) so `docker run --tmpfs ...,uid=10001,gid=10001`
+# can target this exact user — tmpfs mounts don't inherit the image's chown the
+# way named volumes do, so an unpinned id would leave the tmpfs root-owned and
+# unwritable by oproxy (see release-smoke.yaml).
+RUN groupadd --system --gid 10001 oproxy && \
+    useradd --system --uid 10001 --gid oproxy --home-dir /app --no-create-home oproxy && \
     mkdir -p certs storage && \
     chown -R oproxy:oproxy /app
 
