@@ -69,11 +69,10 @@ struct StreamRequest {
     protocol_context: ProtocolContext,
 }
 
-// Compose (`control_plane/forward.rs`) reuses
-// execute_request_middleware/prepare_upstream below to resolve DNS
+// pub(crate) so Compose (`control_plane/forward.rs`) can reuse
+// execute_request_middleware/prepare_upstream below, resolving DNS
 // override/Map Remote/Map Local/Mock/Access Control the same way real
-// proxy traffic does, instead of sending straight to the literal request
-// URL. These were private (engine-internal) until then.
+// proxy traffic does instead of sending straight to the literal request URL.
 pub(crate) struct RequestMetadata<'a> {
     pub(crate) uri: &'a str,
     pub(crate) host: &'a str,
