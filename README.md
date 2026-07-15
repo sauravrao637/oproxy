@@ -4,6 +4,12 @@ oproxy is a local HTTP, HTTPS, and SOCKS5 proxy for inspecting, replaying, and m
 
 It is for developers testing browsers, CLIs, mobile apps, API clients, services, and test suites on their own machine or in a local Docker container.
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/47640?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-47640" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/47640/daily?language=Rust" alt="sauravrao637%2Foproxy | Trendshift" width="250" height="55"/>
+  </a>
+</p>
+
 ## Features
 
 - Capture HTTP traffic and HTTPS traffic after trusting the local oproxy CA.
