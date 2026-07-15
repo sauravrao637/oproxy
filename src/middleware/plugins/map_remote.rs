@@ -10,6 +10,7 @@
 
 use crate::middleware::matcher::{Location, MatchTarget};
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext};
+use crate::session::{FlowRuleKind, FlowTargetSource, RequestFlowEvent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -75,6 +76,17 @@ impl Middleware for MapRemoteMiddleware {
         for rule in rules.iter().filter(|r| r.enabled) {
             if rule.location.matches(&target) {
                 ctx.destination = Some(rule.destination.clone());
+                ctx.push_flow(RequestFlowEvent::RuleMatched {
+                    rule_kind: FlowRuleKind::MapRemote,
+                    rule_id: rule.id.clone(),
+                    rule_name: rule.name.clone(),
+                });
+                ctx.push_flow(RequestFlowEvent::TargetSelected {
+                    source: FlowTargetSource::MapRemote,
+                    target: rule.destination.clone(),
+                    rule_id: Some(rule.id.clone()),
+                    rule_name: Some(rule.name.clone()),
+                });
                 return MiddlewareAction::Continue; // first-match wins
             }
         }
@@ -119,6 +131,22 @@ mod tests {
         let mut ctx = req("api.local", "/v1/users");
         assert_eq!(mw.on_request(&mut ctx).await, MiddlewareAction::Continue);
         assert_eq!(ctx.destination.as_deref(), Some("http://10.0.0.1:3000"));
+        assert_eq!(
+            ctx.flow,
+            vec![
+                crate::session::RequestFlowEvent::RuleMatched {
+                    rule_kind: crate::session::FlowRuleKind::MapRemote,
+                    rule_id: "t".into(),
+                    rule_name: "t".into(),
+                },
+                crate::session::RequestFlowEvent::TargetSelected {
+                    source: crate::session::FlowTargetSource::MapRemote,
+                    target: "http://10.0.0.1:3000".into(),
+                    rule_id: Some("t".into()),
+                    rule_name: Some("t".into()),
+                },
+            ]
+        );
     }
 
     #[tokio::test]

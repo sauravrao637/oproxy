@@ -1337,8 +1337,19 @@ function RulesSurface({ createFrom, initialTab }) {
   // Pre-fill from create-from-session action
   React.useEffect(() => {
     if (!createFrom) return;
-    setTab('rules');
-    setRsEdit(createFrom);
+    if (createFrom._contextAction === 'mapremote') {
+      setTab('mapremote');
+      setMrEdit(createFrom);
+    } else if (createFrom._contextAction === 'maplocal') {
+      setTab('maplocal');
+      setMlEdit(createFrom);
+    } else if (createFrom._contextAction === 'access') {
+      setTab('access');
+      setAcEdit(createFrom);
+    } else {
+      setTab('rules');
+      setRsEdit(createFrom);
+    }
   }, [createFrom]);
 
   const saveThrottle = async (cfg) => {

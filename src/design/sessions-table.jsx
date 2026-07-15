@@ -1,4 +1,5 @@
 import React from 'react';
+const { ContextMenu } = window;
 /* Sessions list — table with column sorting, drag-to-resize columns, sticky header */
 
 const fmtBytes = (n) => {
@@ -121,63 +122,33 @@ function saveColWidths(widths) {
 
 // ── Context menu for creating rules/mocks/breakpoints from sessions ───────────
 
-function SessionContextMenu({ x, y, session, onClose }) {
-  const ref = React.useRef(null);
-
-  React.useEffect(() => {
-    const dismiss = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
-    document.addEventListener('mousedown', dismiss);
-    document.addEventListener('scroll', onClose, true);
-    return () => { document.removeEventListener('mousedown', dismiss); document.removeEventListener('scroll', onClose, true); };
-  }, [onClose]);
-
-  const dispatch = (action) => {
-    const loc = {
-      host: session.host || '',
-      path: session.path || '.*',
-      methods: session.method && session.method !== '*' && !['CONNECT'].includes(session.method)
-        ? [session.method] : undefined,
-      mode: 'glob',
-    };
-    const prefill = { location: loc, name: `${action === 'mock' ? 'Mock' : action === 'rule' ? 'Rewrite' : 'BP'} ${session.method || ''} ${session.host || ''}${session.path || '/'}`.trim() };
-    window.dispatchEvent(new CustomEvent('oproxy:create-from-session', { detail: { action, prefill } }));
-    onClose();
-  };
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        position: 'fixed', left: x, top: y, zIndex: 9999,
-        background: 'var(--surface-2, #2a2a2a)', border: '1px solid var(--border)',
-        borderRadius: 6, boxShadow: '0 4px 16px rgba(0,0,0,0.4)', padding: '4px 0',
-        minWidth: 190, fontSize: 12,
-      }}
-      onClick={e => e.stopPropagation()}>
-      <div style={{ padding: '3px 10px 5px', fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: '1px solid var(--border-soft)', marginBottom: 3 }}>
-        {session.method} {session.host}{session.path}
-      </div>
-      {[
-        ['mock',       '🔲 Create mock rule'],
-        ['rule',       '✏️ Add rewrite rule'],
-        ['breakpoint', '⏸ Add breakpoint'],
-      ].map(([action, label]) => (
-        <button key={action}
-          style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 14px', background: 'none', border: 'none', color: 'var(--text)', cursor: 'pointer', fontSize: 12 }}
-          onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-hi, rgba(255,255,255,0.07))'}
-          onMouseLeave={e => e.currentTarget.style.background = 'none'}
-          onClick={() => dispatch(action)}>
-          {label}
-        </button>
-      ))}
-    </div>
-  );
+function sessionMenuTitle(s) {
+  return `${s.displayMethod || s.method} ${s.host || ''} ${s.path || '/'}`.trim();
 }
 
-function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, onBulkToggle, onBulkToggleAll, emptyState }) {
+function buildSessionMenu(session, actions = {}) {
+  const app = session.appBucket || (session.appProtocol === 'WebSocket' ? 'ws' : session.appProtocol === 'gRPC' ? 'grpc' : session.appProtocol === 'Tunnel' ? 'tunnel' : 'http');
+  const replayable = session.canReplay !== false && app !== 'tunnel';
+  const composable = session.canCompose !== false && app !== 'tunnel';
+  const isGrpc = app === 'grpc';
+  const isWs = app === 'ws';
+  const isTunnel = app === 'tunnel';
+
+  return {
+    title: sessionMenuTitle(session),
+    subtitle: [session.appProtocol, session.wireProtocol].filter(Boolean).join(' · '),
+    items: [
+      { id: 'ask-assistant', label: 'Ask Assistant', icon: 'bolt', onSelect: () => actions.askAssistant?.(session) },
+      { id: 'compose', label: isWs ? 'Open WS in Compose' : isGrpc ? 'Open gRPC in Compose' : 'Open in Compose', icon: 'open', hidden: !composable, onSelect: () => actions.openInCompose?.(session) },
+      { id: 'replay', label: isWs ? 'Replay client frames' : isGrpc ? 'Replay gRPC request' : 'Replay', icon: 'replay', hidden: !replayable, onSelect: () => actions.replay?.(session) },
+      { id: 'copy-command', label: isTunnel ? 'Copy destination' : isWs ? 'Copy as websocat' : 'Copy as cURL', icon: 'copy', onSelect: () => isTunnel ? actions.copyUrl?.(session) : actions.copyCommand?.(session) },
+    ],
+  };
+}
+function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, onBulkToggle, onBulkToggleAll, emptyState, sessionActions }) {
   const maxTotal = Math.max(...sessions.map(s => s.total), 1);
   const hasBulk = !!onBulkToggle;
-  const [contextMenu, setContextMenu] = React.useState(null); // {x, y, session}
+  const [contextMenu, setContextMenu] = React.useState(null);
   const allChecked = hasBulk && sessions.length > 0 && sessions.every(s => bulkSel?.has(s.id));
 
   // ── Column widths (localStorage-backed) ───────────────────────────────────
@@ -253,6 +224,17 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
     );
   };
 
+  const openSessionMenu = (event, session, keyboard = false) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setContextMenu({
+      x: keyboard ? rect.left + 22 : event.clientX,
+      y: keyboard ? rect.top + 22 : event.clientY,
+      ...buildSessionMenu(session, sessionActions),
+    });
+  };
+
   return (
     <div className="table-wrap" role="grid" onClick={() => contextMenu && setContextMenu(null)}>
       <table className="t">
@@ -289,8 +271,12 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
                     s.paused  ? 'paused'  : '',
                     s.pending ? 'pending' : '',
                   ].filter(Boolean).join(' ')}
+                  tabIndex={0}
                   onClick={() => onSelect(s.id)}
-                  onContextMenu={e => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: s }); }}>
+                  onContextMenu={e => openSessionMenu(e, s)}
+                  onKeyDown={e => {
+                    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) openSessionMenu(e, s, true);
+                  }}>
                 {hasBulk && (
                   <td className="cell-check" onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox"
@@ -348,17 +334,13 @@ function SessionsTable({ sessions, selectedId, onSelect, sort, onSort, bulkSel, 
           )}
         </tbody>
       </table>
-      {contextMenu && (
-        <SessionContextMenu
-          x={contextMenu.x} y={contextMenu.y} session={contextMenu.session}
-          onClose={() => setContextMenu(null)} />
-      )}
+      {contextMenu && <ContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />}
     </div>
   );
 }
 
 /* Structure view — host/path tree */
-function StructureView({ sessions, selectedId, onSelect, emptyState }) {
+function StructureView({ sessions, selectedId, onSelect, emptyState, sessionActions }) {
   const tree = React.useMemo(() => {
     const t = {};
     sessions.forEach(s => {
@@ -372,11 +354,22 @@ function StructureView({ sessions, selectedId, onSelect, emptyState }) {
   }, [sessions]);
   const [openHosts, setOpenHosts] = React.useState(() => new Set(Object.keys(tree)));
   const [openSegs, setOpenSegs] = React.useState(() => new Set());
+  const [contextMenu, setContextMenu] = React.useState(null);
   const toggleHost = h => setOpenHosts(p => { const n = new Set(p); n.has(h) ? n.delete(h) : n.add(h); return n; });
   const toggleSeg = key => setOpenSegs(p => { const n = new Set(p); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const openSessionMenu = (event, session, keyboard = false) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setContextMenu({
+      x: keyboard ? rect.left + 22 : event.clientX,
+      y: keyboard ? rect.top + 22 : event.clientY,
+      ...buildSessionMenu(session, sessionActions),
+    });
+  };
 
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" onClick={() => contextMenu && setContextMenu(null)}>
       <div className="tree">
         {Object.keys(tree).length === 0 && (
           <div className="empty">
@@ -409,7 +402,12 @@ function StructureView({ sessions, selectedId, onSelect, emptyState }) {
                       <div key={s.id}
                            className={'tree-node tree-leaf' + (selectedId === s.id ? ' selected' : '')}
                            style={{ paddingLeft: 56 }}
-                           onClick={() => onSelect(s.id)}>
+                           tabIndex={0}
+                           onClick={() => onSelect(s.id)}
+                           onContextMenu={e => openSessionMenu(e, s)}
+                           onKeyDown={e => {
+                             if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) openSessionMenu(e, s, true);
+                           }}>
                         <span className="cell-method" data-m={s.method}>{s.method}</span>
                         <span className="path">{s.path}{s.query && <span className="dim">{s.query}</span>}</span>
                         <span className="status cell-status" data-c={statusBucket(s.status)}>{s.status || '⏸'}</span>
@@ -422,6 +420,7 @@ function StructureView({ sessions, selectedId, onSelect, emptyState }) {
           );
         })}
       </div>
+      {contextMenu && <ContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />}
     </div>
   );
 }

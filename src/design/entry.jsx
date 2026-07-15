@@ -5,6 +5,7 @@ import './styles.css';
 await import('./tweaks-panel.jsx');
 await import('./redaction.jsx');
 await import('./icons.jsx');
+await import('./context-menu.jsx');
 await import('./sessions-table.jsx');
 await import('./detail-panel.jsx');
 await import('./surfaces.jsx');

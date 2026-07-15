@@ -127,22 +127,26 @@ impl ProxySocks5Service {
             .engine
             .record_socks5_tunnel_opened(&target.host, target.port)
             .await;
+        let mut terminal_guard = match session_id.as_deref() {
+            Some(id) => self.engine.terminal_guard_for_socks5_tunnel(id).await,
+            None => None,
+        };
 
         let connection = tunnel_with_connect_timeout(stream, &target, self.connect_timeout);
         tokio::pin!(connection);
         tokio::select! {
             res = &mut connection => {
-                let (bytes_up, bytes_down) = match res {
-                    Ok(counts) => counts,
-                    Err(e) => {
+                let (bytes_up, bytes_down) = res.unwrap_or_else(|e| {
                         tracing::debug!(error=%e, "SOCKS5 tunnel error");
                         (0, 0)
-                    }
-                };
+                    });
                 if let Some(session_id) = session_id {
-                    self.engine
-                        .record_socks5_tunnel_closed(&session_id, bytes_up, bytes_down)
-                        .await;
+                self.engine
+                    .record_socks5_tunnel_closed(&session_id, bytes_up, bytes_down)
+                    .await;
+                    if let Some(guard) = terminal_guard.as_mut() {
+                        guard.disarm();
+                    }
                 }
             }
             _ = wait_for_shutdown(shutdown) => {

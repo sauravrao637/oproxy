@@ -906,6 +906,43 @@ body.col-resizing .t tbody tr { background: inherit !important; }
 }
 .section .sec-body { padding: 10px 12px; }
 
+.request-flow {
+  display: grid;
+  gap: 6px;
+}
+
+.flow-row {
+  display: grid;
+  grid-template-columns: 18px minmax(160px, max-content) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.flow-row.warn { color: var(--c-4xx); }
+.flow-row.bad { color: var(--c-5xx); }
+
+.flow-icon {
+  color: var(--text-low);
+  display: inline-flex;
+  justify-content: center;
+  padding-top: 2px;
+}
+
+.flow-main {
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-meta {
+  color: var(--text-faint);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .kv {
   display: grid;
   grid-template-columns: 180px 1fr;
@@ -1149,6 +1186,85 @@ body.col-resizing .t tbody tr { background: inherit !important; }
 .menu .item:hover { background: var(--accent-bg); color: var(--text-hi); }
 .menu .item .shortcut { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
 .menu hr { border: 0; border-top: 1px solid var(--border-soft); margin: 4px -4px; }
+
+.context-menu {
+  position: fixed;
+  z-index: 120;
+  min-width: 220px;
+  max-width: min(340px, calc(100vw - 16px));
+  max-height: min(560px, calc(100vh - 16px));
+  overflow: auto;
+  padding: 4px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-lg);
+}
+.context-menu-head {
+  padding: 6px 8px 7px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 3px;
+}
+.context-menu-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-hi);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.context-menu-subtitle {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.context-menu-item {
+  width: 100%;
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
+  outline: none;
+  background: var(--accent-bg);
+  color: var(--text-hi);
+}
+.context-menu-item.danger { color: var(--c-5xx); }
+.context-menu-item.disabled {
+  cursor: default;
+  color: var(--text-faint);
+}
+.context-menu-item.disabled:hover { background: transparent; }
+.context-menu-item.sep-before { margin-top: 5px; border-top: 1px solid var(--border-soft); padding-top: 8px; }
+.context-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.context-menu-shortcut {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.context-menu-sep {
+  border-top: 1px solid var(--border-soft);
+  margin: 4px 2px;
+}
 
 /* utility */
 .row { display: flex; align-items: center; gap: 6px; }
@@ -2880,9 +2996,98 @@ kbd {
   color: var(--text);
   border-radius: 7px;
   padding: 10px 12px;
-  white-space: pre-wrap;
   line-height: 1.5;
   font-size: 13px;
+}
+.assistant-md {
+  overflow-wrap: anywhere;
+}
+.assistant-md > :first-child { margin-top: 0; }
+.assistant-md > :last-child { margin-bottom: 0; }
+.assistant-md p {
+  margin: 0 0 10px;
+}
+.assistant-md h3,
+.assistant-md h4,
+.assistant-md h5,
+.assistant-md h6 {
+  margin: 0 0 10px;
+  color: var(--text-hi);
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+.assistant-md h4,
+.assistant-md h5,
+.assistant-md h6 {
+  margin-top: 14px;
+  font-size: 13px;
+}
+.assistant-md ul,
+.assistant-md ol {
+  margin: 0 0 10px 18px;
+  padding: 0;
+}
+.assistant-md li {
+  margin: 3px 0;
+}
+.assistant-md code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--text-hi);
+  background: color-mix(in srgb, var(--bg-deep) 76%, transparent);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.assistant-md-code {
+  margin: 0 0 10px;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-deep);
+}
+.assistant-md-code code {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: pre;
+}
+.assistant-md blockquote {
+  margin: 0 0 10px;
+  padding: 4px 0 4px 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-mid);
+}
+.assistant-md a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.assistant-md a:hover { text-decoration: underline; }
+.assistant-md-table-wrap {
+  max-width: 100%;
+  overflow: auto;
+  margin: 0 0 12px;
+}
+.assistant-md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.assistant-md th,
+.assistant-md td {
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+.assistant-md th {
+  color: var(--text-hi);
+  background: color-mix(in srgb, var(--surface-hi) 70%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 .assistant-msg.user .assistant-bubble {
   background: var(--accent-bg);
@@ -2896,6 +3101,44 @@ kbd {
   padding: 12px;
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+.assistant-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  margin: 0 12px 10px;
+  padding: 5px 8px;
+  align-self: flex-start;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--text-hi);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.assistant-context-chip span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.assistant-context-chip button {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+  line-height: 1;
+}
+.assistant-context-chip button:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text-hi);
 }
 .assistant-input textarea {
   min-height: 58px;

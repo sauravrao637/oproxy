@@ -1,6 +1,7 @@
 use crate::middleware::{
     BodyObserver, Middleware, MiddlewareAction, RequestContext, ResponseContext,
 };
+use crate::session::RequestFlowEvent;
 use crate::session::SharedSessionManager;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -97,6 +98,7 @@ impl Middleware for InspectionMiddleware {
         let mut recorded = ctx.clone();
         strip_internal_headers(&mut recorded.headers);
         self.session_manager.record_request(id.clone(), recorded);
+        let _ = ctx.take_flow();
 
         if inspector.jwt.is_some() || inspector.graphql.is_some() || inspector.grpc.is_some() {
             self.session_manager.update_inspector_data(&id, inspector);
@@ -227,6 +229,10 @@ impl BodyObserver for InspectionObserver {
         let start = self.start.unwrap_or_else(std::time::Instant::now);
         let latency_ms = start.elapsed().as_millis() as u64;
         res_ctx.body = Bytes::from(self.retained);
+        res_ctx.push_flow(RequestFlowEvent::Completed {
+            status: res_ctx.status,
+            latency_ms,
+        });
         let metrics = crate::session::InspectionMetrics {
             latency_ms,
             request_size_bytes: 0, // body not buffered on streaming path

@@ -552,6 +552,7 @@ fn ws_response_context(
             crate::core::forward::ProtocolContext::websocket(upstream_scheme)
                 .with_identity(ws_connection_id, ws_stream_id),
         ),
+        flow: Vec::new(),
     }
 }
 

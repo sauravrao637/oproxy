@@ -3,6 +3,7 @@ use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::{
     MiddlewareAction, RequestContext, ResponseContext, header_value, remove_header,
 };
+use crate::session::{FlowStage, FlowTargetSource, InspectionMetrics, RequestFlowEvent};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -77,6 +78,123 @@ pub(crate) struct RequestMetadata<'a> {
     pub(crate) uri: &'a str,
     pub(crate) host: &'a str,
     pub(crate) method: &'a str,
+}
+
+/// Records a terminal response if a captured request future/body is dropped
+/// before normal response or failure recording runs.
+pub(crate) struct TerminalSessionGuard {
+    session_manager: Option<crate::session::SharedSessionManager>,
+    session_id: String,
+    request_uri: String,
+    request_host: String,
+    request_method: String,
+    protocol_context: Option<ProtocolContext>,
+    protocol: Option<String>,
+    flow: Vec<RequestFlowEvent>,
+    started_at: Instant,
+    ttfb_ms: u64,
+    message: &'static str,
+}
+
+impl TerminalSessionGuard {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        session_manager: crate::session::SharedSessionManager,
+        session_id: String,
+        request_uri: String,
+        request_host: String,
+        request_method: String,
+        protocol_context: Option<ProtocolContext>,
+        flow: Vec<RequestFlowEvent>,
+        started_at: Instant,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            session_manager: Some(session_manager),
+            session_id,
+            request_uri,
+            request_host,
+            request_method,
+            protocol_context,
+            protocol: None,
+            flow,
+            started_at,
+            ttfb_ms: 0,
+            message,
+        }
+    }
+
+    fn update_flow(&mut self, flow: &[RequestFlowEvent]) {
+        self.flow = flow.to_vec();
+    }
+
+    fn update_from_response(&mut self, response: &ResponseContext) {
+        self.request_uri = response.request_uri.clone();
+        self.request_host = response.request_host.clone();
+        self.request_method = response.request_method.clone();
+        self.protocol_context = response.protocol_context.clone();
+        self.protocol = response.protocol.clone();
+        self.ttfb_ms = response.ttfb_ms;
+        self.flow = response.flow.clone();
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.session_manager = None;
+    }
+
+    fn record_failure(&mut self, status: u16, stage: FlowStage, message: &'static str) {
+        let Some(session_manager) = self.session_manager.take() else {
+            return;
+        };
+        if session_manager
+            .get_session(&self.session_id)
+            .and_then(|session| session.response)
+            .is_some()
+        {
+            return;
+        }
+
+        let body = Bytes::from(message.as_bytes().to_vec());
+        let mut response = ResponseContext {
+            status,
+            body: body.clone(),
+            request_uri: self.request_uri.clone(),
+            session_id: Some(self.session_id.clone()),
+            ttfb_ms: self.ttfb_ms,
+            request_host: self.request_host.clone(),
+            request_method: self.request_method.clone(),
+            protocol: self.protocol.clone(),
+            protocol_context: self.protocol_context.clone(),
+            ..Default::default()
+        };
+        response.extend_flow(self.flow.clone());
+        response.push_flow(RequestFlowEvent::Failed {
+            stage,
+            message: message.to_string(),
+        });
+
+        let request_size_bytes = session_manager
+            .get_session(&self.session_id)
+            .map(|session| session.request.body.len())
+            .unwrap_or(0);
+        let metrics = InspectionMetrics {
+            latency_ms: self.started_at.elapsed().as_millis() as u64,
+            request_size_bytes,
+            response_size_bytes: body.len(),
+            status_code: status,
+            ttfb_ms: self.ttfb_ms,
+            body_ms: 0,
+            protocol: self.protocol.clone(),
+            ..Default::default()
+        };
+        session_manager.record_response_with_metrics(self.session_id.clone(), response, metrics);
+    }
+}
+
+impl Drop for TerminalSessionGuard {
+    fn drop(&mut self) {
+        self.record_failure(499, FlowStage::Forwarding, self.message);
+    }
 }
 
 pub(crate) struct PreparedUpstream {
@@ -471,6 +589,28 @@ impl ProxyEngine {
         }
     }
 
+    async fn terminal_guard_for_request(
+        &self,
+        req_ctx: &RequestContext,
+        started_at: Instant,
+        message: &'static str,
+    ) -> Option<TerminalSessionGuard> {
+        let session_id = req_ctx.session_id.clone()?;
+        let session_manager = self.short_circuit_session_manager.read().await.clone()?;
+        Some(TerminalSessionGuard::new(
+            session_manager,
+            session_id,
+            req_ctx.uri.clone(),
+            req_ctx.host.clone(),
+            req_ctx.method.clone(),
+            req_ctx.protocol_context.clone(),
+            req_ctx.flow.clone(),
+            started_at,
+            message,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn respond_to_intercepted(
         &self,
         intercepted: crate::middleware::InterceptedResponse,
@@ -479,6 +619,7 @@ impl ProxyEngine {
         request_host: &str,
         request_method: &str,
         protocol_context: Option<ProtocolContext>,
+        flow: Vec<RequestFlowEvent>,
     ) -> Response {
         let crate::middleware::InterceptedResponse {
             status,
@@ -499,6 +640,7 @@ impl ProxyEngine {
             protocol_context,
             ..Default::default()
         };
+        response.extend_flow(flow);
 
         let chain = self.middleware_chain.read().await.clone();
         if chain.execute_response(&mut response).await != MiddlewareAction::Continue {
@@ -546,6 +688,7 @@ impl ProxyEngine {
                             metadata.host,
                             metadata.method,
                             request.protocol_context.clone(),
+                            request.take_flow(),
                         )
                         .await);
                 }
@@ -597,6 +740,14 @@ impl ProxyEngine {
             &path,
             &mut request.headers,
         );
+        if destination.is_none() {
+            request.push_flow(RequestFlowEvent::TargetSelected {
+                source: FlowTargetSource::OriginalHost,
+                target: url.clone(),
+                rule_id: None,
+                rule_name: None,
+            });
+        }
         if self.is_self_proxy(&url) {
             tracing::warn!(%url, "Proxy loop detected");
             return Err(Box::new(
@@ -627,6 +778,7 @@ impl ProxyEngine {
         session_id: Option<String>,
         protocol_context: Option<ProtocolContext>,
         ttfb_ms: u64,
+        flow: Vec<RequestFlowEvent>,
     ) -> Response {
         let mut source_chain = error.to_string();
         let mut source = std::error::Error::source(error);
@@ -654,8 +806,14 @@ impl ProxyEngine {
             protocol_context,
             ..Default::default()
         };
+        response.extend_flow(flow);
+        response.push_flow(RequestFlowEvent::Failed {
+            stage: FlowStage::Forwarding,
+            message: cause,
+        });
         let chain = self.middleware_chain.read().await.clone();
         chain.execute_response(&mut response).await;
+        self.record_short_circuit_response(&response).await;
         (StatusCode::BAD_GATEWAY, client_message).into_response()
     }
 
@@ -741,6 +899,28 @@ impl ProxyEngine {
             ..Default::default()
         };
         session_manager.record_response_with_metrics(session_id.to_string(), response, metrics);
+    }
+
+    pub(crate) async fn terminal_guard_for_socks5_tunnel(
+        &self,
+        session_id: &str,
+    ) -> Option<TerminalSessionGuard> {
+        let session_manager = self.short_circuit_session_manager.read().await.clone()?;
+        session_manager.flush().await;
+        let session = session_manager.get_session(session_id)?;
+        let mut guard = TerminalSessionGuard::new(
+            session_manager,
+            session_id.to_string(),
+            session.request.uri.clone(),
+            session.request.host.clone(),
+            session.request.method.clone(),
+            session.protocol_context.clone(),
+            session.flow.clone(),
+            Instant::now(),
+            "SOCKS5 tunnel closed before oproxy recorded tunnel completion.",
+        );
+        guard.protocol = Some(WireProtocol::Socks5.label().to_string());
+        Some(guard)
     }
 
     pub(crate) async fn record_socks5_mock_served(
@@ -990,6 +1170,11 @@ impl ProxyEngine {
             protocol_context: Some(protocol_context.clone()),
             ..Default::default()
         };
+        req_ctx.push_flow(RequestFlowEvent::RequestReceived {
+            method: req_method.clone(),
+            host: host.clone(),
+            path: display_uri.clone(),
+        });
 
         debug!("Executing request middleware chain");
         if let Err(response) = self
@@ -1006,10 +1191,34 @@ impl ProxyEngine {
             return response;
         }
 
+        let mut terminal_guard = self
+            .terminal_guard_for_request(
+                &req_ctx,
+                start,
+                "Client closed the downstream connection before oproxy recorded a terminal response.",
+            )
+            .await;
+
         let upstream = match self.prepare_upstream(&mut req_ctx, &uri, &req_uri) {
             Ok(upstream) => upstream,
-            Err(response) => return *response,
+            Err(response) => {
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.update_flow(&req_ctx.flow);
+                    guard.record_failure(
+                        response.status().as_u16(),
+                        FlowStage::TargetResolution,
+                        "Target resolution failed before oproxy recorded an upstream response.",
+                    );
+                }
+                return *response;
+            }
         };
+        req_ctx.push_flow(RequestFlowEvent::Forwarded {
+            target: upstream.url.clone(),
+        });
+        if let Some(guard) = terminal_guard.as_mut() {
+            guard.update_flow(&req_ctx.flow);
+        }
         debug!(url = %upstream.url, "Forwarding request");
 
         // Use the no-timeout streaming client for all proxied requests.
@@ -1083,6 +1292,11 @@ impl ProxyEngine {
                         response_body_observer_pending: true,
                         ..Default::default()
                     };
+                    res_ctx.extend_flow(req_ctx.take_flow());
+                    res_ctx.push_flow(RequestFlowEvent::ResponseReceived { status, ttfb_ms });
+                    if let Some(guard) = terminal_guard.as_mut() {
+                        guard.update_from_response(&res_ctx);
+                    }
                     // Response-mutating middleware (rewrite/mock/Lua
                     // replace_body) cannot act on a body it can't see yet, so
                     // it silently has no effect on streamed responses. Tag the
@@ -1093,6 +1307,14 @@ impl ProxyEngine {
                         let chain = self.middleware_chain.read().await.clone();
                         let action = chain.execute_response(&mut res_ctx).await;
                         if action != MiddlewareAction::Continue {
+                            if let Some(guard) = terminal_guard.as_mut() {
+                                guard.update_from_response(&res_ctx);
+                                guard.record_failure(
+                                    StatusCode::FORBIDDEN.as_u16(),
+                                    FlowStage::ResponseMiddleware,
+                                    "Response middleware stopped the streamed response before terminal recording.",
+                                );
+                            }
                             return (StatusCode::FORBIDDEN, "Response stopped by middleware")
                                 .into_response();
                         }
@@ -1123,6 +1345,7 @@ impl ProxyEngine {
                     let engine = self.clone();
                     let body_start = Instant::now();
                     let stream_body = axum::body::Body::from_stream(async_stream::stream! {
+                        let mut terminal_guard = terminal_guard;
                         let mut res_ctx = res_ctx;
                         let mut r = res;
                         let mut retained: Vec<u8> = Vec::new();
@@ -1138,7 +1361,14 @@ impl ProxyEngine {
                         }
                         res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
                         res_ctx.body = Bytes::from(retained);
+                        res_ctx.push_flow(RequestFlowEvent::Completed {
+                            status: res_ctx.status,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                        });
                         engine.record_streamed_response(res_ctx, total_bytes).await;
+                        if let Some(guard) = terminal_guard.as_mut() {
+                            guard.disarm();
+                        }
                     });
                     return builder
                         .body(stream_body)
@@ -1169,6 +1399,11 @@ impl ProxyEngine {
                     protocol_context: req_ctx.protocol_context.clone(),
                     ..Default::default()
                 };
+                res_ctx.extend_flow(req_ctx.take_flow());
+                res_ctx.push_flow(RequestFlowEvent::ResponseReceived { status, ttfb_ms });
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.update_from_response(&res_ctx);
+                }
                 if request_streamed_unbuffered {
                     // The request body was relayed unbuffered because
                     // it exceeded max_body_bytes, so request-side body-mutating
@@ -1180,7 +1415,18 @@ impl ProxyEngine {
 
                 debug!("Executing response middleware chain");
                 if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
+                    if let Some(guard) = terminal_guard.as_mut() {
+                        guard.update_from_response(&res_ctx);
+                        guard.record_failure(
+                            response.status().as_u16(),
+                            FlowStage::ResponseMiddleware,
+                            "Response middleware stopped the response before terminal recording.",
+                        );
+                    }
                     return response;
+                }
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.disarm();
                 }
 
                 let status_code = StatusCode::from_u16(res_ctx.status)
@@ -1194,6 +1440,10 @@ impl ProxyEngine {
                     latency_ms = start.elapsed().as_millis(),
                     "Request completed"
                 );
+                res_ctx.push_flow(RequestFlowEvent::Completed {
+                    status: res_ctx.status,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                });
 
                 let builder = self.response_builder(&res_ctx);
 
@@ -1228,18 +1478,24 @@ impl ProxyEngine {
                 }
             }
             Err(error) => {
-                self.record_forward_failure(
-                    &error,
-                    RequestMetadata {
-                        uri: &display_uri,
-                        host: &host,
-                        method: &req_method,
-                    },
-                    upstream.session_id,
-                    upstream.protocol_context,
-                    net_start.elapsed().as_millis() as u64,
-                )
-                .await
+                let response = self
+                    .record_forward_failure(
+                        &error,
+                        RequestMetadata {
+                            uri: &display_uri,
+                            host: &host,
+                            method: &req_method,
+                        },
+                        upstream.session_id,
+                        upstream.protocol_context,
+                        net_start.elapsed().as_millis() as u64,
+                        req_ctx.take_flow(),
+                    )
+                    .await;
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.disarm();
+                }
+                response
             }
         }
     }
@@ -1279,6 +1535,11 @@ impl ProxyEngine {
             protocol_context: Some(protocol_context.clone()),
             ..Default::default()
         };
+        req_ctx.push_flow(RequestFlowEvent::RequestReceived {
+            method: req_method.clone(),
+            host: host.clone(),
+            path: display_uri.clone(),
+        });
 
         if let Err(response) = self
             .execute_request_middleware(
@@ -1294,10 +1555,34 @@ impl ProxyEngine {
             return response;
         }
 
+        let mut terminal_guard = self
+            .terminal_guard_for_request(
+                &req_ctx,
+                start,
+                "Client closed the downstream stream before oproxy recorded a terminal response.",
+            )
+            .await;
+
         let upstream = match self.prepare_upstream(&mut req_ctx, &uri, &req_uri) {
             Ok(upstream) => upstream,
-            Err(response) => return *response,
+            Err(response) => {
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.update_flow(&req_ctx.flow);
+                    guard.record_failure(
+                        response.status().as_u16(),
+                        FlowStage::TargetResolution,
+                        "Target resolution failed before oproxy recorded an upstream response.",
+                    );
+                }
+                return *response;
+            }
         };
+        req_ctx.push_flow(RequestFlowEvent::Forwarded {
+            target: upstream.url.clone(),
+        });
+        if let Some(guard) = terminal_guard.as_mut() {
+            guard.update_flow(&req_ctx.flow);
+        }
 
         let client = self.clients.read().await.1.clone();
 
@@ -1366,9 +1651,22 @@ impl ProxyEngine {
                     response_body_observer_pending: true,
                     ..Default::default()
                 };
+                res_ctx.extend_flow(req_ctx.take_flow());
+                res_ctx.push_flow(RequestFlowEvent::ResponseReceived { status, ttfb_ms });
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.update_from_response(&res_ctx);
+                }
                 tag_rewritten(&mut res_ctx, &req_ctx);
 
                 if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
+                    if let Some(guard) = terminal_guard.as_mut() {
+                        guard.update_from_response(&res_ctx);
+                        guard.record_failure(
+                            response.status().as_u16(),
+                            FlowStage::ResponseMiddleware,
+                            "Response middleware stopped the streamed response before terminal recording.",
+                        );
+                    }
                     return response;
                 }
 
@@ -1406,6 +1704,10 @@ impl ProxyEngine {
                         res_ctx.body = decoded.clone();
                         res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
                         res_ctx.response_body_observer_pending = false;
+                        res_ctx.push_flow(RequestFlowEvent::Completed {
+                            status: res_ctx.status,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                        });
 
                         let mut observers = std::mem::take(&mut *observers_arc.lock().await);
                         for obs in &mut observers {
@@ -1414,6 +1716,9 @@ impl ProxyEngine {
                         }
                         for obs in observers {
                             obs.finish().await;
+                        }
+                        if let Some(guard) = terminal_guard.as_mut() {
+                            guard.disarm();
                         }
 
                         let builder = self.response_builder(&res_ctx);
@@ -1463,6 +1768,7 @@ impl ProxyEngine {
 
                 let builder = self.response_builder(&res_ctx);
                 let stream_body = axum::body::Body::from_stream(async_stream::stream! {
+                    let mut terminal_guard = terminal_guard;
                     let mut r = res;
                     let observers_arc = observers_arc;
                     while let Ok(Some(chunk)) = r.chunk().await {
@@ -1489,24 +1795,33 @@ impl ProxyEngine {
                     for obs in observers {
                         obs.finish().await;
                     }
+                    if let Some(guard) = terminal_guard.as_mut() {
+                        guard.disarm();
+                    }
                 });
                 builder
                     .body(stream_body)
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
             }
             Err(error) => {
-                self.record_forward_failure(
-                    &error,
-                    RequestMetadata {
-                        uri: &display_uri,
-                        host: &host,
-                        method: &req_method,
-                    },
-                    upstream.session_id,
-                    upstream.protocol_context,
-                    net_start.elapsed().as_millis() as u64,
-                )
-                .await
+                let response = self
+                    .record_forward_failure(
+                        &error,
+                        RequestMetadata {
+                            uri: &display_uri,
+                            host: &host,
+                            method: &req_method,
+                        },
+                        upstream.session_id,
+                        upstream.protocol_context,
+                        net_start.elapsed().as_millis() as u64,
+                        req_ctx.take_flow(),
+                    )
+                    .await;
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.disarm();
+                }
+                response
             }
         }
     }
@@ -1566,11 +1881,18 @@ fn classify_forward_error(error: &reqwest::Error, source_chain: &str) -> String 
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_forward_error, decoded_response_body, display_request_uri};
-    use axum::http::Uri;
+    use super::{
+        TerminalSessionGuard, classify_forward_error, decoded_response_body, display_request_uri,
+    };
+    use crate::core::forward::{ApplicationProtocol, BodyMode, ProtocolContext};
+    use crate::middleware::RequestContext;
+    use crate::session::{FlowStage, RequestFlowEvent, SessionManager};
+    use axum::http::{Uri, Version};
     use bytes::Bytes;
     use flate2::{Compression, write::ZlibEncoder};
     use std::io::Write as _;
+    use std::sync::Arc;
+    use std::time::Instant;
 
     // ── Upstream error classification ───────────────────────────────────────
     //
@@ -1599,6 +1921,96 @@ mod tests {
             msg.contains("OPROXY_INSECURE_UPSTREAM"),
             "must point at the escape hatch: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_guard_records_cancelled_terminal_response_for_protocol_contexts() {
+        let cases = [
+            (
+                "http1",
+                "GET",
+                ProtocolContext::http(
+                    Version::HTTP_11,
+                    "http",
+                    ApplicationProtocol::Http,
+                    BodyMode::Full,
+                ),
+            ),
+            (
+                "grpc-h2",
+                "POST",
+                ProtocolContext::http(
+                    Version::HTTP_2,
+                    "https",
+                    ApplicationProtocol::Grpc,
+                    BodyMode::StreamMessages,
+                ),
+            ),
+            (
+                "http3",
+                "GET",
+                ProtocolContext::http(
+                    Version::HTTP_3,
+                    "https",
+                    ApplicationProtocol::Http,
+                    BodyMode::Full,
+                ),
+            ),
+            ("websocket", "GET", ProtocolContext::websocket("ws")),
+            ("socks5", "CONNECT", ProtocolContext::socks5_tunnel()),
+        ];
+
+        for (name, method, context) in cases {
+            let session_manager = Arc::new(SessionManager::new(10_000));
+            let id = format!("cancelled-{name}");
+            let mut request = RequestContext {
+                method: method.to_string(),
+                uri: format!("{}://example.test/{name}", context.scheme),
+                host: "example.test".to_string(),
+                protocol_context: Some(context.clone()),
+                downstream_protocol: Some(context.downstream.label().to_string()),
+                ..Default::default()
+            };
+            request.push_flow(RequestFlowEvent::RequestReceived {
+                method: method.to_string(),
+                host: "example.test".to_string(),
+                path: request.uri.clone(),
+            });
+            session_manager.record_request(id.clone(), request.clone());
+            session_manager.flush().await;
+
+            let mut guard = TerminalSessionGuard::new(
+                session_manager.clone(),
+                id.clone(),
+                request.uri.clone(),
+                request.host.clone(),
+                request.method.clone(),
+                Some(context.clone()),
+                request.flow.clone(),
+                Instant::now(),
+                "cancelled by test",
+            );
+            guard.protocol = Some(context.downstream.label().to_string());
+            drop(guard);
+            session_manager.flush().await;
+
+            let session = session_manager.get_session(&id).expect("session");
+            let response = session.response.expect("terminal response");
+            assert_eq!(response.status, 499, "{name}");
+            assert_eq!(response.protocol_context.as_ref(), Some(&context), "{name}");
+            assert!(matches!(
+                session.flow.last(),
+                Some(RequestFlowEvent::Failed {
+                    stage: FlowStage::Forwarding,
+                    message
+                }) if message == "cancelled by test"
+            ));
+            assert_eq!(
+                session.metrics.and_then(|metrics| metrics.protocol),
+                Some(context.downstream.label().to_string()),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

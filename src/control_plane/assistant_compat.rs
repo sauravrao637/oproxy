@@ -226,6 +226,67 @@ async fn run_compatibility_probes(req: AssistantCompatRequest) -> AssistantCompa
         }
     }
 
+    let primary_check =
+        CompatCheck::new("context_primary_priority", "Primary context priority", true);
+    let started = Instant::now();
+    match client
+        .chat_completion_text_only(&context_primary_priority_messages())
+        .await
+    {
+        Ok(message) if primary_priority_response_ok(&message.content) => {
+            checks.push(primary_check.pass(
+                "Model answered from primary context despite conflicting secondary UI state.",
+                started,
+            ));
+        }
+        Ok(message) => {
+            checks.push(primary_check.fail(
+                format!(
+                    "Model did not clearly prioritize primary context. Response: {}",
+                    compact_probe_response(&message.content)
+                ),
+                Some(started),
+            ));
+            return finish(model, base_url, checks, Vec::new(), false);
+        }
+        Err(e) => {
+            checks.push(primary_check.fail(e, Some(started)));
+            return finish(model, base_url, checks, Vec::new(), false);
+        }
+    }
+
+    let fallback_check = CompatCheck::new(
+        "context_secondary_fallback",
+        "Secondary context fallback",
+        true,
+    );
+    let started = Instant::now();
+    match client
+        .chat_completion_text_only(&context_secondary_fallback_messages())
+        .await
+    {
+        Ok(message) if secondary_fallback_response_ok(&message.content) => {
+            checks.push(fallback_check.pass(
+                "Model used secondary context when primary context was insufficient.",
+                started,
+            ));
+        }
+        Ok(message) => {
+            checks.push(fallback_check.fail(
+                format!(
+                    "Model did not clearly use secondary context as fallback. Response: {}",
+                    compact_probe_response(&message.content)
+                ),
+                Some(started),
+            ));
+            return finish(model, base_url, checks, Vec::new(), false);
+        }
+        Err(e) => {
+            checks.push(fallback_check.fail(e, Some(started)));
+            return finish(model, base_url, checks, Vec::new(), false);
+        }
+    }
+
     // 3. Tool calling — does the model emit a tool call at all?
     let started = Instant::now();
     let tool_check = CompatCheck::new("tool_calling", "Tool calling", true);
@@ -550,6 +611,60 @@ fn tool_request_messages() -> Vec<Value> {
     ]
 }
 
+fn context_priority_system_prompt() -> &'static str {
+    "You are an oproxy assistant compatibility probe. Follow this context policy exactly: \
+     primary context is the user-intentionally attached request. Secondary context is UI/workspace \
+     state, visible sessions, and browser hints. If primary context is sufficient, answer only from \
+     primary even when secondary conflicts. If primary context is absent or insufficient, use \
+     secondary context as fallback. Answer with only the requested host and path."
+}
+
+fn context_primary_priority_messages() -> Vec<Value> {
+    vec![
+        json!({ "role": "system", "content": context_priority_system_prompt() }),
+        json!({
+            "role": "user",
+            "content": "Primary context: attached request host primary.example.com path /primary. \
+            Secondary UI state: selected request host secondary.example.com path /secondary. \
+            The user asks: explain this request. Which host and path should be treated as this request?"
+        }),
+    ]
+}
+
+fn context_secondary_fallback_messages() -> Vec<Value> {
+    vec![
+        json!({ "role": "system", "content": context_priority_system_prompt() }),
+        json!({
+            "role": "user",
+            "content": "Primary context: attached request id req-1, but no host, path, method, or flow details are available. \
+            Secondary UI state: visible selected request host fallback.example.com path /secondary. \
+            The user asks: explain this request. Primary is insufficient. Which host and path can be used as fallback?"
+        }),
+    ]
+}
+
+fn primary_priority_response_ok(content: &str) -> bool {
+    let normalized = content.to_ascii_lowercase();
+    normalized.contains("primary.example.com")
+        && normalized.contains("/primary")
+        && !normalized.contains("secondary.example.com")
+}
+
+fn secondary_fallback_response_ok(content: &str) -> bool {
+    let normalized = content.to_ascii_lowercase();
+    normalized.contains("fallback.example.com") && normalized.contains("/secondary")
+}
+
+fn compact_probe_response(content: &str) -> String {
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated = compact.chars().take(160).collect::<String>();
+    if compact.chars().count() > 160 {
+        format!("{truncated}...")
+    } else {
+        compact
+    }
+}
+
 /// Eval system prompt mirrors the real assistant's tool-routing guidance so the
 /// score reflects production tool selection. It is deliberately generic.
 fn eval_messages(prompt: &str) -> Vec<Value> {
@@ -595,6 +710,29 @@ mod tests {
                 .iter()
                 .all(|case| !case.prompt.is_empty() && !case.expected_tool.is_empty())
         );
+    }
+
+    #[test]
+    fn context_priority_probe_messages_exercise_primary_and_fallback() {
+        let primary_messages = context_primary_priority_messages();
+        let primary_user = primary_messages[1]["content"].as_str().unwrap();
+        assert!(primary_user.contains("primary.example.com"));
+        assert!(primary_user.contains("secondary.example.com"));
+        assert!(primary_priority_response_ok("primary.example.com /primary"));
+        assert!(!primary_priority_response_ok(
+            "secondary.example.com /secondary"
+        ));
+
+        let fallback_messages = context_secondary_fallback_messages();
+        let fallback_user = fallback_messages[1]["content"].as_str().unwrap();
+        assert!(fallback_user.contains("Primary is insufficient"));
+        assert!(fallback_user.contains("fallback.example.com"));
+        assert!(secondary_fallback_response_ok(
+            "fallback.example.com /secondary"
+        ));
+        assert!(!secondary_fallback_response_ok(
+            "primary.example.com /primary"
+        ));
     }
 
     fn dns_case() -> EvalCaseSpec {
