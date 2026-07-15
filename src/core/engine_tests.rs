@@ -102,6 +102,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropped_socks5_tunnel_records_terminal_499() {
+        let session_manager = Arc::new(SessionManager::new(10_000));
+        let engine = ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(MiddlewareChain::new())),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        });
+        engine
+            .set_short_circuit_session_manager(session_manager.clone())
+            .await;
+
+        let id = engine
+            .record_socks5_tunnel_opened("example.com", 443)
+            .await
+            .expect("session id");
+        let guard = engine
+            .terminal_guard_for_socks5_tunnel(&id)
+            .await
+            .expect("terminal guard");
+        drop(guard);
+        session_manager.flush().await;
+
+        let session = session_manager.get_session(&id).expect("session");
+        let response = session.response.as_ref().expect("terminal response");
+        assert_eq!(response.status, 499);
+        let metrics = session.metrics.as_ref().expect("terminal metrics");
+        assert_eq!(metrics.status_code, 499);
+        assert_eq!(metrics.protocol.as_deref(), Some("SOCKS5"));
+        assert!(matches!(
+            session.flow.last(),
+            Some(crate::session::RequestFlowEvent::Failed { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn inspection_records_session_with_status_200() {
         let session_manager = Arc::new(SessionManager::new(10_000));
         let middleware = InspectionMiddleware::new(session_manager.clone());

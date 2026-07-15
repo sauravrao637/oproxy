@@ -1,30 +1,28 @@
 # oproxy
 
-oproxy is a local HTTP, HTTPS, and SOCKS5 proxy for inspecting, replaying, and modifying traffic.
-
-It is for developers testing browsers, CLIs, mobile apps, API clients, services, and test suites on their own machine or in a local Docker container.
-
 <p align="center">
   <a href="https://trendshift.io/repositories/47640?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-47640" target="_blank" rel="noopener noreferrer">
     <img src="https://trendshift.io/api/badge/trendshift/repositories/47640/daily?language=Rust" alt="sauravrao637%2Foproxy | Trendshift" width="250" height="55"/>
   </a>
 </p>
 
-## Features
+oproxy is a local HTTP, HTTPS, HTTP/3, WebSocket, and SOCKS5 proxy for inspecting, replaying, and modifying traffic from browsers, CLIs, mobile apps, API clients, services, and test suites.
 
-- Capture HTTP traffic and HTTPS traffic after trusting the local oproxy CA.
-- View requests, responses, headers, bodies, status, timing, tags, notes, and selected inspector data.
-- Replay captured requests and open them in Compose.
-- Build manual requests with headers, query params, auth, raw bodies, variables, collections, and cURL export.
-- Export captures as HAR or generated cURL, Fetch, and Python snippets.
-- Modify traffic with rule sets, map-remote, map-local, access rules, throttling, breakpoints, mock responses, DNS overrides, capture filters, Lua scripts, and upstream proxy chaining.
-- Use the authenticated Assistant to inspect state and prepare confirmed proxy changes through an OpenAI-compatible chat model.
-- Run from source or Docker with persistent volumes for CA material and local state.
+It runs a web UI, API, and optional AI assistant on the same local listener, so you can capture traffic, inspect requests and responses, replay requests, mock upstreams, rewrite traffic, throttle responses, and export reproducible snippets without changing application code.
 
-## Demo
+The Assistant is an OpenAI-compatible control-plane client: it can inspect current proxy state through allowlisted tools and prepare traffic/configuration changes as reviewable confirmation cards.
 
-[Short demo video](docs/assets/demo.webm)
+> Security note: HTTPS interception requires trusting a local oproxy root CA. Install that CA only on machines and browsers you control, keep the generated private key safe, and do not expose the admin UI without a strong token.
 
+## Highlights
+
+- Capture HTTP and HTTPS traffic, with MITM support for HTTPS.
+- Inspect headers, bodies, status, timing, tags, notes, JWTs, GraphQL, gRPC metadata, and WebSocket frames.
+- Replay captured requests or edit them in Compose.
+- Export captures as HAR, cURL, Fetch, or Python snippets.
+- Modify traffic with rules, mocks, map-local/map-remote, access rules, throttling, breakpoints, DNS overrides, Lua scripts, and upstream proxy chaining.
+- Use the Assistant to inspect sessions, understand proxy state, and prepare confirmed changes through an OpenAI-compatible chat model.
+- Run from Docker, Docker Compose, or source.
 
 ## Quick Start
 
@@ -34,13 +32,14 @@ It is for developers testing browsers, CLIs, mobile apps, API clients, services,
 docker run --rm \
   --name oproxy \
   -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:1080:1080 \
   -p 127.0.0.1:8443:8443/udp \
   -e OPROXY_BIND_HOST=0.0.0.0 \
   -e OPROXY_MITM_ENABLED=true \
   -e OPROXY_HTTP3_ENABLED=true \
   -e OPROXY_HTTP3_PORT=8443 \
   -e OPROXY_ALLOW_REMOTE_ADMIN=true \
-  -e OPROXY_ADMIN_TOKEN=<change-me-to-a-strong-secret> \
+  -e OPROXY_ADMIN_TOKEN=change-me-to-a-strong-secret \
   -v oproxy-certs:/app/certs \
   -v oproxy-storage:/app/storage \
   ghcr.io/sauravrao637/oproxy:latest
@@ -48,11 +47,7 @@ docker run --rm \
 
 Open `http://127.0.0.1:8080` and sign in with the token.
 
-Or build locally:
-
-```bash
-docker build -t oproxy:latest .
-```
+Docker bridge networking needs `OPROXY_BIND_HOST=0.0.0.0`. The command above still publishes ports only on host loopback. Change `OPROXY_ADMIN_TOKEN` before real use.
 
 ### Docker Compose
 
@@ -60,15 +55,11 @@ docker build -t oproxy:latest .
 docker compose up --build
 ```
 
-The included Compose file uses bridge networking with loopback-published ports, persists `/app/certs` and `/app/storage`, and sets `OPROXY_BIND_HOST=0.0.0.0`. Linux users may optionally enable host networking.
+The checked-in Compose file enables MITM, HTTP/3 on UDP `8443`, persistent certs/state, and a healthcheck.
 
 ### Source
 
-Requirements:
-
-- Rust 1.85 or newer
-- Node.js 22 or newer
-- Yarn via Corepack
+Requirements: Rust 1.85+, Node.js 22+, and Yarn via Corepack.
 
 ```bash
 corepack enable
@@ -79,7 +70,7 @@ cargo run --release
 
 Open `http://127.0.0.1:8080`.
 
-### First Request
+## First Capture
 
 ```bash
 curl -x http://127.0.0.1:8080 http://example.com
@@ -87,59 +78,35 @@ curl -x http://127.0.0.1:8080 http://example.com
 
 The request appears in the Sessions view.
 
-### First HTTPS Capture
+For HTTPS:
 
 ```bash
 curl http://127.0.0.1:8080/admin/ca -o oproxy-ca.crt
 curl --cacert oproxy-ca.crt -x http://127.0.0.1:8080 https://example.com
 ```
 
-For browser HTTPS capture, install the CA from `http://127.0.0.1:8080/admin/ca` into the browser or OS trust store.
+For browser HTTPS capture, configure the browser or OS to use `127.0.0.1:8080` as the HTTP and HTTPS proxy, then import the CA from `http://127.0.0.1:8080/admin/ca`.
 
-## What It Can Do
+## Demo
 
-- Act as a forward HTTP proxy on `OPROXY_PORT`/`port`, default `8080`.
-- Serve the local management UI and API from the same listener.
-- Intercept HTTPS CONNECT traffic when MITM is enabled and the client trusts the generated CA.
-- Optionally listen for SOCKS5 CONNECT traffic on `socks5_port`.
-- Optionally run a second TLS listener with `https_port`.
-- Capture live sessions in memory with bounded session and body retention.
-- Save and load sessions explicitly with admin endpoints.
-- Export HAR, cURL, Fetch, and Python snippets, redacted by default.
-- Import HAR files and oproxy JSON session data.
-- Stream session-change notifications with server-sent events.
-- Inspect JWT, GraphQL, gRPC, and WebSocket frame metadata when matching traffic is captured.
-
-## Use Cases
-
-- Debug a browser or CLI request without changing application code.
-- Replay a captured request after editing headers or body in Compose.
-- Test a frontend against mock responses or local fixture files.
-- Route a subset of traffic to a staging service.
-- Reproduce slow or bandwidth-limited responses.
-- Pause matching requests or responses before they continue.
-- Validate how a client behaves when requests are blocked, redirected, or rewritten.
-
-## Screenshots
+[Short demo video](docs/assets/demo.webm)
 
 ![oproxy sessions screenshot](docs/assets/sessions-screenshot.png)
 
 ![oproxy compose screenshot](docs/assets/compose-screenshot.png)
 
-## Documentation
+## Learn More
 
 - [Getting started](docs/getting-started.md)
 - [Docker](docs/docker.md)
 - [HTTPS MITM](docs/https-mitm.md)
-- [Compose](docs/compose.md)
 - [Assistant](docs/assistant.md)
-- [Map Local](docs/map-local.md)
-- [DNS overrides](docs/dns-overrides.md)
-- [SOCKS5](docs/socks5.md)
 - [Configuration](docs/configuration.md)
-- [Troubleshooting](docs/troubleshooting.md)
 - [Security](docs/security.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](architecture.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## License
 
-MIT
+oproxy is licensed under the [MIT License](LICENSE).

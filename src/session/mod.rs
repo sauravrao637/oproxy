@@ -144,6 +144,109 @@ pub enum SessionEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowRuleKind {
+    MapRemote,
+    MapLocal,
+    Rewrite,
+    Mock,
+    Breakpoint,
+    AccessControl,
+    DnsOverride,
+    Lua,
+    CaptureFilter,
+    Throttle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowTargetSource {
+    OriginalHost,
+    MapRemote,
+    DnsOverride,
+    UpstreamProxy,
+    MitmConnect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowShortCircuitReason {
+    MockResponse,
+    MapLocalFile,
+    MapLocalError,
+    RewriteRedirect,
+    RewriteBlock,
+    AccessDenied,
+    BreakpointTimeout,
+    LuaAbort,
+    MiddlewareStop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowStage {
+    RequestMiddleware,
+    TargetResolution,
+    Forwarding,
+    ResponseMiddleware,
+    Recording,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RequestFlowEvent {
+    RequestReceived {
+        method: String,
+        host: String,
+        path: String,
+    },
+    RuleMatched {
+        rule_kind: FlowRuleKind,
+        rule_id: String,
+        rule_name: String,
+    },
+    RuleApplied {
+        rule_kind: FlowRuleKind,
+        rule_id: String,
+        rule_name: String,
+        summary: String,
+    },
+    TargetSelected {
+        source: FlowTargetSource,
+        target: String,
+        rule_id: Option<String>,
+        rule_name: Option<String>,
+    },
+    ShortCircuited {
+        reason: FlowShortCircuitReason,
+        status: u16,
+        rule_id: Option<String>,
+        rule_name: Option<String>,
+    },
+    Forwarded {
+        target: String,
+    },
+    ResponseReceived {
+        status: u16,
+        ttfb_ms: u64,
+    },
+    ResponseModified {
+        rule_kind: FlowRuleKind,
+        rule_id: String,
+        rule_name: String,
+        summary: String,
+    },
+    Completed {
+        status: u16,
+        latency_ms: u64,
+    },
+    Failed {
+        stage: FlowStage,
+        message: String,
+    },
+}
+
 impl SessionEvent {
     fn retained_body_size(&self) -> usize {
         match self {
@@ -204,6 +307,9 @@ pub struct Exchange {
     /// read models while UI/API consumers migrate to this unified path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<SessionEvent>,
+    /// Concise, user-facing decision trace for the request overview.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow: Vec<RequestFlowEvent>,
     #[serde(default)]
     pub note: Option<String>,
     #[serde(default)]
@@ -680,6 +786,7 @@ impl SessionStore<'_> {
         let mut exchanges = write_lock(self.exchanges);
         self.evict_session_if_full(&mut exchanges, &id);
         self.body_bytes += request.body.len();
+        let flow = request.flow.clone();
         exchanges.insert(
             id.clone(),
             Exchange {
@@ -696,6 +803,7 @@ impl SessionStore<'_> {
                 source,
                 ws_frames: Vec::new(),
                 events: Vec::new(),
+                flow,
                 note: None,
                 tags: Vec::new(),
                 inspector_data: None,
@@ -714,6 +822,10 @@ impl SessionStore<'_> {
         let added = response.body.len();
         let mut exchanges = write_lock(self.exchanges);
         if let Some(exchange) = exchanges.get_mut(id) {
+            if exchange.response.is_some() {
+                return;
+            }
+            exchange.flow.extend(response.flow.clone());
             exchange.response = Some(response);
             if let Some(metrics) = metrics {
                 exchange.metrics = Some(metrics);
@@ -1000,6 +1112,82 @@ mod tests {
         sm.flush().await;
         let session = sm.get_session("id1").unwrap();
         assert_eq!(session.response.unwrap().status, 200);
+    }
+
+    #[tokio::test]
+    async fn record_request_persists_request_flow() {
+        let sm = SessionManager::new(10_000);
+        let mut request = req("/test");
+        request.push_flow(RequestFlowEvent::RequestReceived {
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/test".to_string(),
+        });
+        sm.record_request("id1".to_string(), request);
+        sm.flush().await;
+
+        let session = sm.get_session("id1").unwrap();
+        assert_eq!(
+            session.flow,
+            vec![RequestFlowEvent::RequestReceived {
+                method: "GET".to_string(),
+                host: "example.com".to_string(),
+                path: "/test".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn record_response_merges_response_flow() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+        let mut response = res("/test", 200);
+        response.push_flow(RequestFlowEvent::Completed {
+            status: 200,
+            latency_ms: 12,
+        });
+        sm.record_response("id1".to_string(), response);
+        sm.flush().await;
+
+        let session = sm.get_session("id1").unwrap();
+        assert_eq!(
+            session.flow,
+            vec![RequestFlowEvent::Completed {
+                status: 200,
+                latency_ms: 12,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn record_response_ignores_duplicate_response_writes() {
+        let sm = SessionManager::new(10_000);
+        sm.record_request("id1".to_string(), req("/test"));
+
+        let mut first = res("/test", 200);
+        first.push_flow(RequestFlowEvent::ResponseReceived {
+            status: 200,
+            ttfb_ms: 1,
+        });
+        let mut duplicate = res("/test", 500);
+        duplicate.push_flow(RequestFlowEvent::ResponseReceived {
+            status: 500,
+            ttfb_ms: 2,
+        });
+
+        sm.record_response("id1".to_string(), first);
+        sm.record_response("id1".to_string(), duplicate);
+        sm.flush().await;
+
+        let session = sm.get_session("id1").unwrap();
+        assert_eq!(session.response.unwrap().status, 200);
+        assert_eq!(
+            session.flow,
+            vec![RequestFlowEvent::ResponseReceived {
+                status: 200,
+                ttfb_ms: 1,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1477,6 +1665,7 @@ mod tests {
             source: SessionSource::Proxy,
             ws_frames: vec![],
             events: vec![],
+            flow: vec![],
             note: None,
             tags: vec!["auth".to_string()],
             inspector_data: None,
@@ -1505,6 +1694,7 @@ mod tests {
             source: SessionSource::Proxy,
             ws_frames: vec![],
             events: vec![],
+            flow: vec![],
             note: None,
             tags: vec![],
             inspector_data: None,

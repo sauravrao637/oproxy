@@ -36,6 +36,85 @@ mod tests {
         }))
     }
 
+    struct FullBodyRecordingMiddleware {
+        session_manager: SharedSessionManager,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::middleware::Middleware for FullBodyRecordingMiddleware {
+        fn name(&self) -> &str {
+            "full-body-recording-test"
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut crate::middleware::RequestContext,
+        ) -> crate::middleware::MiddlewareAction {
+            if ctx.session_id.is_none() {
+                let id = uuid::Uuid::new_v4().to_string();
+                ctx.session_id = Some(id.clone());
+                self.session_manager.record_request(id, ctx.clone());
+                let _ = ctx.take_flow();
+            }
+            crate::middleware::MiddlewareAction::Continue
+        }
+
+        async fn on_response(
+            &self,
+            ctx: &mut crate::middleware::ResponseContext,
+        ) -> crate::middleware::MiddlewareAction {
+            if ctx.response_body_observer_pending {
+                return crate::middleware::MiddlewareAction::Continue;
+            }
+            if let Some(id) = ctx.session_id.clone() {
+                let metrics = crate::session::InspectionMetrics {
+                    response_size_bytes: ctx.body.len(),
+                    status_code: ctx.status,
+                    ttfb_ms: ctx.ttfb_ms,
+                    body_ms: ctx.body_ms,
+                    ..Default::default()
+                };
+                self.session_manager
+                    .record_response_with_metrics(id, ctx.clone(), metrics);
+            }
+            crate::middleware::MiddlewareAction::Continue
+        }
+    }
+
+    async fn engine_with_full_body_recorder(
+        session_manager: SharedSessionManager,
+    ) -> Arc<ProxyEngine> {
+        let mut chain = MiddlewareChain::new();
+        chain.add_middleware(Arc::new(FullBodyRecordingMiddleware {
+            session_manager: session_manager.clone(),
+        }));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
+        engine
+            .set_short_circuit_session_manager(session_manager)
+            .await;
+        engine
+    }
+
+    async fn engine_with_inspection(session_manager: SharedSessionManager) -> Arc<ProxyEngine> {
+        let mut chain = MiddlewareChain::new();
+        chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager.clone())));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
+        engine
+            .set_short_circuit_session_manager(session_manager)
+            .await;
+        engine
+    }
+
     async fn request_unreachable_loopback(engine: Arc<ProxyEngine>, path: &str) -> StatusCode {
         let app = Router::new().fallback(move |req| {
             let engine = engine.clone();
@@ -270,6 +349,174 @@ mod tests {
             "streamed responses must be tagged so the body-mutating-middleware \
 no-op is visible instead of silent"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_buffered_request_records_terminal_499() {
+        use axum::routing::get;
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let seen_tx = Arc::new(Mutex::new(Some(seen_tx)));
+        let upstream = Router::new().route(
+            "/slow",
+            get({
+                let seen_tx = seen_tx.clone();
+                move || {
+                    let seen_tx = seen_tx.clone();
+                    async move {
+                        if let Some(tx) = seen_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        "late"
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let engine = engine_with_full_body_recorder(sessions.clone()).await;
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/slow", addr.port()))
+            .header("host", format!("127.0.0.1:{}", addr.port()))
+            .body(Body::empty())
+            .unwrap();
+
+        let task = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.handle_request(request).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), seen_rx)
+            .await
+            .expect("upstream should receive request before cancellation")
+            .expect("upstream notification should be sent");
+        task.abort();
+        let _ = task.await;
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        assert_eq!(recorded.len(), 1, "cancelled request must stay visible");
+        let response = recorded[0]
+            .response
+            .as_ref()
+            .expect("cancelled request must receive a terminal response");
+        assert_eq!(response.status, 499);
+        assert!(recorded[0].metrics.is_some(), "499 must include metrics");
+    }
+
+    #[tokio::test]
+    async fn dropped_buffered_streamed_response_records_terminal_499() {
+        use axum::http::header;
+        use axum::routing::get;
+        use bytes::Bytes;
+
+        let upstream = Router::new().route(
+            "/events",
+            get(|| async {
+                let body =
+                    Body::from_stream(futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+                        Bytes::from_static(b"data: hello\n\n"),
+                    )]));
+                ([(header::CONTENT_TYPE, "text/event-stream")], body)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let engine = engine_with_full_body_recorder(sessions.clone()).await;
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/events", addr.port()))
+            .header("host", format!("127.0.0.1:{}", addr.port()))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = engine.handle_request(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        assert_eq!(recorded.len(), 1, "dropped stream must stay visible");
+        let exchange = &recorded[0];
+        let response = exchange
+            .response
+            .as_ref()
+            .expect("dropped stream must receive a terminal response");
+        assert_eq!(response.status, 499);
+        assert!(
+            exchange.flow.iter().any(|event| matches!(
+                event,
+                crate::session::RequestFlowEvent::ResponseReceived { status: 200, .. }
+            )),
+            "flow should preserve the upstream response head before cancellation"
+        );
+        assert!(matches!(
+            exchange.flow.last(),
+            Some(crate::session::RequestFlowEvent::Failed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_forward_stream_response_records_terminal_499() {
+        use axum::http::header;
+        use axum::routing::get;
+        use bytes::Bytes;
+
+        let upstream = Router::new().route(
+            "/events",
+            get(|| async {
+                let body =
+                    Body::from_stream(futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+                        Bytes::from_static(b"data: hello\n\n"),
+                    )]));
+                ([(header::CONTENT_TYPE, "text/event-stream")], body)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let engine = engine_with_inspection(sessions.clone()).await;
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/events", addr.port()))
+            .header("host", format!("127.0.0.1:{}", addr.port()))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = engine.handle_request(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        assert_eq!(recorded.len(), 1, "dropped stream must stay visible");
+        let exchange = &recorded[0];
+        let response = exchange
+            .response
+            .as_ref()
+            .expect("dropped stream must receive a terminal response");
+        assert_eq!(response.status, 499);
+        assert!(matches!(
+            exchange.flow.last(),
+            Some(crate::session::RequestFlowEvent::Failed { .. })
+        ));
     }
 
     /// Streaming responses must include the configured `alt-svc` header.

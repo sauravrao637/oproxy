@@ -367,6 +367,7 @@ function adaptExchange(exchange, idx) {
     reqBody: redactBodyText(req.body || '', reqContentType),
     resBody: redactBodyText(res?.body || '', resContentType),
     inspector: normalizeInspectorData(exchange.inspector_data),
+    flow: exchange.flow || [],
     rewriteApplied: tags.includes('rewrite') ? 'rewrite applied' : '',
   };
 }
@@ -742,6 +743,7 @@ function App() {
   const [activeRail, setActiveRail] = React.useState('sessions');
   const [rulesTab, setRulesTab] = React.useState(null);
   const [assistantOpen, setAssistantOpen] = React.useState(false);
+  const [assistantAttachment, setAssistantAttachment] = React.useState(null);
   const [regexMode, setRegexMode] = React.useState(false);
   const [showShortcuts, setShowShortcuts] = React.useState(false);
   const [tinyViewport, setTinyViewport] = React.useState(false);
@@ -761,6 +763,7 @@ function App() {
   const sessionsRef = React.useRef([]);        // always-current sessions array (no stale closure)
   const selectedIdRef = React.useRef(null);    // always-current selectedId
   const sortRef = React.useRef(sort);          // always-current sort (used inside fetchIncremental callback)
+  const renderWindowResetKeyRef = React.useRef(null);
   const workspaceVersionRef = React.useRef(null);
   const workspaceSnapshotRef = React.useRef(null);
   const [detailVersion, setDetailVersion] = React.useState(0); // bumped to force detail re-fetch
@@ -943,7 +946,8 @@ function App() {
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         if (data.workspace) {
-          applyWorkspaceState(data.workspace);
+          workspaceVersionRef.current = Number.isFinite(data.workspace.version) ? data.workspace.version : workspaceVersionRef.current;
+          workspaceSnapshotRef.current = signature;
           loadSessions();
         } else {
           workspaceSnapshotRef.current = signature;
@@ -1128,11 +1132,30 @@ function App() {
   const statusFilterKey = [...statusFilter].sort().join(',');
   const wireFilterKey = [...wireFilter].sort().join(',');
   const appFilterKey = [...appFilter].sort().join(',');
+  const hostFocusKey = Array.isArray(hostFocus) ? hostFocus.join('\n') : '';
   const sortKey = `${sort.key}:${sort.dir}`;
+  const renderWindowResetKey = JSON.stringify([
+    search,
+    methodFilterKey,
+    statusFilterKey,
+    wireFilterKey,
+    appFilterKey,
+    hostFilter || '',
+    hostFocusKey,
+    sortKey,
+    !!regexMode,
+    viewMode,
+  ]);
 
   React.useEffect(() => {
+    if (renderWindowResetKeyRef.current === null) {
+      renderWindowResetKeyRef.current = renderWindowResetKey;
+      return;
+    }
+    if (renderWindowResetKeyRef.current === renderWindowResetKey) return;
+    renderWindowResetKeyRef.current = renderWindowResetKey;
     setRenderLimit(SESSION_RENDER_PAGE_SIZE);
-  }, [search, methodFilterKey, statusFilterKey, wireFilterKey, appFilterKey, hostFilter, hostFocus, sortKey, regexMode, viewMode]);
+  }, [renderWindowResetKey]);
 
   const renderedSessions = React.useMemo(
     () => filtered.slice(0, renderLimit),
@@ -1228,20 +1251,65 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [renderedSessions, selectedId, t.theme, showShortcuts, activeRail, assistantOpen]);
 
-  // Create-from-session: listen for context menu actions from sessions table
+  const openCreateFrom = React.useCallback((action, prefill) => {
+    setCreateFromTarget({ action, prefill });
+    if (action === 'mock') {
+      setActiveRail('mock');
+    } else if (action === 'breakpoint') {
+      setActiveRail('breakpoints');
+    } else {
+      setActiveRail('rules');
+      if (action === 'mapremote') setRulesTab('mapremote');
+      else if (action === 'maplocal') setRulesTab('maplocal');
+      else if (action === 'access') setRulesTab('access');
+      else setRulesTab('rules');
+    }
+    // Clear after a tick so surfaces see the update then reset.
+    setTimeout(() => setCreateFromTarget(null), 500);
+  }, []);
+
+  const sessionLocation = React.useCallback((session) => ({
+    host: session.host || '',
+    path: session.path || '.*',
+    methods: session.method && session.method !== '*' && !['CONNECT', 'WS'].includes(session.method)
+      ? [session.method]
+      : undefined,
+    mode: 'glob',
+  }), []);
+
+  const createFromSession = React.useCallback((session, action) => {
+    if (!session) return;
+    const loc = sessionLocation(session);
+    const nameBits = [session.displayMethod || session.method, session.host, session.path || '/'].filter(Boolean).join(' ');
+    const base = { location: loc, name: `${nameBits}`.trim() };
+    const prefix = {
+      mock: 'Mock',
+      rule: 'Rewrite',
+      breakpoint: 'BP',
+      mapremote: 'Map Remote',
+      maplocal: 'Map Local',
+      access: 'Block',
+    }[action] || 'Rule';
+    const prefill = {
+      ...base,
+      name: `${prefix} ${base.name}`.trim(),
+      _contextAction: action,
+    };
+    if (action === 'mapremote') prefill.destination = '';
+    if (action === 'maplocal') prefill.file_path = '';
+    if (action === 'access') prefill.action = 'block';
+    openCreateFrom(action, prefill);
+  }, [openCreateFrom, sessionLocation]);
+
+  // Create-from-session: keep the legacy event path for any older surface code.
   React.useEffect(() => {
     const handler = (e) => {
       const { action, prefill } = e.detail;
-      setCreateFromTarget({ action, prefill });
-      if (action === 'mock')       setActiveRail('mock');
-      else if (action === 'rule')  setActiveRail('rules');
-      else if (action === 'breakpoint') setActiveRail('breakpoints');
-      // Clear after a tick so surfaces see the update then reset
-      setTimeout(() => setCreateFromTarget(null), 500);
+      openCreateFrom(action, prefill);
     };
     window.addEventListener('oproxy:create-from-session', handler);
     return () => window.removeEventListener('oproxy:create-from-session', handler);
-  }, []);
+  }, [openCreateFrom]);
 
   // Counts for status bar
   const counts = React.useMemo(() => {
@@ -1358,6 +1426,52 @@ function App() {
     setComposeRequest(request);
     setActiveRail('compose');
   };
+
+  const sessionContextLabel = (s) => `${s.displayMethod || s.method} ${s.host || ''} ${s.path || '/'}`.trim();
+
+  const askAssistantAboutSession = (s) => {
+    if (!s) return;
+    setAssistantAttachment({
+      kind: 'session',
+      id: s.id,
+      label: sessionContextLabel(s),
+      surface: 'sessions',
+      snapshot: {
+        id: s.id,
+        method: s.displayMethod || s.method,
+        status: s.status || null,
+        url: s.url,
+        host: s.host,
+        path: s.path,
+        query: s.query,
+        app_protocol: s.appProtocol,
+        wire_protocol: s.wireProtocol,
+        type: s.type,
+        tags: s.tags || [],
+        paused: !!s.paused,
+        pending: !!s.pending,
+      },
+    });
+    setAssistantOpen(true);
+  };
+
+  const copySessionCommand = (s) => {
+    const command = buildCurlFromSession(s);
+    if (!command) {
+      showToast('Tunnel sessions do not have a replayable shell command.', true);
+      return;
+    }
+    copyText(command);
+  };
+
+  const sessionActions = React.useMemo(() => ({
+    askAssistant: askAssistantAboutSession,
+    openInCompose: openSessionInCompose,
+    replay: replaySession,
+    copyCommand: copySessionCommand,
+    copyUrl: (s) => copyText(s.url),
+  }), [replaySession, openSessionInCompose]);
+
   const handleImportFile = async (file) => {
     if (!file) return;
     try {
@@ -1510,6 +1624,7 @@ function App() {
                     onSort={onSort}
                     bulkSel={bulkSel}
                     emptyState={emptyState}
+                    sessionActions={sessionActions}
                     onBulkToggle={(id) => setBulkSel(prev => {
                       const n = new Set(prev);
                       n.has(id) ? n.delete(id) : n.add(id);
@@ -1523,6 +1638,7 @@ function App() {
                     selectedId={selectedId}
                     onSelect={setSelectedId}
                     emptyState={emptyState}
+                    sessionActions={sessionActions}
                   />
                 )}
                 {hiddenSessionCount > 0 && (
@@ -1574,7 +1690,7 @@ function App() {
           )}
           {activeRail === 'dashboard' && <ProtocolDashboard />}
           {activeRail === 'connections' && <ConnectionsSurface />}
-          {activeRail === 'rules' && <RulesSurface createFrom={createFromTarget?.action === 'rule' ? createFromTarget.prefill : null} initialTab={rulesTab} />}
+          {activeRail === 'rules' && <RulesSurface createFrom={['rule', 'mapremote', 'maplocal', 'access'].includes(createFromTarget?.action) ? createFromTarget.prefill : null} initialTab={rulesTab} />}
           {activeRail === 'breakpoints' && (
             <BreakpointsSurface
               sessions={sessions}
@@ -1602,7 +1718,7 @@ function App() {
         type="button"
         aria-label="Open assistant"
         aria-expanded={assistantOpen}
-        onClick={() => setAssistantOpen(true)}
+        onClick={() => { setAssistantAttachment(null); setAssistantOpen(true); }}
       >
         <Icon name="bolt" size={18} stroke={1.8} />
         <span>Assistant</span>
@@ -1613,6 +1729,7 @@ function App() {
           <div className="assistant-drawer" role="dialog" aria-label="Assistant" onMouseDown={e => e.stopPropagation()}>
             <AssistantSurface
               mode="drawer"
+              attachment={assistantAttachment}
               onClose={() => setAssistantOpen(false)}
               onRefresh={() => loadSessions()}
               activeSurface={activeRail}
@@ -1627,7 +1744,10 @@ function App() {
                 app_filter: [...appFilter],
                 host_focus: hostFocus,
                 view_mode: viewMode,
+                selected_session_id: assistantAttachment ? null : selectedId,
+                selected_session_ignored: !!assistantAttachment,
               }}
+              onClearAttachment={() => setAssistantAttachment(null)}
               onWorkspaceChanged={() => {
                 loadWorkspace();
                 loadSessions();

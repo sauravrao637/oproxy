@@ -163,6 +163,7 @@ mod tests {
             source: SessionSource::Proxy,
             ws_frames: vec![],
             events: vec![],
+            flow: vec![],
             note: None,
             tags: vec![],
             inspector_data: None,

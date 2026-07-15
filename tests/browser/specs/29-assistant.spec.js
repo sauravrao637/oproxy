@@ -118,4 +118,109 @@ test.describe('Assistant', () => {
     expect(applyFilter.execution_kind).toBe('workspace');
     expect(applyFilter.refreshed_resources).toContain('sessions');
   });
+
+  test('assistant compatibility probes primary context and secondary fallback', async ({ request }) => {
+    const provider = await startFakeProvider((req, res) => {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        const tools = payload.tools || [];
+        const promptText = JSON.stringify(payload.messages || []);
+        let message = { role: 'assistant', content: 'reachable' };
+
+        if (promptText.includes('primary.example.com')) {
+          message = { role: 'assistant', content: 'primary.example.com /primary' };
+        } else if (promptText.includes('fallback.example.com')) {
+          message = { role: 'assistant', content: 'fallback.example.com /secondary' };
+        } else if (tools.some(tool => tool.function?.name === 'oproxy_probe_echo')) {
+          message = {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: 'call_probe',
+              type: 'function',
+              function: {
+                name: 'oproxy_probe_echo',
+                arguments: JSON.stringify({ message: 'ping' }),
+              },
+            }],
+          };
+        }
+
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message }] }));
+      });
+    });
+
+    try {
+      const port = provider.address().port;
+      const res = await request.post('/admin/assistant/compatibility', {
+        data: {
+          provider: { base_url: `http://127.0.0.1:${port}/v1`, model: 'fake-model' },
+          api_key: 'sk-browser-only',
+        },
+      });
+      expect(res.ok()).toBeTruthy();
+      const report = await res.json();
+      const primary = report.checks.find(check => check.id === 'context_primary_priority');
+      const fallback = report.checks.find(check => check.id === 'context_secondary_fallback');
+
+      expect(primary).toMatchObject({ required: true, ok: true });
+      expect(primary.detail).toContain('primary context');
+      expect(fallback).toMatchObject({ required: true, ok: true });
+      expect(fallback.detail).toContain('secondary context');
+    } finally {
+      provider.close();
+    }
+  });
+
+  test('assistant renders markdown responses as rich chat content', async ({ page }) => {
+    const provider = await startFakeProvider((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: [
+                '# Summary',
+                '',
+                'This is **important** and uses `inline-code`.',
+                '',
+                '| Field | Value |',
+                '|---|---|',
+                '| Status | 200 OK |',
+                '',
+                '- first point',
+                '- second point',
+              ].join('\n'),
+            },
+          }],
+        }));
+      });
+    });
+
+    try {
+      const port = provider.address().port;
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Open assistant' }).click({ force: true });
+      await page.getByLabel('Provider base URL').fill(`http://127.0.0.1:${port}/v1`);
+      await page.getByLabel('Model').fill('fake-model');
+      await page.getByLabel('Assistant message').fill('Render markdown please');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+
+      const reply = page.locator('.assistant-msg.assistant').last();
+      await expect(reply.getByRole('heading', { name: 'Summary' })).toBeVisible();
+      await expect(reply.locator('strong')).toHaveText('important');
+      await expect(reply.locator('code')).toContainText('inline-code');
+      await expect(reply.locator('table')).toContainText('200 OK');
+      await expect(reply.locator('li')).toHaveCount(2);
+      await expect(reply).not.toContainText('# Summary');
+      await expect(reply).not.toContainText('| Field | Value |');
+    } finally {
+      provider.close();
+    }
+  });
 });
