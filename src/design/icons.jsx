@@ -107,6 +107,19 @@ const ICONS = {
     <path d="M5 5h6M5 5v6M5 5l8 8" />
     <path d="M19 19h-6M19 19v-6M19 19l-8-8" />
   </>,
+  inbox: <>
+    <path d="M5 4h14l2 10v5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19v-5L5 4z" />
+    <path d="M3 14h5l2 3h4l2-3h5" />
+  </>,
+  route: <>
+    <circle cx="6" cy="6" r="2.5" />
+    <circle cx="18" cy="18" r="2.5" />
+    <path d="M8.5 6H13a3 3 0 0 1 0 6h-2a3 3 0 0 0 0 6h4.5" />
+  </>,
+  globe: <>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+  </>,
   chevronDown: <path d="M6 9l6 6 6-6" />,
   chevronRight: <path d="M9 6l6 6-6 6" />,
   x: <path d="M6 6l12 12M18 6L6 18" />,
@@ -134,6 +147,10 @@ const ICONS = {
   clock: <>
     <circle cx="12" cy="12" r="9" />
     <path d="M12 7v5l3 2" />
+  </>,
+  checkCircle: <>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M8 12l2.6 2.6L16 9" />
   </>,
   plus: <>
     <path d="M12 5v14M5 12h14" />

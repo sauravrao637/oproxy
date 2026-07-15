@@ -31,10 +31,18 @@ function makeSession(i) {
 }
 
 test.describe('Large captures', () => {
+  test.beforeEach(async ({ request }) => {
+    await request.delete('/admin/sessions');
+    await resetWorkspace(request);
+  });
+
+  test.afterEach(async ({ request }) => {
+    await request.delete('/admin/sessions');
+  });
+
   test('session list paginates rendered rows for high-volume captures', async ({ page, request }) => {
     const sessions = Array.from({ length: 750 }, (_, i) => makeSession(i));
     await request.post('/admin/sessions/import', { data: { sessions, merge: true } });
-    await resetWorkspace(request);
 
     await page.goto('/');
     await page.getByPlaceholder(/Filter requests/).fill('large.example.com');
@@ -45,5 +53,33 @@ test.describe('Large captures', () => {
     await page.getByRole('button', { name: 'Show next 250' }).click();
     await expect(page.locator('tbody tr')).toHaveCount(500);
     await expect(page.locator('.page-more')).toContainText('Showing 500 of 750 matching sessions');
+  });
+
+  test('structure selection does not collapse expanded render window after workspace sync', async ({ page, request }) => {
+    const sessions = Array.from({ length: 750 }, (_, i) => makeSession(i));
+    await request.post('/admin/sessions/import', { data: { sessions, merge: true } });
+
+    await page.goto('/');
+    const filterPatch = page.waitForResponse((res) => res.url().includes('/admin/workspace') && res.request().method() === 'PATCH');
+    await page.getByPlaceholder(/Filter requests/).fill('large.example.com');
+    await filterPatch;
+    await expect(page.locator('.page-more')).toContainText('Showing 250 of 750 matching sessions', { timeout: 10000 });
+
+    const viewPatch = page.waitForResponse((res) => res.url().includes('/admin/workspace') && res.request().method() === 'PATCH');
+    await page.getByRole('button', { name: 'Structure' }).click();
+    await viewPatch;
+    await page.locator('.tree-node', { hasText: '/items' }).click();
+    await expect(page.locator('.tree-leaf')).toHaveCount(250);
+
+    await page.getByRole('button', { name: 'Show next 250' }).click();
+    await expect(page.locator('.tree-leaf')).toHaveCount(500);
+    await expect(page.locator('.page-more')).toContainText('Showing 500 of 750 matching sessions');
+
+    const workspacePatch = page.waitForResponse((res) => res.url().includes('/admin/workspace') && res.request().method() === 'PATCH');
+    await page.locator('.tree-leaf').nth(300).click();
+    await workspacePatch;
+
+    await expect(page.locator('.page-more')).toContainText('Showing 500 of 750 matching sessions');
+    await expect(page.locator('.tree-leaf')).toHaveCount(500);
   });
 });

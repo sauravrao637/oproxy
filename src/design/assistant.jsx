@@ -191,7 +191,173 @@ function PendingActionCard({ action, busy, onDismiss, onApply }) {
   );
 }
 
-function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurface = 'sessions', mode = 'surface', onClose }) {
+function isMarkdownTableSeparator(line = '') {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function splitMarkdownTableRow(line = '') {
+  let text = line.trim();
+  if (text.startsWith('|')) text = text.slice(1);
+  if (text.endsWith('|')) text = text.slice(0, -1);
+  return text.split('|').map(cell => cell.trim());
+}
+
+function safeLinkHref(href = '') {
+  const trimmed = href.trim();
+  if (/^(https?:|mailto:|\/|#)/i.test(trimmed)) return trimmed;
+  return null;
+}
+
+function renderInlineMarkdown(text = '', keyPrefix = 'inline') {
+  const nodes = [];
+  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g;
+  let lastIndex = 0;
+  let idx = 0;
+
+  for (const match of text.matchAll(tokenPattern)) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    const token = match[0];
+    const key = `${keyPrefix}-${idx++}`;
+
+    if (token.startsWith('`')) {
+      nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
+    } else if (token.startsWith('**')) {
+      nodes.push(<strong key={key}>{renderInlineMarkdown(token.slice(2, -2), `${key}-strong`)}</strong>);
+    } else if (token.startsWith('*')) {
+      nodes.push(<em key={key}>{renderInlineMarkdown(token.slice(1, -1), `${key}-em`)}</em>);
+    } else {
+      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      const href = safeLinkHref(link?.[2] || '');
+      nodes.push(href
+        ? <a key={key} href={href} target="_blank" rel="noopener noreferrer">{renderInlineMarkdown(link[1], `${key}-link`)}</a>
+        : token);
+    }
+    lastIndex = match.index + token.length;
+  }
+
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+function MarkdownContent({ text = '' }) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const blocks = [];
+  let i = 0;
+
+  const nextBlockStarts = (line, nextLine) => (
+    !line.trim()
+    || /^```/.test(line)
+    || /^#{1,6}\s+/.test(line)
+    || /^\s*[-*]\s+/.test(line)
+    || /^\s*\d+[.)]\s+/.test(line)
+    || /^\s*>\s?/.test(line)
+    || (line.includes('|') && isMarkdownTableSeparator(nextLine || ''))
+  );
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+
+    const fence = line.match(/^```\s*([\w-]+)?\s*$/);
+    if (fence) {
+      const code = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
+      if (i < lines.length) i += 1;
+      blocks.push(
+        <pre key={`block-${blocks.length}`} className="assistant-md-code">
+          <code>{code.join('\n')}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length + 2, 6);
+      const Tag = `h${level}`;
+      blocks.push(<Tag key={`block-${blocks.length}`}>{renderInlineMarkdown(heading[2], `h-${blocks.length}`)}</Tag>);
+      i += 1;
+      continue;
+    }
+
+    if (line.includes('|') && isMarkdownTableSeparator(lines[i + 1] || '')) {
+      const headers = splitMarkdownTableRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+        rows.push(splitMarkdownTableRow(lines[i]));
+        i += 1;
+      }
+      blocks.push(
+        <div key={`block-${blocks.length}`} className="assistant-md-table-wrap">
+          <table>
+            <thead>
+              <tr>{headers.map((cell, idx) => <th key={idx}>{renderInlineMarkdown(cell, `th-${blocks.length}-${idx}`)}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIdx) => (
+                <tr key={rowIdx}>
+                  {headers.map((_, cellIdx) => <td key={cellIdx}>{renderInlineMarkdown(row[cellIdx] || '', `td-${blocks.length}-${rowIdx}-${cellIdx}`)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      const orderedList = !!ordered;
+      const items = [];
+      const itemPattern = orderedList ? /^\s*\d+[.)]\s+(.+)$/ : /^\s*[-*]\s+(.+)$/;
+      while (i < lines.length) {
+        const item = lines[i].match(itemPattern);
+        if (!item) break;
+        items.push(item[1]);
+        i += 1;
+      }
+      const Tag = orderedList ? 'ol' : 'ul';
+      blocks.push(
+        <Tag key={`block-${blocks.length}`}>
+          {items.map((item, idx) => <li key={idx}>{renderInlineMarkdown(item, `li-${blocks.length}-${idx}`)}</li>)}
+        </Tag>
+      );
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quote = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quote.push(lines[i].replace(/^\s*>\s?/, ''));
+        i += 1;
+      }
+      blocks.push(<blockquote key={`block-${blocks.length}`}>{renderInlineMarkdown(quote.join(' '), `q-${blocks.length}`)}</blockquote>);
+      continue;
+    }
+
+    const paragraph = [];
+    while (i < lines.length && !nextBlockStarts(lines[i], lines[i + 1])) {
+      paragraph.push(lines[i].trim());
+      i += 1;
+    }
+    if (paragraph.length === 0) {
+      paragraph.push(line.trim());
+      i += 1;
+    }
+    blocks.push(<p key={`block-${blocks.length}`}>{renderInlineMarkdown(paragraph.join(' '), `p-${blocks.length}`)}</p>);
+  }
+
+  return <div className="assistant-md">{blocks}</div>;
+}
+
+function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurface = 'sessions', mode = 'surface', onClose, attachment, onClearAttachment }) {
   const [config, setConfig] = React.useState(loadConfig);
   const [messages, setMessages] = React.useState([
     {
@@ -205,10 +371,17 @@ function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurfac
   const [busy, setBusy] = React.useState(false);
   const [compat, setCompat] = React.useState(null);
   const [compatBusy, setCompatBusy] = React.useState(false);
+  const inputRef = React.useRef(null);
 
   React.useEffect(() => {
     saveConfig(config);
   }, [config]);
+
+  React.useEffect(() => {
+    if (attachment) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [attachment]);
 
   const testCompatibility = async () => {
     setCompatBusy(true);
@@ -250,6 +423,10 @@ function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurfac
     // previous turn stays valid (server-side TTL) and applyable; wiping it would
     // orphan a pending change the moment the user types a follow-up message.
 
+    const effectiveUiState = attachment
+      ? { ...(uiState || {}), selected_session_id: null, selected_session_ignored: true }
+      : (uiState || {});
+
     try {
       const res = await fetch('/admin/assistant/chat', {
         method: 'POST',
@@ -258,7 +435,12 @@ function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurfac
           provider: { base_url: config.base_url, model: config.model },
           api_key: config.api_key,
           messages: nextMessages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-12),
-          client_context: { active_surface: activeSurface, ui_state: uiState || {} },
+          client_context: {
+            active_surface: activeSurface,
+            ui_state: effectiveUiState,
+            attachment: attachment || null,
+            ignore_selected_session: !!attachment,
+          },
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -350,13 +532,28 @@ function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurfac
             {messages.map((message, idx) => (
               <div key={idx} className={`assistant-msg ${message.role}`}>
                 <div className="assistant-role">{message.role === 'user' ? 'You' : 'Assistant'}</div>
-                <div className="assistant-bubble">{message.content}</div>
+                <div className="assistant-bubble"><MarkdownContent text={message.content} /></div>
               </div>
             ))}
-            {busy && <div className="assistant-msg assistant"><div className="assistant-role">Assistant</div><div className="assistant-bubble">Working...</div></div>}
+            {busy && <div className="assistant-msg assistant"><div className="assistant-role">Assistant</div><div className="assistant-bubble"><MarkdownContent text="Working..." /></div></div>}
           </div>
+          {attachment && (
+            <div className="assistant-context-chip" aria-label={`Assistant context ${attachment.label || attachment.kind}`}>
+              <Icon name="bolt" size={12} stroke={1.8} />
+              <span>{attachment.label || titleCase(attachment.kind || 'Context')}</span>
+              <button
+                type="button"
+                aria-label="Remove assistant context"
+                title="Remove attached request context"
+                onClick={onClearAttachment}
+              >
+                ×
+              </button>
+            </div>
+          )}
           <form className="assistant-input" onSubmit={send}>
             <textarea
+              ref={inputRef}
               className="cmp-textarea"
               aria-label="Assistant message"
               value={draft}
@@ -364,7 +561,7 @@ function AssistantSurface({ onRefresh, onWorkspaceChanged, uiState, activeSurfac
               onKeyDown={e => {
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') send(e);
               }}
-              placeholder="Ask: show failed requests, create a mock, add a DNS override..."
+              placeholder="Ask: explain this request flow, show failed requests, create a mock..."
             />
             <button className="btn primary" type="submit" disabled={busy || !draft.trim()}>
               <Icon name="bolt" size={13} stroke={1.8} /> Send

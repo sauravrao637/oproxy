@@ -14,6 +14,7 @@ use crate::middleware::{
     append_header, path_of, remove_header, remove_query_param, set_header, set_query_param,
     split_path_query,
 };
+use crate::session::{FlowRuleKind, FlowShortCircuitReason, RequestFlowEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
 use regex::Regex;
@@ -195,11 +196,15 @@ impl Middleware for UnifiedRewriteMiddleware {
         let rules = self.rules.read().await;
         let target = MatchTarget::from_request(ctx);
         for rule in rules.iter().filter(|r| r.enabled) {
-            if !matches!(rule.applies_to, AppliesTo::Response)
-                && rule.location.matches(&target)
-                && let Some(action) = apply_request_actions(rule, ctx)
-            {
-                return action;
+            if !matches!(rule.applies_to, AppliesTo::Response) && rule.location.matches(&target) {
+                ctx.push_flow(RequestFlowEvent::RuleMatched {
+                    rule_kind: FlowRuleKind::Rewrite,
+                    rule_id: rule.id.clone(),
+                    rule_name: rule.name.clone(),
+                });
+                if let Some(action) = apply_request_actions(rule, ctx) {
+                    return action;
+                }
             }
         }
         MiddlewareAction::Continue
@@ -210,6 +215,11 @@ impl Middleware for UnifiedRewriteMiddleware {
         let target = MatchTarget::from_response(ctx);
         for rule in rules.iter().filter(|r| r.enabled) {
             if !matches!(rule.applies_to, AppliesTo::Request) && rule.location.matches(&target) {
+                ctx.push_flow(RequestFlowEvent::RuleMatched {
+                    rule_kind: FlowRuleKind::Rewrite,
+                    rule_id: rule.id.clone(),
+                    rule_name: rule.name.clone(),
+                });
                 apply_response_actions(rule, ctx);
             }
         }
@@ -225,27 +235,33 @@ fn apply_request_actions(
     rule: &RewriteRuleSet,
     ctx: &mut RequestContext,
 ) -> Option<MiddlewareAction> {
+    let mut summaries = Vec::new();
     for action in &rule.actions {
         match action {
             RewriteAction::SetHeader { name, value } => {
                 set_header(&mut ctx.headers, name, value.clone());
                 ctx.rewritten = true;
+                summaries.push(format!("request header '{name}' set"));
             }
             RewriteAction::AppendHeader { name, value } => {
                 append_header(&mut ctx.headers, name, value);
                 ctx.rewritten = true;
+                summaries.push(format!("request header '{name}' appended"));
             }
             RewriteAction::RemoveHeader { name } => {
                 remove_header(&mut ctx.headers, name);
                 ctx.rewritten = true;
+                summaries.push(format!("request header '{name}' removed"));
             }
             RewriteAction::SetQueryParam { name, value } => {
                 ctx.uri = set_query_param(&ctx.uri, name, value);
                 ctx.rewritten = true;
+                summaries.push(format!("query parameter '{name}' set"));
             }
             RewriteAction::RemoveQueryParam { name } => {
                 ctx.uri = remove_query_param(&ctx.uri, name);
                 ctx.rewritten = true;
+                summaries.push(format!("query parameter '{name}' removed"));
             }
             RewriteAction::SetHost { value } => {
                 ctx.host = value.clone();
@@ -253,6 +269,7 @@ fn apply_request_actions(
                 // Clear any existing destination so the engine re-resolves from new host.
                 ctx.destination = None;
                 ctx.rewritten = true;
+                summaries.push("host changed".to_string());
             }
             RewriteAction::SetPath {
                 pattern,
@@ -269,6 +286,7 @@ fn apply_request_actions(
                         format!("{new_path}?{query}")
                     };
                     ctx.rewritten = true;
+                    summaries.push("path changed".to_string());
                 }
             }
             RewriteAction::ReplaceBody {
@@ -282,6 +300,7 @@ fn apply_request_actions(
                         ctx.set_body_text(new_body);
                         remove_header(&mut ctx.headers, "content-length");
                         ctx.rewritten = true;
+                        summaries.push("request body changed".to_string());
                     }
                 }
             }
@@ -295,6 +314,12 @@ fn apply_request_actions(
                     tags: vec!["rewrite".to_string()],
                     served_mock: None,
                 });
+                ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                    reason: FlowShortCircuitReason::RewriteRedirect,
+                    status: *status,
+                    rule_id: Some(rule.id.clone()),
+                    rule_name: Some(rule.name.clone()),
+                });
                 return Some(MiddlewareAction::StopAndReturn);
             }
             RewriteAction::Block { status } => {
@@ -305,11 +330,25 @@ fn apply_request_actions(
                     tags: vec!["rewrite".to_string()],
                     served_mock: None,
                 });
+                ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                    reason: FlowShortCircuitReason::RewriteBlock,
+                    status: *status,
+                    rule_id: Some(rule.id.clone()),
+                    rule_name: Some(rule.name.clone()),
+                });
                 return Some(MiddlewareAction::StopAndReturn);
             }
             // Response-only actions are silently skipped on request.
             RewriteAction::SetStatus { .. } => {}
         }
+    }
+    if !summaries.is_empty() {
+        ctx.push_flow(RequestFlowEvent::RuleApplied {
+            rule_kind: FlowRuleKind::Rewrite,
+            rule_id: rule.id.clone(),
+            rule_name: rule.name.clone(),
+            summary: summaries.join(", "),
+        });
     }
     None
 }
@@ -326,23 +365,28 @@ fn push_tag_once(tags: &mut Vec<String>, tag: &str) {
 }
 
 fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
+    let mut summaries = Vec::new();
     for action in &rule.actions {
         match action {
             RewriteAction::SetHeader { name, value } => {
                 set_header(&mut ctx.headers, name, value.clone());
                 push_tag_once(&mut ctx.tags, "rewrite");
+                summaries.push(format!("response header '{name}' set"));
             }
             RewriteAction::AppendHeader { name, value } => {
                 append_header(&mut ctx.headers, name, value);
                 push_tag_once(&mut ctx.tags, "rewrite");
+                summaries.push(format!("response header '{name}' appended"));
             }
             RewriteAction::RemoveHeader { name } => {
                 remove_header(&mut ctx.headers, name);
                 push_tag_once(&mut ctx.tags, "rewrite");
+                summaries.push(format!("response header '{name}' removed"));
             }
             RewriteAction::SetStatus { code } => {
                 ctx.status = *code;
                 push_tag_once(&mut ctx.tags, "rewrite");
+                summaries.push(format!("status changed to {code}"));
             }
             RewriteAction::ReplaceBody {
                 pattern,
@@ -355,6 +399,7 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
                         ctx.set_body_text(new_body);
                         remove_header(&mut ctx.headers, "content-length");
                         push_tag_once(&mut ctx.tags, "rewrite");
+                        summaries.push("response body changed".to_string());
                     }
                 }
             }
@@ -366,6 +411,14 @@ fn apply_response_actions(rule: &RewriteRuleSet, ctx: &mut ResponseContext) {
             | RewriteAction::Redirect { .. }
             | RewriteAction::Block { .. } => {}
         }
+    }
+    if !summaries.is_empty() {
+        ctx.push_flow(RequestFlowEvent::ResponseModified {
+            rule_kind: FlowRuleKind::Rewrite,
+            rule_id: rule.id.clone(),
+            rule_name: rule.name.clone(),
+            summary: summaries.join(", "),
+        });
     }
 }
 
@@ -597,6 +650,15 @@ mod tests {
         mw.on_request(&mut ctx).await;
         assert!(ctx.uri.starts_with("/v2/users"), "uri={}", ctx.uri);
         assert!(ctx.uri.contains("page=1"), "query preserved");
+        assert!(ctx.flow.iter().any(|event| matches!(
+            event,
+            crate::session::RequestFlowEvent::RuleApplied {
+                rule_kind: crate::session::FlowRuleKind::Rewrite,
+                rule_id,
+                rule_name,
+                summary,
+            } if rule_id == "test" && rule_name == "test rule" && summary == "path changed"
+        )));
     }
 
     // ── ReplaceBody ────────────────────────────────────────────────────────
@@ -792,6 +854,15 @@ mod tests {
         let mut ctx = res("h", "GET", "/", 200);
         mw.on_response(&mut ctx).await;
         assert_eq!(ctx.status, 201);
+        assert!(ctx.flow.iter().any(|event| matches!(
+            event,
+            crate::session::RequestFlowEvent::ResponseModified {
+                rule_kind: crate::session::FlowRuleKind::Rewrite,
+                rule_id,
+                rule_name,
+                summary,
+            } if rule_id == "test" && rule_name == "test rule" && summary == "status changed to 201"
+        )));
     }
 
     #[tokio::test]

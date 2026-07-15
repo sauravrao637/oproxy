@@ -63,10 +63,24 @@ fn system_prompt(context: &AssistantContext) -> String {
          traffic-wide stats, get_connections for multiplexing/connection reuse, and \
          get_breakpoint_diagnostics when a breakpoint did not fire. Rules, mocks, and breakpoints accept \
          wire_protocol, application_protocol, and body_mode matchers for protocol-targeted behavior. \
+         Context priority is strict: primary_subject is the only primary context and exists only when \
+         the user intentionally attached something, currently through Ask Assistant. Workspace state, \
+         visible_sessions, selected UI state, feature views, and client_hints are secondary. If \
+         primary_subject exists, treat the attached request as the primary subject of the user's message; \
+         words like this, this request, and it refer to selected_session for primary_subject.session_id. \
+         If selected_session does not contain enough detail, call get_session for primary_subject.session_id \
+         before answering from secondary context. Use secondary context only to fill gaps, answer broader \
+         follow-ups, or when no primary_subject exists. Do not explain the complete Sessions page unless \
+         the user asks for broader context. \
+         For a selected session, request_flow is the concise, protocol-neutral timeline of what happened: \
+         request received, rule matched/applied, destination chosen, sent upstream, upstream response \
+         received, response changed, finished, or failed. Explain it using user-facing wording such as \
+         routed, changed request/response, sent upstream, and finished; avoid internal phrases like \
+         target selected unless quoting raw data. \
          Proposals must use the same payload shape as the UI. Keep answers concise and mention the exact \
-         action that needs confirmation. The backend context below is authoritative for current UI/workspace \
-         state and visible Sessions results; client_hints inside it are non-authoritative ephemeral browser \
-         hints only. Response guidance: {response_guidance}. \
+         action that needs confirmation. The backend context below is authoritative, but its \
+         context_priority field controls which parts are primary versus secondary; client_hints inside it \
+         are non-authoritative ephemeral browser hints only. Response guidance: {response_guidance}. \
          Feature catalog summary: {feature_summary}. \
          Authoritative backend context: {context}"
     )
@@ -76,11 +90,21 @@ fn system_prompt(context: &AssistantContext) -> String {
 mod tests {
     use super::*;
     use crate::control_plane::assistant_context::{
+        AssistantContextPriority, AssistantPrimarySubject, AssistantSessionSummary,
         AssistantVisibleSessionsContext, AssistantWorkspaceContext,
     };
 
     fn test_context() -> AssistantContext {
         AssistantContext {
+            context_priority: AssistantContextPriority {
+                primary: None,
+                secondary: vec![
+                    "workspace.sessions_view".to_string(),
+                    "visible_sessions".to_string(),
+                    "client_hints.ui_state".to_string(),
+                ],
+                rule: "Use secondary only when primary is absent or not sufficient.".to_string(),
+            },
             workspace: AssistantWorkspaceContext {
                 active_surface: "sessions".to_string(),
                 sessions_view: json!({ "query": "host:api.test.com" }),
@@ -96,6 +120,7 @@ mod tests {
                 selected_session_in_visible_results: true,
                 sessions: Vec::new(),
             },
+            primary_subject: None,
             selected_session: None,
             client_hints: Some(json!({ "active_surface": "stale-client-value" })),
         }
@@ -107,7 +132,43 @@ mod tests {
 
         assert!(prompt.contains("Authoritative backend context"));
         assert!(prompt.contains("client_hints inside it are non-authoritative"));
+        assert!(prompt.contains("request_flow is the concise"));
         assert!(prompt.contains("host:api.test.com"));
+    }
+
+    #[test]
+    fn system_prompt_marks_attached_request_as_primary_subject() {
+        let mut context = test_context();
+        context.primary_subject = Some(AssistantPrimarySubject {
+            kind: "attached_session".to_string(),
+            session_id: "right-clicked-request".to_string(),
+            instruction: "attached request is primary".to_string(),
+        });
+        context.selected_session = Some(AssistantSessionSummary {
+            id: "right-clicked-request".to_string(),
+            timestamp: chrono::Utc::now(),
+            method: "POST".to_string(),
+            uri: "https://api.test.com/v1/orders".to_string(),
+            host: "api.test.com".to_string(),
+            status: Some(200),
+            source: crate::session::SessionSource::Proxy,
+            tags: vec![],
+            note: None,
+            request_flow: vec![json!({ "event": "request_received" })],
+        });
+
+        let prompt = system_prompt(&context);
+
+        assert!(prompt.contains("primary_subject"));
+        assert!(prompt.contains("attached request as the primary subject"));
+        assert!(prompt.contains("Context priority is strict"));
+        assert!(prompt.contains("Workspace state"));
+        assert!(prompt.contains("secondary"));
+        assert!(prompt.contains("this request"));
+        assert!(prompt.contains("call get_session for primary_subject.session_id"));
+        assert!(prompt.contains("Do not explain"));
+        assert!(prompt.contains("complete Sessions page"));
+        assert!(prompt.contains("right-clicked-request"));
     }
 
     #[test]

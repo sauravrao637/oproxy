@@ -20,6 +20,7 @@ async function resetWorkspace(request) {
           host_focus: [],
           host_filter: null,
           sort: null,
+          view_mode: 'sequence',
           selected_session_id: null,
         },
       },

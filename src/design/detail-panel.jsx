@@ -147,6 +147,161 @@ function HeaderList({ obj }) {
   );
 }
 
+function titleCase(value) {
+  return String(value || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function ruleKindLabel(kind) {
+  const labels = {
+    map_remote: 'Map Remote',
+    map_local: 'Map Local',
+    rewrite: 'Rewrite',
+    mock: 'Mock',
+    breakpoint: 'Breakpoint',
+    lua: 'Lua',
+    access_control: 'Access Control',
+    dns_override: 'DNS Override',
+  };
+  return labels[kind] || titleCase(kind);
+}
+
+function ruleName(event) {
+  return event?.rule_name || event?.rule_id || 'rule';
+}
+
+function shortCircuitLabel(reason) {
+  const labels = {
+    mock_response: 'Returned mock response',
+    map_local_file: 'Served local file',
+    map_local_error: 'Map Local returned an error',
+    rewrite_redirect: 'Returned redirect',
+    rewrite_block: 'Blocked request',
+    access_denied: 'Denied by access rule',
+    breakpoint_timeout: 'Breakpoint timed out',
+    lua_abort: 'Stopped by Lua',
+    middleware_stop: 'Stopped by middleware',
+  };
+  return labels[reason] || titleCase(reason);
+}
+
+function targetSelection(event) {
+  const source = event?.source;
+  const byRule = event?.rule_name || event?.rule_id;
+  const labels = {
+    original_host: ['globe', 'Using original destination'],
+    map_remote: ['route', byRule ? `Routed by Map Remote "${ruleName(event)}"` : 'Routed by Map Remote'],
+    dns_override: ['wifi', 'DNS override chose destination'],
+    upstream_proxy: ['route', 'Using upstream proxy'],
+    mitm_connect: ['shield', 'CONNECT tunnel destination chosen'],
+  };
+  const [icon, text] = labels[source] || ['route', 'Destination chosen'];
+  return { icon, text, meta: event?.target || '' };
+}
+
+function ruleAppliedText(event, phase) {
+  if (event?.rule_kind === 'breakpoint') {
+    const action = event.summary || (phase === 'response' ? 'handled response' : 'handled request');
+    return `Breakpoint ${action}`;
+  }
+  return `${ruleKindLabel(event.rule_kind)} "${ruleName(event)}" changed ${phase}`;
+}
+
+function formatFlowEvent(event) {
+  switch (event?.type) {
+    case 'request_received':
+      return {
+        icon: 'inbox',
+        text: `Received ${event.method || 'request'}`,
+        meta: [event.host, event.path].filter(Boolean).join(' '),
+      };
+    case 'rule_matched':
+      return {
+        icon: 'shield',
+        text: `${ruleKindLabel(event.rule_kind)} "${ruleName(event)}" matched`,
+      };
+    case 'rule_applied':
+      return {
+        icon: event.rule_kind === 'breakpoint' ? 'pauseRail' : 'rules',
+        text: ruleAppliedText(event, 'request'),
+        meta: event.rule_kind === 'breakpoint' ? '' : (event.summary || ''),
+      };
+    case 'target_selected':
+      return targetSelection(event);
+    case 'short_circuited':
+      return {
+        icon: 'shield',
+        tone: 'warn',
+        text: `${shortCircuitLabel(event.reason)}${event.rule_name ? ` via "${event.rule_name}"` : ''}`,
+        meta: event.status ? `Returned ${event.status}` : '',
+      };
+    case 'forwarded':
+      return {
+        icon: 'send',
+        text: 'Sent to upstream',
+        meta: event.target || '',
+      };
+    case 'response_received':
+      return {
+        icon: 'inbox',
+        text: event.status ? `Received upstream response ${event.status}` : 'Received upstream response',
+        meta: event.ttfb_ms != null ? `${event.ttfb_ms} ms to first byte` : '',
+      };
+    case 'response_modified':
+      return {
+        icon: 'rules',
+        text: ruleAppliedText(event, 'response'),
+        meta: event.summary || '',
+      };
+    case 'completed':
+      return {
+        icon: 'checkCircle',
+        text: event.status ? `Finished with ${event.status}` : 'Finished',
+        meta: event.latency_ms != null ? `${event.latency_ms} ms total` : '',
+      };
+    case 'failed':
+      return {
+        icon: 'bolt',
+        tone: 'bad',
+        text: `${titleCase(event.stage)} failed`,
+        meta: event.message || '',
+      };
+    default:
+      return {
+        icon: 'list',
+        text: titleCase(event?.type || 'event'),
+      };
+  }
+}
+
+function RequestFlow({ flow }) {
+  const events = Array.isArray(flow) ? flow : [];
+  return (
+    <div className="section">
+      <h4>Request Flow</h4>
+      <div className="sec-body">
+        {events.length === 0 ? (
+          <span className="mute">No request flow recorded for this session.</span>
+        ) : (
+          <div className="request-flow">
+            {events.map((event, i) => {
+              const item = formatFlowEvent(event);
+              return (
+                <div className={'flow-row ' + (item.tone || '')} key={`${event.type || 'event'}_${i}`}>
+                  <span className="flow-icon"><Icon name={item.icon} size={12} stroke={1.9} /></span>
+                  <span className="flow-main">{item.text}</span>
+                  {item.meta && <span className="flow-meta">{item.meta}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function OverviewTab({ s }) {
   const m = (label, value, tone, unit) => (
     <div className={'metric' + (tone ? ' ' + tone : '')}>
@@ -187,6 +342,8 @@ function OverviewTab({ s }) {
           </div>
         </div>
       </div>
+
+      <RequestFlow flow={s.flow} />
 
       <div className="section">
         <h4>Tags</h4>

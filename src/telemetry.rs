@@ -119,6 +119,7 @@ mod tests {
             source: Default::default(),
             ws_frames: vec![],
             events: vec![],
+            flow: vec![],
             note: None,
             tags: vec![],
             inspector_data: None,

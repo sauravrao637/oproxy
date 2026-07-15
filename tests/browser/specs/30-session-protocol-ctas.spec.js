@@ -1,6 +1,14 @@
 // @ts-check
+const http = require('http');
 const { test, expect } = require('@playwright/test');
 const { resetWorkspace, sampleSession } = require('./helpers');
+
+function startFakeProvider(handler) {
+  const server = http.createServer(handler);
+  return new Promise(resolve => {
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
 
 function protocolSessions() {
   const now = Date.now();
@@ -202,5 +210,135 @@ test.describe('Session protocol CTA parity', () => {
     await expect(page.locator('.detail-panel')).toContainText('SOCKS5');
     await expect(page.getByLabel('Send to builder')).toHaveCount(0);
     await expect(page.getByTitle('Replay this request')).toHaveCount(0);
+  });
+
+  test('session row context menus are protocol-aware', async ({ page }) => {
+    await page.goto('/');
+
+    await page.locator('tbody tr', { hasText: 'protocol-h2.example' }).click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: 'Ask Assistant' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Open in Compose' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Replay' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy as cURL' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Open details' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Create Map Remote rule' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Filter by this host' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    await page.locator('tbody tr', { hasText: 'protocol-ws.example' }).click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: 'Open WS in Compose' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Replay client frames' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy as websocat' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy frame transcript' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    await page.locator('tbody tr', { hasText: 'protocol-grpc.example' }).click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: 'Open gRPC in Compose' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Replay gRPC request' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy as cURL' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy RPC path' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Create gRPC mock' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    await page.locator('tbody tr', { hasText: 'protocol-socks.example' }).click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: 'Open in Compose' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Replay' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Copy destination' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Add access rule for destination' })).toHaveCount(0);
+  });
+
+  test('structure view session leaves expose the same lean context menu', async ({ page }) => {
+    await page.goto('/');
+
+    await page.getByRole('button', { name: 'Structure' }).click();
+    await page.locator('.tree-node', { hasText: '/socket' }).click();
+    await page.locator('.tree-leaf', { hasText: '/socket' }).click({ button: 'right' });
+
+    await expect(page.getByRole('menuitem', { name: 'Ask Assistant' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Open WS in Compose' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Replay client frames' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy as websocat' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Open details' })).toHaveCount(0);
+  });
+
+  test('Ask Assistant from a session menu attaches context without sending', async ({ page }) => {
+    let assistantClientContext;
+    await page.route('/admin/assistant/chat', async route => {
+      assistantClientContext = route.request().postDataJSON().client_context;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'ok', tool_events: [], proposed_actions: [] }),
+      });
+    });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Sequence' }).click();
+
+    await page.locator('tbody tr', { hasText: 'protocol-h2.example' }).click();
+    await page.locator('tbody tr', { hasText: 'protocol-grpc.example' }).click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Ask Assistant' }).click();
+
+    await expect(page.getByRole('dialog', { name: 'Assistant' })).toBeVisible();
+    await expect(page.getByLabel(/Assistant context/)).toContainText('POST protocol-grpc.example /pkg.Service/Unary');
+    await expect(page.getByLabel('Assistant message')).toBeFocused();
+    await expect(page.locator('.assistant-msg.user')).toHaveCount(0);
+
+    await page.getByLabel('Assistant message').fill('what is this request?');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect.poll(() => assistantClientContext).toMatchObject({
+      ignore_selected_session: true,
+      ui_state: { selected_session_id: null, selected_session_ignored: true },
+      attachment: { kind: 'session' },
+    });
+
+    await page.getByLabel('Remove assistant context').click();
+    await expect(page.getByLabel(/Assistant context/)).toHaveCount(0);
+  });
+
+  test('Ask Assistant attachment is marked primary in provider context', async ({ page }) => {
+    let providerPayload;
+    const provider = await startFakeProvider((req, res) => {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        providerPayload = JSON.parse(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: 'This attached gRPC request is the subject.',
+            },
+          }],
+        }));
+      });
+    });
+
+    try {
+      const port = provider.address().port;
+      await page.goto('/');
+      await page.locator('tbody tr', { hasText: 'protocol-h2.example' }).click();
+      await page.locator('tbody tr', { hasText: 'protocol-grpc.example' }).click({ button: 'right' });
+      await page.getByRole('menuitem', { name: 'Ask Assistant' }).click();
+
+      await page.getByLabel('Provider base URL').fill(`http://127.0.0.1:${port}/v1`);
+      await page.getByLabel('Model').fill('fake-model');
+      await page.getByLabel('Assistant message').fill('explain this');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+
+      await expect.poll(() => providerPayload?.messages?.[0]?.content || '').toContain('primary_subject');
+      const systemPrompt = providerPayload.messages[0].content;
+      expect(systemPrompt).toContain('context_priority');
+      expect(systemPrompt).toContain('attached request as the primary subject');
+      expect(systemPrompt).toContain('Use primary context first');
+      expect(systemPrompt).toContain('secondary');
+      expect(systemPrompt).toContain('this request');
+      expect(systemPrompt.toLowerCase()).toContain('do not explain the complete sessions page');
+      expect(systemPrompt).toContain('protocol-grpc.example');
+      expect(systemPrompt).toContain('/pkg.Service/Unary');
+    } finally {
+      provider.close();
+    }
   });
 });

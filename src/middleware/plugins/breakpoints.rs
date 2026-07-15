@@ -1,5 +1,6 @@
 use crate::middleware::matcher::{Location, MatchTarget};
 use crate::middleware::{Middleware, MiddlewareAction, RequestContext, ResponseContext};
+use crate::session::{FlowRuleKind, FlowShortCircuitReason, RequestFlowEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -347,13 +348,12 @@ impl Middleware for BreakpointMiddleware {
 
     async fn on_request(&self, ctx: &mut RequestContext) -> MiddlewareAction {
         let target = MatchTarget::from_request(ctx);
-        if self
+        let Some(rule) = self
             .first_match(|t| matches!(t, BreakpointType::Request), &target)
             .await
-            .is_none()
-        {
+        else {
             return MiddlewareAction::Continue;
-        }
+        };
 
         let session_id = ctx
             .session_id
@@ -365,6 +365,18 @@ impl Middleware for BreakpointMiddleware {
         ctx.session_id = Some(session_id.clone());
 
         let bp_id = Uuid::new_v4().to_string();
+        let flow_rule_name = "breakpoint".to_string();
+        ctx.push_flow(RequestFlowEvent::RuleMatched {
+            rule_kind: FlowRuleKind::Breakpoint,
+            rule_id: rule.id.clone(),
+            rule_name: flow_rule_name.clone(),
+        });
+        ctx.push_flow(RequestFlowEvent::RuleApplied {
+            rule_kind: FlowRuleKind::Breakpoint,
+            rule_id: rule.id.clone(),
+            rule_name: flow_rule_name.clone(),
+            summary: "paused request".to_string(),
+        });
 
         // Record the request immediately so it appears in the sessions list as paused
         self.session_manager.record_request_with_source(
@@ -372,6 +384,7 @@ impl Middleware for BreakpointMiddleware {
             ctx.clone(),
             crate::session::SessionSource::Proxy,
         );
+        let _ = ctx.take_flow();
         self.session_manager.mark_paused(&session_id);
         self.session_manager.append_event(
             &session_id,
@@ -394,12 +407,24 @@ impl Middleware for BreakpointMiddleware {
         match tokio::time::timeout(BREAKPOINT_TIMEOUT, rx).await {
             Ok(Ok(BreakpointResolution::Continue)) => {
                 self.session_manager.clear_paused(&session_id);
+                ctx.push_flow(RequestFlowEvent::RuleApplied {
+                    rule_kind: FlowRuleKind::Breakpoint,
+                    rule_id: rule.id,
+                    rule_name: flow_rule_name,
+                    summary: "continued request".to_string(),
+                });
                 MiddlewareAction::Continue
             }
             Ok(Ok(BreakpointResolution::Modify(bc))) => {
                 self.session_manager.clear_paused(&session_id);
                 if let BreakpointContext::Request(new_ctx) = *bc {
                     *ctx = *new_ctx;
+                    ctx.push_flow(RequestFlowEvent::RuleApplied {
+                        rule_kind: FlowRuleKind::Breakpoint,
+                        rule_id: rule.id,
+                        rule_name: flow_rule_name,
+                        summary: "modified request and continued".to_string(),
+                    });
                     MiddlewareAction::Continue
                 } else {
                     MiddlewareAction::StopAndReturn
@@ -425,6 +450,12 @@ impl Middleware for BreakpointMiddleware {
                     body: Bytes::from_static(b"Breakpoint timed out"),
                     tags: Vec::new(),
                     served_mock: None,
+                });
+                ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                    reason: FlowShortCircuitReason::BreakpointTimeout,
+                    status: 504,
+                    rule_id: Some(rule.id),
+                    rule_name: Some(flow_rule_name),
                 });
                 MiddlewareAction::StopAndReturn
             }

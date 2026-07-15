@@ -6,6 +6,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::core::engine::is_binary_content_type;
+use crate::session::RequestFlowEvent;
+
+const MAX_FLOW_EVENTS: usize = 64;
+const MAX_FLOW_SUMMARY_CHARS: usize = 200;
 
 /// An ordered, duplicate-preserving, case-insensitive collection of HTTP headers.
 ///
@@ -280,6 +284,11 @@ pub struct RequestContext {
     /// `"rewrite"` from this flag so the recorded exchange is tagged even
     /// when the rewrite only touched the request side. In-memory only.
     pub rewritten: bool,
+    /// Concise decision trace accumulated during request handling and persisted
+    /// by inspection/session recording. In-memory only until the session record
+    /// is written.
+    #[serde(skip)]
+    pub flow: Vec<RequestFlowEvent>,
 }
 
 impl RequestContext {
@@ -291,6 +300,14 @@ impl RequestContext {
     /// Replace the body from a text value (the single source of truth).
     pub fn set_body_text(&mut self, text: impl Into<String>) {
         self.body = Bytes::from(text.into());
+    }
+
+    pub fn push_flow(&mut self, event: RequestFlowEvent) {
+        push_flow_event(&mut self.flow, event);
+    }
+
+    pub fn take_flow(&mut self) -> Vec<RequestFlowEvent> {
+        std::mem::take(&mut self.flow)
     }
 }
 
@@ -339,6 +356,10 @@ pub struct ResponseContext {
     /// cloned from the originating request context by the engine.
     #[serde(skip)]
     pub protocol_context: Option<crate::core::forward::ProtocolContext>,
+    /// Concise decision trace entries produced after the request has been
+    /// recorded, usually by response middleware or the engine.
+    #[serde(skip)]
+    pub flow: Vec<RequestFlowEvent>,
 }
 
 impl ResponseContext {
@@ -350,6 +371,67 @@ impl ResponseContext {
     /// Replace the body from a text value (the single source of truth).
     pub fn set_body_text(&mut self, text: impl Into<String>) {
         self.body = Bytes::from(text.into());
+    }
+
+    pub fn push_flow(&mut self, event: RequestFlowEvent) {
+        push_flow_event(&mut self.flow, event);
+    }
+
+    pub fn extend_flow(&mut self, events: Vec<RequestFlowEvent>) {
+        for event in events {
+            self.push_flow(event);
+        }
+    }
+}
+
+fn push_flow_event(events: &mut Vec<RequestFlowEvent>, event: RequestFlowEvent) {
+    if events.len() >= MAX_FLOW_EVENTS {
+        return;
+    }
+    events.push(truncate_flow_event(event));
+}
+
+fn truncate_summary(summary: String) -> String {
+    if summary.chars().count() <= MAX_FLOW_SUMMARY_CHARS {
+        return summary;
+    }
+    let mut truncated = summary
+        .chars()
+        .take(MAX_FLOW_SUMMARY_CHARS.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn truncate_flow_event(event: RequestFlowEvent) -> RequestFlowEvent {
+    match event {
+        RequestFlowEvent::RuleApplied {
+            rule_kind,
+            rule_id,
+            rule_name,
+            summary,
+        } => RequestFlowEvent::RuleApplied {
+            rule_kind,
+            rule_id,
+            rule_name,
+            summary: truncate_summary(summary),
+        },
+        RequestFlowEvent::ResponseModified {
+            rule_kind,
+            rule_id,
+            rule_name,
+            summary,
+        } => RequestFlowEvent::ResponseModified {
+            rule_kind,
+            rule_id,
+            rule_name,
+            summary: truncate_summary(summary),
+        },
+        RequestFlowEvent::Failed { stage, message } => RequestFlowEvent::Failed {
+            stage,
+            message: truncate_summary(message),
+        },
+        other => other,
     }
 }
 

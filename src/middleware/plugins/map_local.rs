@@ -13,6 +13,7 @@
 
 use crate::middleware::matcher::{Location, MatchTarget};
 use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
+use crate::session::{FlowRuleKind, FlowShortCircuitReason, RequestFlowEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -189,6 +190,11 @@ impl Middleware for MapLocalMiddleware {
             if !rule.location.matches(&target) {
                 continue;
             }
+            ctx.push_flow(RequestFlowEvent::RuleMatched {
+                rule_kind: FlowRuleKind::MapLocal,
+                rule_id: rule.id.clone(),
+                rule_name: rule.name.clone(),
+            });
             let file_path = self.resolve_path(&rule.file_path);
             let path_to_serve = match self.path_for_request(&file_path, &target.path) {
                 Ok(Some(path)) => path,
@@ -196,6 +202,12 @@ impl Middleware for MapLocalMiddleware {
                 Err(message) => {
                     tracing::warn!(path=%file_path.display(), %message, "map_local resolution failed");
                     ctx.mock_response = Some(map_local_error(message));
+                    ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                        reason: FlowShortCircuitReason::MapLocalError,
+                        status: 502,
+                        rule_id: Some(rule.id.clone()),
+                        rule_name: Some(rule.name.clone()),
+                    });
                     return MiddlewareAction::StopAndReturn;
                 }
             };
@@ -211,6 +223,12 @@ impl Middleware for MapLocalMiddleware {
                         body: Bytes::from(contents),
                         tags: vec!["map-local".to_string()],
                         served_mock: None,
+                    });
+                    ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                        reason: FlowShortCircuitReason::MapLocalFile,
+                        status: 200,
+                        rule_id: Some(rule.id.clone()),
+                        rule_name: Some(rule.name.clone()),
                     });
                     return MiddlewareAction::StopAndReturn;
                 }

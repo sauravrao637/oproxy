@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::core::forward::encode_grpc_frame;
 use crate::middleware::matcher::{Location, MatchTarget};
 use crate::middleware::{InterceptedResponse, Middleware, MiddlewareAction, RequestContext};
+use crate::session::{FlowRuleKind, FlowShortCircuitReason, RequestFlowEvent};
 use bytes::Bytes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +171,11 @@ impl Middleware for MockMiddleware {
             if !rule.matches(ctx) {
                 continue;
             }
+            ctx.push_flow(RequestFlowEvent::RuleMatched {
+                rule_kind: FlowRuleKind::Mock,
+                rule_id: rule.id.clone(),
+                rule_name: rule.name.clone(),
+            });
 
             if let Some(MockBehavior::GrpcScript { messages, trailers }) = rule.behavior.clone() {
                 if !is_grpc_request(ctx) {
@@ -205,6 +211,12 @@ impl Middleware for MockMiddleware {
                         rule_id: rule.id.clone(),
                         behavior: "grpc_script".to_string(),
                     }),
+                });
+                ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                    reason: FlowShortCircuitReason::MockResponse,
+                    status: 200,
+                    rule_id: Some(rule.id.clone()),
+                    rule_name: Some(rule.name.clone()),
                 });
                 return MiddlewareAction::StopAndReturn;
             }
@@ -263,6 +275,12 @@ impl Middleware for MockMiddleware {
                     rule_id: rule.id.clone(),
                     behavior: rule.behavior_kind().to_string(),
                 }),
+            });
+            ctx.push_flow(RequestFlowEvent::ShortCircuited {
+                reason: FlowShortCircuitReason::MockResponse,
+                status: resp.status,
+                rule_id: Some(rule.id.clone()),
+                rule_name: Some(rule.name.clone()),
             });
             return MiddlewareAction::StopAndReturn;
         }
