@@ -44,7 +44,9 @@ jobs:
           yarn --cwd src/design build
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy, rustfmt
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -53,10 +55,10 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Rust clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: make lint
 
       - name: Rust tests
-        run: RUSTFLAGS="-D warnings" cargo test --all-targets
+        run: make test-rust
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
