@@ -1,4 +1,4 @@
-.PHONY: help setup fmt build build-release ui check-dist test lint clean soak-test test-qa
+.PHONY: help setup fmt build build-release ui check-dist audit test test-rust test-ui test-qa lint check clean soak-test
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -52,9 +52,9 @@ test-ui: ## Run Playwright browser tests (builds debug binary first)
 	yarn --cwd tests/browser test
 
 lint: ## Run Clippy (warnings as errors)
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 
-check: fmt lint test audit## fmt + lint + test (full pre-release check)
+check: fmt lint test audit ## fmt + lint + test + audit (full pre-release check)
 
 soak-test: build-release ## Baseline latency + sustained-load/memory-ceiling check (see docs/performance.md)
 	bash scripts/soak-test.sh
