@@ -330,7 +330,7 @@ pub(super) async fn forward_http_exchange(
     // its own response handling/timing/session-recording as before.
     if req.apply_proxy_rules {
         let method_str = req_ctx.method.clone();
-        if let Err(short_circuit) = state
+        if let crate::core::engine::MiddlewareOutcome::ShortCircuit(response) = state
             .proxy_engine
             .execute_request_middleware(
                 &mut req_ctx,
@@ -347,7 +347,7 @@ pub(super) async fn forward_http_exchange(
                 &session_id,
                 display_uri,
                 request_size_bytes,
-                short_circuit,
+                *response,
             )
             .await);
         }

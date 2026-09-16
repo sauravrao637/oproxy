@@ -180,7 +180,7 @@ fn is_websocket_handshake_header(name: &str) -> bool {
 async fn connect_upstream(
     request: tokio_tungstenite::tungstenite::http::Request<()>,
     timeout: std::time::Duration,
-) -> Result<(UpstreamWebSocket, Option<String>), Response<Body>> {
+) -> Result<(UpstreamWebSocket, Option<String>), Box<Response<Body>>> {
     match tokio::time::timeout(
         timeout,
         connect_async_tls_with_config(request, None, false, None),
@@ -197,15 +197,19 @@ async fn connect_upstream(
         }
         Ok(Err(error)) => {
             tracing::warn!(%error, "WS upstream connect failed");
-            Err(Response::builder()
-                .status(502)
-                .body(Body::from("WebSocket upstream connect failed"))
-                .expect("static 502 response is always valid"))
+            Err(Box::new(
+                Response::builder()
+                    .status(502)
+                    .body(Body::from("WebSocket upstream connect failed"))
+                    .expect("static 502 response is always valid"),
+            ))
         }
-        Err(_) => Err(Response::builder()
-            .status(504)
-            .body(Body::from("WebSocket upstream connect timed out"))
-            .expect("static 504 response is always valid")),
+        Err(_) => Err(Box::new(
+            Response::builder()
+                .status(504)
+                .body(Body::from("WebSocket upstream connect timed out"))
+                .expect("static 504 response is always valid"),
+        )),
     }
 }
 
@@ -293,7 +297,7 @@ pub async fn handle_websocket(
     let (upstream_ws, negotiated_subprotocol) =
         match connect_upstream(ws_req, connect_timeout + handshake_timeout).await {
             Ok(connection) => connection,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     // Record the session request head.
