@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Request flow timelines now capture the proxy lifecycle across network receipt,
+  middleware decisions, generated responses, streamed responses, and terminal
+  completion status.
+- Assistant session context now includes richer provider metadata, markdown
+  rendering, and protocol-aware session actions from both the session table and
+  structure view.
+
+### Fixed
+- Response recording now reflects the actual terminal response status after
+  response middleware, generated proxy responses, and encoded-response size
+  failures instead of preserving stale upstream-only statuses.
+- Oversized encoded responses that fail normalization are recorded as terminal
+  `413 Payload Too Large` exchanges while still showing the upstream network
+  response in the request flow.
+
 ## [0.1.10] - 2026-07-15
 
 ### Added

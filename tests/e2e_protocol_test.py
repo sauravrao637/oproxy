@@ -21,7 +21,7 @@ import struct
 import threading
 import subprocess
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -57,6 +57,9 @@ RESULTS = []
 PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
+
+def utc_iso_z():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def record(name, status, detail="", duration_ms=0):
     icon = "✅" if status == PASS else ("⚠️" if status == SKIP else "❌")
@@ -690,7 +693,7 @@ def section_websocket():
             # Import a synthetic session with ws_frames
             sample = {
                 "id": f"ws-schema-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": utc_iso_z(),
                 "request": {"method": "GET", "uri": "http://ws.test/ws",
                              "headers": {}, "body": "", "host": "ws.test",
                              "body_bytes": None},
@@ -1467,7 +1470,7 @@ def section_misc():
         sid = f"import-export-{int(time.time())}"
         sample = {
             "id": sid,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": utc_iso_z(),
             "request": {"method": "GET", "uri": "http://export.test/path",
                         "headers": {}, "body": "", "host": "export.test",
                         "body_bytes": None},
@@ -1501,7 +1504,7 @@ def section_misc():
         sample_id = f"del-test-{int(time.time())}"
         sample = {
             "id": sample_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": utc_iso_z(),
             "request": {"method": "GET", "uri": "http://del.test/",
                         "headers": {}, "body": "", "host": "del.test",
                         "body_bytes": None},
@@ -1617,7 +1620,7 @@ def print_report():
 
     print("\n" + "═" * 72)
     print("  oproxy UA Test Report")
-    print(f"  Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("═" * 72)
 
     sections = {}
@@ -1656,7 +1659,7 @@ def print_report():
 if __name__ == "__main__":
     print("oproxy E2E Protocol Test Suite")
     print(f"Target: {BASE_URL}  |  SOCKS5: {PROXY_HOST}:{SOCKS5_PORT}")
-    print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
     # Start echo server
     port = start_echo_server()
