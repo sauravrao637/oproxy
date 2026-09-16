@@ -432,6 +432,10 @@ impl ProxyEngine {
         *self.short_circuit_session_manager.write().await = Some(session_manager);
     }
 
+    async fn owns_terminal_response_recording(&self) -> bool {
+        self.short_circuit_session_manager.read().await.is_some()
+    }
+
     /// Returns a clone of the HTTP client (cheap — reqwest::Client is Arc-wrapped internally).
     pub async fn http_client(&self) -> Client {
         self.clients.read().await.0.clone()
@@ -638,6 +642,7 @@ impl ProxyEngine {
             request_host: request_host.to_string(),
             request_method: request_method.to_string(),
             protocol_context,
+            terminal_recording_pending: self.owns_terminal_response_recording().await,
             ..Default::default()
         };
         response.extend_flow(flow);
@@ -1283,6 +1288,7 @@ impl ProxyEngine {
                         request_method: req_method.clone(),
                         protocol: Some(upstream_protocol.clone()),
                         protocol_context: req_ctx.protocol_context.clone(),
+                        terminal_recording_pending: self.owns_terminal_response_recording().await,
                         // The body is not available at this point because
                         // it's about to be relayed to the client as it streams
                         // in, below, rather than buffered first. Recording is
@@ -1397,6 +1403,7 @@ impl ProxyEngine {
                     request_method: req_method.clone(),
                     protocol: Some(upstream_protocol.clone()),
                     protocol_context: req_ctx.protocol_context.clone(),
+                    terminal_recording_pending: self.owns_terminal_response_recording().await,
                     ..Default::default()
                 };
                 res_ctx.extend_flow(req_ctx.take_flow());
@@ -1425,10 +1432,6 @@ impl ProxyEngine {
                     }
                     return response;
                 }
-                if let Some(guard) = terminal_guard.as_mut() {
-                    guard.disarm();
-                }
-
                 let status_code = StatusCode::from_u16(res_ctx.status)
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -1444,6 +1447,11 @@ impl ProxyEngine {
                     status: res_ctx.status,
                     latency_ms: start.elapsed().as_millis() as u64,
                 });
+                self.record_response_with_optional_size(&res_ctx, None)
+                    .await;
+                if let Some(guard) = terminal_guard.as_mut() {
+                    guard.disarm();
+                }
 
                 let builder = self.response_builder(&res_ctx);
 
@@ -1646,6 +1654,7 @@ impl ProxyEngine {
                     request_method: req_method.clone(),
                     protocol: Some(upstream_protocol),
                     protocol_context: req_ctx.protocol_context.clone(),
+                    terminal_recording_pending: self.owns_terminal_response_recording().await,
                     // Signal to InspectionMiddleware that recording is deferred to
                     // the BodyObserver so that on_response skips size recording.
                     response_body_observer_pending: true,
