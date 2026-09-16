@@ -548,6 +548,7 @@ fn ws_response_context(
         request_method: "WS".to_string(),
         protocol: Some("WebSocket".to_string()),
         response_body_observer_pending: false,
+        terminal_recording_pending: false,
         protocol_context: Some(
             crate::core::forward::ProtocolContext::websocket(upstream_scheme)
                 .with_identity(ws_connection_id, ws_stream_id),

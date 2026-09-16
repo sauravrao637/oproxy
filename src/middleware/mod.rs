@@ -352,6 +352,10 @@ pub struct ResponseContext {
     /// recording with an empty body in `on_response`. In-memory only.
     #[serde(skip)]
     pub response_body_observer_pending: bool,
+    /// Set by the engine when it will record the response after all response
+    /// middleware and terminal flow events have been applied. In-memory only.
+    #[serde(skip)]
+    pub terminal_recording_pending: bool,
     /// Typed protocol identity carried into response matching/recording. It is
     /// cloned from the originating request context by the engine.
     #[serde(skip)]
