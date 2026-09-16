@@ -8,12 +8,13 @@ The test server uses a self‑signed certificate, so SSL verification is disable
 for the test server only – your proxy's certificate is not involved in these tests.
 
 HTTP/3 tests require the proxy to be built with the `http3` Cargo feature and
-OPROXY_HTTP3_ENABLED=true / OPROXY_HTTP3_PORT=<port> set. They are skipped
-gracefully when aioquic is unavailable or the proxy's H3 listener is unreachable.
+OPROXY_HTTP3_ENABLED=true / OPROXY_HTTP3_PORT=<port> set. They run only when
+--h3-proxy is passed.
 
 Usage:
   python proxy_tester.py --http-proxy http://localhost:8080 --socks-proxy socks5://localhost:1080 [--verbose]
   python proxy_tester.py --http-proxy http://localhost:8080 --h3-proxy h3://localhost:8443 [--verbose]
+  python proxy_tester.py --http-proxy http://localhost:8083 --expect-limits [--verbose]
   python proxy_tester.py --http-proxy http://localhost:8080 --admin-token change-me-to-a-strong-secret
 
 --admin-token is required when the proxy has admin auth enabled (OPROXY_ADMIN_TOKEN
@@ -44,10 +45,11 @@ if RUN_TESTS_FLAG not in sys.argv:
     parser.add_argument('--socks-proxy')
     parser.add_argument('--h3-proxy', default=None,
         help='HTTP/3 (QUIC) proxy URL, e.g. h3://localhost:8443. '
-             'Derived from --http-proxy host + port 8443 when omitted.')
+             'Pass this only for profiles that enable the H3 listener.')
     parser.add_argument('--target-host', default='127.0.0.1')
     parser.add_argument('--timeout', type=int, default=10)
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--expect-limits', action='store_true')
     parser.add_argument('--admin-token', default=os.environ.get('OPROXY_ADMIN_TOKEN'))
     args, unknown = parser.parse_known_args()
 
@@ -350,7 +352,22 @@ def _wait_for_recorded_session(proxy_url, predicate, timeout, include_bodies=Fal
             if predicate(exchange):
                 return exchange
         time.sleep(0.2)
-    raise AssertionError(f"matching recorded session not found; saw {len(last_sessions)} sessions")
+    summaries = []
+    for session in last_sessions[:5]:
+        exchange = _session_exchange(session)
+        req = exchange.get('request') or {}
+        resp = exchange.get('response') or {}
+        metrics = exchange.get('metrics') or {}
+        summaries.append({
+            'method': req.get('method'),
+            'uri': req.get('uri'),
+            'status': resp.get('status'),
+            'tags': exchange.get('tags'),
+            'response_size_bytes': metrics.get('response_size_bytes'),
+        })
+    raise AssertionError(
+        f"matching recorded session not found; saw {len(last_sessions)} sessions: {summaries}"
+    )
 
 def _recorded_session_details(proxy_url, timeout, include_bodies=False):
     sessions = _list_recorded_sessions(proxy_url, timeout, include_bodies=include_bodies)
@@ -738,16 +755,32 @@ class ServerManager:
                 self.end_headers()
 
             def _echo_method(self):
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length) if content_length > 0 else b''
+                body = self._read_request_body()
                 # Echo the method name and body so the client can verify the verb
                 # round-tripped through the proxy unchanged.
                 payload = self.command.encode() + b':' + body
                 self._send_response(200, 'text/plain', payload)
 
-            def do_POST(self):
+            def _read_request_body(self):
+                if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
+                    chunks = []
+                    while True:
+                        line = self.rfile.readline()
+                        if not line:
+                            break
+                        size = int(line.split(b';', 1)[0].strip(), 16)
+                        if size == 0:
+                            # Consume trailer terminator.
+                            self.rfile.readline()
+                            break
+                        chunks.append(self.rfile.read(size))
+                        self.rfile.read(2)
+                    return b''.join(chunks)
                 content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length) if content_length > 0 else b''
+                return self.rfile.read(content_length) if content_length > 0 else b''
+
+            def do_POST(self):
+                body = self._read_request_body()
                 content_type = self.headers.get('Content-Type', '')
 
                 if self.path == '/echo':
@@ -1982,6 +2015,182 @@ def test_large_request_upload(proxy_url, base_url, timeout, verbose):
         return False
 
 
+def _get_proxy_config(proxy_url, timeout):
+    r = _admin_request(proxy_url, 'GET', '/admin/config', timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def _clear_recorded_sessions(proxy_url, timeout):
+    r = _admin_request(proxy_url, 'DELETE', '/admin/sessions', timeout)
+    if r.status_code not in (200, 204):
+        raise AssertionError(f"clear sessions returned {r.status_code}: {r.text[:120]}")
+
+
+def _recorded_body_bytes(message):
+    body = (message or {}).get('body') or ''
+    headers = {str(k).lower(): str(v) for k, v in ((message or {}).get('headers') or {}).items()}
+    if 'application/octet-stream' in headers.get('content-type', '').lower():
+        return base64.b64decode(body.encode('ascii')) if body else b''
+    return body.encode('utf-8')
+
+
+def test_limits_config(proxy_url, timeout, verbose):
+    """The limits profile must be running with the tight caps it exists to test."""
+    try:
+        cfg = _get_proxy_config(proxy_url, timeout)
+        expected = {
+            'max_body_bytes': 65536,
+            'max_sessions': 20,
+            'max_connections': 16,
+        }
+        mismatches = {
+            key: (cfg.get(key), value)
+            for key, value in expected.items()
+            if cfg.get(key) != value
+        }
+        if not mismatches:
+            print("[PASS] Limits config (tight caps active)")
+            return True
+        print(f"[FAIL] Limits config: mismatches={mismatches}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Limits config: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_limits_large_response_streamed(proxy_url, base_url, timeout, verbose):
+    """A response above stream_threshold_bytes must reach the client in full,
+    while the session record shows streamed/capped capture metadata."""
+    url = make_test_url(base_url, '/large')
+    expected_len = 1024 * 1024
+    large_timeout = max(timeout * 6, 60)
+    try:
+        cfg = _get_proxy_config(proxy_url, timeout)
+        max_body_bytes = cfg.get('max_body_bytes', 65536)
+        _clear_recorded_sessions(proxy_url, timeout)
+
+        with requests.get(url, proxies={'http': proxy_url, 'https': proxy_url},
+                          timeout=large_timeout, stream=True) as r:
+            data = r.raw.read()
+            status_code = r.status_code
+        if status_code != 200 or len(data) != expected_len or not all(b == 0x41 for b in data):
+            print(f"[FAIL] Limits streamed response: status={status_code} len={len(data)}")
+            return False
+
+        def matches(exchange):
+            req = exchange.get('request') or {}
+            resp = exchange.get('response') or {}
+            return '/large' in (req.get('uri') or '') and resp.get('status') == 200
+
+        exchange = _wait_for_recorded_session(proxy_url, matches, timeout, include_bodies=True)
+        response = exchange.get('response') or {}
+        metrics = exchange.get('metrics') or {}
+        retained = _recorded_body_bytes(response)
+        tags = exchange.get('tags') or []
+
+        if 'streamed' not in tags:
+            print(f"[FAIL] Limits streamed response: missing streamed tag {tags}")
+            return False
+        if metrics.get('response_size_bytes') != expected_len:
+            print(f"[FAIL] Limits streamed response: response_size_bytes={metrics.get('response_size_bytes')}")
+            return False
+        if len(retained) != min(expected_len, max_body_bytes):
+            print(f"[FAIL] Limits streamed response: retained={len(retained)} cap={max_body_bytes}")
+            return False
+
+        print("[PASS] Limits streamed response (client full body, capture capped/tagged)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Limits streamed response: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_limits_large_upload_streamed(proxy_url, base_url, timeout, verbose):
+    """A request above max_body_bytes must stream through to upstream instead
+    of being rejected, with the session marked as streamed."""
+    url = make_test_url(base_url, '/echo')
+    payload = b'B' * (1024 * 1024)
+    large_timeout = max(timeout * 6, 60)
+    try:
+        cfg = _get_proxy_config(proxy_url, timeout)
+        max_body_bytes = cfg.get('max_body_bytes', 65536)
+        _clear_recorded_sessions(proxy_url, timeout)
+
+        r = requests.post(url, data=payload,
+                          headers={'Content-Type': 'application/octet-stream'},
+                          proxies={'http': proxy_url, 'https': proxy_url},
+                          timeout=large_timeout)
+        if r.status_code != 200 or r.content != payload:
+            print(f"[FAIL] Limits streamed upload: status={r.status_code} len={len(r.content)}")
+            return False
+
+        def matches(exchange):
+            req = exchange.get('request') or {}
+            resp = exchange.get('response') or {}
+            return req.get('method') == 'POST' and '/echo' in (req.get('uri') or '') and resp.get('status') == 200
+
+        exchange = _wait_for_recorded_session(proxy_url, matches, timeout, include_bodies=True)
+        request = exchange.get('request') or {}
+        response = exchange.get('response') or {}
+        metrics = exchange.get('metrics') or {}
+        retained = _recorded_body_bytes(response)
+        tags = exchange.get('tags') or []
+
+        if request.get('body') not in ('', None):
+            print("[FAIL] Limits streamed upload: request body was buffered despite exceeding max_body_bytes")
+            return False
+        if 'streamed' not in tags:
+            print(f"[FAIL] Limits streamed upload: missing streamed tag {tags}")
+            return False
+        if metrics.get('response_size_bytes') != len(payload):
+            print(f"[FAIL] Limits streamed upload: response_size_bytes={metrics.get('response_size_bytes')}")
+            return False
+        if len(retained) != min(len(payload), max_body_bytes):
+            print(f"[FAIL] Limits streamed upload: retained={len(retained)} cap={max_body_bytes}")
+            return False
+
+        print("[PASS] Limits streamed upload (forwarded unbuffered, capture capped/tagged)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Limits streamed upload: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def test_limits_session_eviction(proxy_url, base_url, timeout, verbose):
+    """The profile's small max_sessions should evict old sessions quickly."""
+    try:
+        cfg = _get_proxy_config(proxy_url, timeout)
+        max_sessions = cfg.get('max_sessions', 20)
+        _clear_recorded_sessions(proxy_url, timeout)
+
+        for i in range(max_sessions + 5):
+            r = requests.get(make_test_url(base_url, f'/evict-{i}'),
+                             proxies={'http': proxy_url, 'https': proxy_url},
+                             timeout=timeout)
+            if r.status_code != 200:
+                print(f"[FAIL] Limits session eviction: request {i} returned {r.status_code}")
+                return False
+
+        sessions = _list_recorded_sessions(proxy_url, timeout, include_bodies=False)
+        if len(sessions) <= max_sessions:
+            print(f"[PASS] Limits session eviction (retained {len(sessions)} <= {max_sessions})")
+            return True
+        print(f"[FAIL] Limits session eviction: retained {len(sessions)} > {max_sessions}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Limits session eviction: {e}")
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
 def test_sse_streaming(proxy_url, base_url, timeout, verbose):
     """text/event-stream responses go through the proxy's streaming path; all
     events must arrive in order."""
@@ -2805,16 +3014,32 @@ def test_http3_session_events(h3_proxy_url, http_proxy_url, target_host, target_
 # ----------------------------------------------------------------------
 # Main inner test runner
 # ----------------------------------------------------------------------
+def _print_final_summary(all_results):
+    print("\n" + "="*40)
+    print("FINAL TEST SUMMARY")
+    print("-"*40)
+    passed = sum(1 for _, _, ok in all_results if ok is True)
+    skipped = sum(1 for _, _, ok in all_results if ok is None)
+    total = len(all_results) - skipped
+    for proxy_type, name, ok in all_results:
+        status = "PASS" if ok is True else ("SKIP" if ok is None else "FAIL")
+        print(f"  [{proxy_type}] {name}: {status}")
+    print(f"\n{passed}/{total} tests passed" + (f" ({skipped} skipped)" if skipped else ""))
+    return passed == total
+
+
 def run_tests():
     parser = argparse.ArgumentParser(description="Comprehensive proxy tester (inner)")
     parser.add_argument('--http-proxy', default=None)
     parser.add_argument('--socks-proxy', default=None)
     parser.add_argument('--h3-proxy', default=None,
         help='HTTP/3 (QUIC) proxy URL, e.g. h3://localhost:8443. '
-             'Derived from --http-proxy host + port 8443 when omitted.')
+             'Pass this only for profiles that enable the H3 listener.')
     parser.add_argument('--target-host', default='127.0.0.1')
     parser.add_argument('--timeout', type=int, default=10)
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--expect-limits', action='store_true',
+        help='Run the qa-limits profile contract instead of the generic full-surface suite.')
     parser.add_argument('--admin-token', default=os.environ.get('OPROXY_ADMIN_TOKEN'),
         help='Admin token for /admin/* API calls; required when the proxy has '
              'admin auth enabled. Also read from OPROXY_ADMIN_TOKEN.')
@@ -2827,18 +3052,14 @@ def run_tests():
     target_host = args.target_host
     timeout     = args.timeout
     verbose     = args.verbose
+    expect_limits = args.expect_limits
 
     global ADMIN_TOKEN
     ADMIN_TOKEN = args.admin_token
 
-    # Derive h3_proxy from the HTTP proxy host + default H3 port 8443 when the
-    # caller did not set --h3-proxy explicitly.  The H3 listener is gated behind
-    # the `http3` Cargo feature and OPROXY_HTTP3_ENABLED, so tests skip
-    # gracefully when the proxy is unreachable or aioquic is absent.
-    if not h3_proxy and http_proxy:
-        _pa = urlparse(http_proxy)
-        h3_proxy = f'h3://{_pa.hostname}:8443'
-
+    if expect_limits and not http_proxy:
+        print("Error: --expect-limits requires --http-proxy.")
+        sys.exit(1)
     if not http_proxy and not socks_proxy:
         print("Error: Provide at least --http-proxy or --socks-proxy.")
         sys.exit(1)
@@ -2849,6 +3070,30 @@ def run_tests():
 
     http1_port = server_manager.start_http1()
     http1_base_url = f"http://{target_host}:{http1_port}"
+
+    all_results = []
+
+    if expect_limits:
+        print("\n=== Testing limits profile:", http_proxy)
+        def limits_add(name, result):
+            all_results.append(("LIMITS", name, result))
+
+        limits_add("Limits config", test_limits_config(http_proxy, timeout, verbose))
+        limits_add("Large response streaming", test_limits_large_response_streamed(
+            http_proxy, http1_base_url, timeout, verbose
+        ))
+        limits_add("Large upload streaming", test_limits_large_upload_streamed(
+            http_proxy, http1_base_url, timeout, verbose
+        ))
+        limits_add("Session eviction", test_limits_session_eviction(
+            http_proxy, http1_base_url, timeout, verbose
+        ))
+
+        ok = _print_final_summary(all_results)
+        server_manager.stop_all()
+        if not ok:
+            sys.exit(1)
+        return
 
     https1_port = server_manager.start_https1()
 
@@ -2861,8 +3106,6 @@ def run_tests():
     grpc_port = server_manager.start_grpc()
 
     time.sleep(1)
-
-    all_results = []
 
     if http_proxy:
         print("\n=== Testing HTTP proxy:", http_proxy)
@@ -2980,21 +3223,10 @@ def run_tests():
             h3_proxy, http_proxy, target_host, http1_port, timeout, verbose
         ))
 
-    # Summary
-    print("\n" + "="*40)
-    print("FINAL TEST SUMMARY")
-    print("-"*40)
-    passed = sum(1 for _, _, ok in all_results if ok is True)
-    skipped = sum(1 for _, _, ok in all_results if ok is None)
-    total = len(all_results) - skipped
-    for proxy_type, name, ok in all_results:
-        status = "PASS" if ok is True else ("SKIP" if ok is None else "FAIL")
-        print(f"  [{proxy_type}] {name}: {status}")
-    print(f"\n{passed}/{total} tests passed" + (f" ({skipped} skipped)" if skipped else ""))
-    if passed != total:
-        sys.exit(1)
-
+    ok = _print_final_summary(all_results)
     server_manager.stop_all()
+    if not ok:
+        sys.exit(1)
 
 if __name__ == "__main__":
     run_tests()

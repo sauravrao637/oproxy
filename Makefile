@@ -1,4 +1,4 @@
-.PHONY: help setup fmt build build-release ui check-dist test lint clean soak-test
+.PHONY: help setup fmt build build-release ui check-dist test lint clean soak-test test-qa
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,9 @@ audit:
 # ── Quality ───────────────────────────────────────────────────────────────────
 
 test: test-rust test-ui ## Run all tests (Rust + Playwright browser tests)
+
+test-qa:
+	python tests/qa_runner.py all
 
 test-rust: export RUSTFLAGS := -D warnings
 test-rust: ## Run Rust unit/integration tests

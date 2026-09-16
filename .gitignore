@@ -12,13 +12,10 @@ tests/certs/
 # ── Runtime state ──────────────────────────────────────────────────────────────
 # Created and managed by the proxy at runtime; user-specific.
 storage/
-storage-qa-e2e/
-storage-qa-limits/
+storage-qa-*/
 
 # ── Log files ──────────────────────────────────────────────────────────────────
-server.log
-server.log.*
-tests/browser/server.log.*
+*.log*
 
 # ── Browser test artifacts ─────────────────────────────────────────────────────
 tests/browser/node_modules/
