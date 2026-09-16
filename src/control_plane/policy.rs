@@ -288,33 +288,46 @@ fn sanitize_fixture_name(name: &str) -> Option<String> {
     }
 }
 
+#[derive(Debug)]
+enum MaterializeFixtureError {
+    InvalidFileName,
+    Storage(std::io::Error),
+}
+
+impl IntoResponse for MaterializeFixtureError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::InvalidFileName => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({
+                    "error": "inline_body requires file_path to be a single fixture file name (no path separators or '..')"
+                })),
+            )
+                .into_response(),
+            Self::Storage(error) => storage_error_response(error),
+        }
+    }
+}
+
 /// If a rule was submitted with inline fixture content, write it to the managed
 /// `storage/map-local/` directory under `file_path` (treated as a single file
 /// name) and rewrite `file_path` to that name. Clears `inline_body` so it is
-/// never persisted. Returns an error response if the name is unsafe or the write
-/// fails. A no-op when `inline_body` is absent.
+/// never persisted. A no-op when `inline_body` is absent.
 async fn materialize_inline_fixture(
     rule: &mut MapLocalRule,
     fixtures_dir: &std::path::Path,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), MaterializeFixtureError> {
     let Some(body) = rule.inline_body.take() else {
         return Ok(());
     };
-    let Some(safe) = sanitize_fixture_name(&rule.file_path) else {
-        return Err((
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            axum::Json(serde_json::json!({
-                "error": "inline_body requires file_path to be a single fixture file name (no path separators or '..')"
-            })),
-        )
-            .into_response());
-    };
-    if let Err(e) = tokio::fs::create_dir_all(fixtures_dir).await {
-        return Err(storage_error_response(e));
-    }
-    if let Err(e) = tokio::fs::write(fixtures_dir.join(&safe), body.as_bytes()).await {
-        return Err(storage_error_response(e));
-    }
+    let safe =
+        sanitize_fixture_name(&rule.file_path).ok_or(MaterializeFixtureError::InvalidFileName)?;
+    tokio::fs::create_dir_all(fixtures_dir)
+        .await
+        .map_err(MaterializeFixtureError::Storage)?;
+    tokio::fs::write(fixtures_dir.join(&safe), body.as_bytes())
+        .await
+        .map_err(MaterializeFixtureError::Storage)?;
     rule.file_path = safe;
     Ok(())
 }
@@ -434,7 +447,7 @@ pub(super) async fn create_map_local_rule(
     rule.id = MapLocalRule::new_id();
     let fixtures_dir = map_local_fixtures_dir(&state);
     if let Err(err) = materialize_inline_fixture(&mut rule, &fixtures_dir).await {
-        return err;
+        return err.into_response();
     }
     if let Some(err) =
         validate_map_local_path(&rule, &state.config.map_local_base_path, &fixtures_dir)
@@ -458,7 +471,7 @@ pub(super) async fn update_map_local_rule(
     rule.id = id.clone();
     let fixtures_dir = map_local_fixtures_dir(&state);
     if let Err(err) = materialize_inline_fixture(&mut rule, &fixtures_dir).await {
-        return err;
+        return err.into_response();
     }
     if let Some(err) =
         validate_map_local_path(&rule, &state.config.map_local_base_path, &fixtures_dir)
@@ -730,8 +743,8 @@ pub(super) async fn delete_dns(
 #[cfg(test)]
 mod tests {
     use super::{
-        SingleDnsOverrideRequest, materialize_inline_fixture, sanitize_fixture_name,
-        validate_map_local_path,
+        MaterializeFixtureError, SingleDnsOverrideRequest, materialize_inline_fixture,
+        sanitize_fixture_name, validate_map_local_path,
     };
     use crate::middleware::plugins::map_local::MapLocalRule;
 
@@ -850,7 +863,10 @@ mod tests {
             file_path: "../escape.json".into(),
             inline_body: Some("nope".into()),
         };
-        assert!(materialize_inline_fixture(&mut rule, &dir).await.is_err());
+        let error = materialize_inline_fixture(&mut rule, &dir)
+            .await
+            .expect_err("unsafe fixture names must be rejected");
+        assert!(matches!(error, MaterializeFixtureError::InvalidFileName));
     }
 
     #[tokio::test]

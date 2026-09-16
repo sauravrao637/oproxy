@@ -143,13 +143,16 @@ This runs `cargo fmt --all`. The pre-commit hook (installed via `make setup`) en
 
 ### Linting
 
+The repository pins Rust 1.98.0, including rustfmt and Clippy, through
+`rust-toolchain.toml`. Rustup selects it automatically inside the checkout.
+
 All code must pass Clippy with warnings treated as errors:
 
 ```bash
 make lint
 ```
 
-This runs `cargo clippy -- -D warnings`.
+This runs `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ### Testing
 
@@ -199,7 +202,7 @@ Run all checks before submitting a PR:
 make check
 ```
 
-This runs: `fmt` + `lint` + `test` (all test suites).
+This runs: `fmt` + `lint` + `test` (Rust and browser suites) + `audit`.
 
 ## Project Structure
 
@@ -260,7 +263,7 @@ See `src/middleware/mod.rs` for the trait definition and existing plugins in `sr
 ### Rust
 
 - **Formatting**: Use `cargo fmt --all` (rustfmt)
-- **Linting**: Code must pass `cargo clippy -- -D warnings`
+- **Linting**: Code must pass `cargo clippy --all-targets --all-features -- -D warnings`
 - **Warnings**: All warnings are treated as errors in CI and tests
 - **Documentation**: Document public APIs with `///` doc comments
 - **Error handling**: Use `thiserror` for error types, `?` for propagation
@@ -315,8 +318,8 @@ Before submitting:
 Pull requests must pass:
 
 - `cargo fmt -- --check`
-- `cargo clippy --all-targets -- -D warnings`
-- `RUSTFLAGS="-D warnings" cargo test --all-targets`
+- `make lint`
+- `make test-rust`
 - `cargo audit` (security audit for dependencies)
 
 Browser tests are currently optional in CI (commented out) but recommended to run locally.

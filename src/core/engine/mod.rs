@@ -80,6 +80,16 @@ pub(crate) struct RequestMetadata<'a> {
     pub(crate) method: &'a str,
 }
 
+/// Result of running a middleware phase.
+///
+/// Short-circuiting is normal proxy control flow: mocks, access-control rules,
+/// capture filters, and response middleware can intentionally produce the final
+/// downstream response without forwarding any further.
+pub(crate) enum MiddlewareOutcome {
+    Continue,
+    ShortCircuit(Box<Response>),
+}
+
 /// Records a terminal response if a captured request future/body is dropped
 /// before normal response or failure recording runs.
 pub(crate) struct TerminalSessionGuard {
@@ -679,14 +689,14 @@ impl ProxyEngine {
         &self,
         request: &mut RequestContext,
         metadata: RequestMetadata<'_>,
-    ) -> Result<(), Response> {
+    ) -> MiddlewareOutcome {
         let chain = self.middleware_chain.read().await.clone();
         match chain.execute_request(request).await {
-            MiddlewareAction::Continue => Ok(()),
+            MiddlewareAction::Continue => MiddlewareOutcome::Continue,
             MiddlewareAction::StopAndReturn => {
                 if let Some(intercepted) = request.mock_response.take() {
-                    return Err(self
-                        .respond_to_intercepted(
+                    return MiddlewareOutcome::ShortCircuit(Box::new(
+                        self.respond_to_intercepted(
                             intercepted,
                             metadata.uri,
                             request.session_id.clone(),
@@ -695,10 +705,13 @@ impl ProxyEngine {
                             request.protocol_context.clone(),
                             request.take_flow(),
                         )
-                        .await);
+                        .await,
+                    ));
                 }
                 info!("Request stopped by middleware");
-                Err((StatusCode::FORBIDDEN, "Request stopped by middleware").into_response())
+                MiddlewareOutcome::ShortCircuit(Box::new(
+                    (StatusCode::FORBIDDEN, "Request stopped by middleware").into_response(),
+                ))
             }
         }
     }
@@ -706,13 +719,15 @@ impl ProxyEngine {
     async fn execute_response_middleware(
         &self,
         response: &mut ResponseContext,
-    ) -> Result<(), Response> {
+    ) -> MiddlewareOutcome {
         let chain = self.middleware_chain.read().await.clone();
         match chain.execute_response(response).await {
-            MiddlewareAction::Continue => Ok(()),
+            MiddlewareAction::Continue => MiddlewareOutcome::Continue,
             MiddlewareAction::StopAndReturn => {
                 info!("Response stopped by middleware");
-                Err((StatusCode::FORBIDDEN, "Response stopped by middleware").into_response())
+                MiddlewareOutcome::ShortCircuit(Box::new(
+                    (StatusCode::FORBIDDEN, "Response stopped by middleware").into_response(),
+                ))
             }
         }
     }
@@ -1182,7 +1197,7 @@ impl ProxyEngine {
         });
 
         debug!("Executing request middleware chain");
-        if let Err(response) = self
+        if let MiddlewareOutcome::ShortCircuit(response) = self
             .execute_request_middleware(
                 &mut req_ctx,
                 RequestMetadata {
@@ -1193,7 +1208,7 @@ impl ProxyEngine {
             )
             .await
         {
-            return response;
+            return *response;
         }
 
         let mut terminal_guard = self
@@ -1440,7 +1455,9 @@ impl ProxyEngine {
                 tag_rewritten(&mut res_ctx, &req_ctx);
 
                 debug!("Executing response middleware chain");
-                if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
+                if let MiddlewareOutcome::ShortCircuit(response) =
+                    self.execute_response_middleware(&mut res_ctx).await
+                {
                     if let Some(guard) = terminal_guard.as_mut() {
                         guard.update_from_response(&res_ctx);
                         guard.record_failure(
@@ -1449,7 +1466,7 @@ impl ProxyEngine {
                             "Response middleware stopped the response before terminal recording.",
                         );
                     }
-                    return response;
+                    return *response;
                 }
                 let status_code = StatusCode::from_u16(res_ctx.status)
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1568,7 +1585,7 @@ impl ProxyEngine {
             path: display_uri.clone(),
         });
 
-        if let Err(response) = self
+        if let MiddlewareOutcome::ShortCircuit(response) = self
             .execute_request_middleware(
                 &mut req_ctx,
                 RequestMetadata {
@@ -1579,7 +1596,7 @@ impl ProxyEngine {
             )
             .await
         {
-            return response;
+            return *response;
         }
 
         let mut terminal_guard = self
@@ -1686,7 +1703,9 @@ impl ProxyEngine {
                 }
                 tag_rewritten(&mut res_ctx, &req_ctx);
 
-                if let Err(response) = self.execute_response_middleware(&mut res_ctx).await {
+                if let MiddlewareOutcome::ShortCircuit(response) =
+                    self.execute_response_middleware(&mut res_ctx).await
+                {
                     if let Some(guard) = terminal_guard.as_mut() {
                         guard.update_from_response(&res_ctx);
                         guard.record_failure(
@@ -1695,7 +1714,7 @@ impl ProxyEngine {
                             "Response middleware stopped the streamed response before terminal recording.",
                         );
                     }
-                    return response;
+                    return *response;
                 }
 
                 let encoded_response = header_value(&res_ctx.headers, "content-encoding")
