@@ -42,6 +42,8 @@ profiles:
     description: MITM'd HTTP(S)/CONNECT + SOCKS5 from one instance
     config: configs/qa-listeners.yaml
     port: 8082
+    env:
+      OPROXY_INSECURE_UPSTREAM: "1"   # proxy_tester.py's HTTP/2/gRPC test servers use self-signed certs
     run:
       - script: e2e_protocol_test.py
         args: ["--host", "127.0.0.1", "--port", "8082", "--socks-port", "1081"]
@@ -54,4 +56,4 @@ profiles:
     port: 8083
     run:
       - script: proxy_tester.py
-        args: ["--http-proxy", "http://127.0.0.1:8083"]
+        args: ["--http-proxy", "http://127.0.0.1:8083", "--expect-limits"]

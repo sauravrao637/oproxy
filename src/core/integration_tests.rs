@@ -375,6 +375,87 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn encoded_stream_too_large_records_terminal_413() {
+        use axum::http::header;
+        use axum::routing::get;
+        use bytes::Bytes;
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write as _;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(b"this compressed response is intentionally over the tiny cap")
+            .unwrap();
+        let gzipped = Bytes::from(encoder.finish().unwrap());
+        assert!(
+            gzipped.len() > 8,
+            "test fixture must exceed the configured cap"
+        );
+
+        let upstream = Router::new().route(
+            "/gzip",
+            get(move || {
+                let gzipped = gzipped.clone();
+                async move {
+                    let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(gzipped)]);
+                    (
+                        [(header::CONTENT_ENCODING, "gzip")],
+                        Body::from_stream(stream),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let engine = engine_with_inspection(sessions.clone()).await;
+        engine.set_max_body_bytes(8);
+
+        let response = engine
+            .handle_request(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("http://127.0.0.1:{}/gzip", addr.port()))
+                    .header("host", format!("127.0.0.1:{}", addr.port()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("encoded response exceeded max_body_bytes")
+        );
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        assert_eq!(recorded.len(), 1);
+        let exchange = &recorded[0];
+        assert_eq!(
+            exchange.response.as_ref().map(|response| response.status),
+            Some(413)
+        );
+        assert!(
+            exchange.flow.iter().any(|event| matches!(
+                event,
+                crate::session::RequestFlowEvent::ResponseReceived { status: 200, .. }
+            )),
+            "flow should still show the upstream network response"
+        );
+        assert!(matches!(
+            exchange.flow.last(),
+            Some(crate::session::RequestFlowEvent::Completed { status: 413, .. })
+        ));
+    }
+
     /// Chunked upstream responses must be relayed unchanged, recorded with the
     /// transferred size, and tagged as streamed.
     #[tokio::test]

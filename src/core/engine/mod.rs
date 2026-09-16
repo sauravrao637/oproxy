@@ -1348,6 +1348,7 @@ impl ProxyEngine {
                     // *retained* for the session record is capped, not what
                     // the client receives.
                     let max_retained = self.max_body_bytes();
+                    let expected_total = (content_length > 0).then_some(content_length as usize);
                     let engine = self.clone();
                     let body_start = Instant::now();
                     let stream_body = axum::body::Body::from_stream(async_stream::stream! {
@@ -1356,6 +1357,7 @@ impl ProxyEngine {
                         let mut r = res;
                         let mut retained: Vec<u8> = Vec::new();
                         let mut total_bytes: usize = 0;
+                        let mut recorded_terminal = false;
                         while let Ok(Some(chunk)) = r.chunk().await {
                             total_bytes += chunk.len();
                             if retained.len() < max_retained {
@@ -1363,17 +1365,34 @@ impl ProxyEngine {
                                 let take = remaining.min(chunk.len());
                                 retained.extend_from_slice(&chunk[..take]);
                             }
+                            if !recorded_terminal
+                                && expected_total.is_some_and(|expected| total_bytes >= expected)
+                            {
+                                res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
+                                res_ctx.body = Bytes::from(retained.clone());
+                                res_ctx.push_flow(RequestFlowEvent::Completed {
+                                    status: res_ctx.status,
+                                    latency_ms: start.elapsed().as_millis() as u64,
+                                });
+                                engine.record_streamed_response(res_ctx.clone(), total_bytes).await;
+                                if let Some(guard) = terminal_guard.as_mut() {
+                                    guard.disarm();
+                                }
+                                recorded_terminal = true;
+                            }
                             yield Ok::<_, reqwest::Error>(chunk);
                         }
-                        res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
-                        res_ctx.body = Bytes::from(retained);
-                        res_ctx.push_flow(RequestFlowEvent::Completed {
-                            status: res_ctx.status,
-                            latency_ms: start.elapsed().as_millis() as u64,
-                        });
-                        engine.record_streamed_response(res_ctx, total_bytes).await;
-                        if let Some(guard) = terminal_guard.as_mut() {
-                            guard.disarm();
+                        if !recorded_terminal {
+                            res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
+                            res_ctx.body = Bytes::from(retained);
+                            res_ctx.push_flow(RequestFlowEvent::Completed {
+                                status: res_ctx.status,
+                                latency_ms: start.elapsed().as_millis() as u64,
+                            });
+                            engine.record_streamed_response(res_ctx, total_bytes).await;
+                            if let Some(guard) = terminal_guard.as_mut() {
+                                guard.disarm();
+                            }
                         }
                     });
                     return builder
@@ -1735,14 +1754,25 @@ impl ProxyEngine {
                             .body(Body::from(decoded))
                             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                     }
-                    return (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        format!(
-                            "encoded response exceeded max_body_bytes ({}) while normalizing content-encoding",
-                            self.max_body_bytes()
-                        ),
-                    )
-                        .into_response();
+                    let message = format!(
+                        "encoded response exceeded max_body_bytes ({}) while normalizing content-encoding",
+                        self.max_body_bytes()
+                    );
+                    res_ctx.status = StatusCode::PAYLOAD_TOO_LARGE.as_u16();
+                    res_ctx.headers = crate::middleware::HeaderMap::new();
+                    res_ctx.body = Bytes::from(message.clone());
+                    res_ctx.body_ms = body_start.elapsed().as_millis() as u64;
+                    res_ctx.response_body_observer_pending = false;
+                    res_ctx.push_flow(RequestFlowEvent::Completed {
+                        status: res_ctx.status,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                    });
+                    self.record_response_with_optional_size(&res_ctx, None)
+                        .await;
+                    if let Some(guard) = terminal_guard.as_mut() {
+                        guard.disarm();
+                    }
+                    return (StatusCode::PAYLOAD_TOO_LARGE, message).into_response();
                 }
 
                 res_ctx.tags.push("streamed".to_string());
