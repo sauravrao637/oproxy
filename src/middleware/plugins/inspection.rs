@@ -108,11 +108,10 @@ impl Middleware for InspectionMiddleware {
     }
 
     async fn on_response(&self, ctx: &mut ResponseContext) -> MiddlewareAction {
-        // On the streaming path the engine sets this flag and collects a BodyObserver
-        // instead. Recording happens in InspectionObserver::finish after the body is
-        // fully streamed, so we have the correct byte count. Skip here to avoid a
-        // double-record with an empty body.
-        if ctx.response_body_observer_pending {
+        // Some engine paths defer recording until the true terminal point:
+        // streamed responses need the body byte count, and buffered proxied
+        // responses need response middleware plus the final Completed event.
+        if ctx.response_body_observer_pending || ctx.terminal_recording_pending {
             return MiddlewareAction::Continue;
         }
         let tags = std::mem::take(&mut ctx.tags);

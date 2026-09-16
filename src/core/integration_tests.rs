@@ -2,11 +2,15 @@
 mod tests {
     use crate::core::engine::{ProxyEngine, ProxyEngineConfig};
     use crate::middleware::chain::MiddlewareChain;
+    use crate::middleware::matcher::Location;
     use crate::middleware::plugins::capture_filter::{
         CaptureFilterConfig, CaptureFilterMiddleware, FilterMode,
     };
     use crate::middleware::plugins::inspection::InspectionMiddleware;
     use crate::middleware::plugins::map_remote::MapRemoteMiddleware;
+    use crate::middleware::plugins::rules::{
+        AppliesTo, RewriteAction, RewriteRuleSet, UnifiedRewriteMiddleware,
+    };
     use crate::session::{SessionManager, SharedSessionManager};
     use axum::Router;
     use axum::body::Body;
@@ -107,6 +111,27 @@ mod tests {
             middleware_chain: Arc::new(RwLock::new(chain)),
             mitm_enabled: false,
             bind_host: "127.0.0.1".to_string(),
+            ..Default::default()
+        }));
+        engine
+            .set_short_circuit_session_manager(session_manager)
+            .await;
+        engine
+    }
+
+    async fn engine_with_rewrite_and_inspection(
+        session_manager: SharedSessionManager,
+        rules: Vec<RewriteRuleSet>,
+        max_body_bytes: usize,
+    ) -> Arc<ProxyEngine> {
+        let mut chain = MiddlewareChain::new();
+        chain.add_middleware(Arc::new(UnifiedRewriteMiddleware::new(rules)));
+        chain.add_middleware(Arc::new(InspectionMiddleware::new(session_manager.clone())));
+        let engine = Arc::new(ProxyEngine::new(ProxyEngineConfig {
+            middleware_chain: Arc::new(RwLock::new(chain)),
+            mitm_enabled: false,
+            bind_host: "127.0.0.1".to_string(),
+            max_body_bytes,
             ..Default::default()
         }));
         engine
@@ -262,6 +287,92 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body, Bytes::from_static(b"auth-ok"));
+    }
+
+    #[tokio::test]
+    async fn buffered_response_flow_records_final_client_visible_state() {
+        use axum::body::Bytes;
+        use axum::routing::get;
+
+        let upstream = Router::new().route("/rewrite", get(|| async { "upstream" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let sessions: SharedSessionManager = Arc::new(SessionManager::new(10_000));
+        let engine = engine_with_rewrite_and_inspection(
+            sessions.clone(),
+            vec![RewriteRuleSet {
+                id: "rewrite-status".to_string(),
+                name: "rewrite status".to_string(),
+                enabled: true,
+                location: Location {
+                    path: Some("/rewrite".to_string()),
+                    ..Default::default()
+                },
+                applies_to: AppliesTo::Response,
+                actions: vec![RewriteAction::SetStatus { code: 201 }],
+            }],
+            10_000,
+        )
+        .await;
+
+        let response = engine
+            .handle_request(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("http://127.0.0.1:{}/rewrite", addr.port()))
+                    .header("host", format!("127.0.0.1:{}", addr.port()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body, Bytes::from_static(b"upstream"));
+
+        sessions.flush().await;
+        let recorded = sessions.get_all_sessions();
+        assert_eq!(recorded.len(), 1);
+        let exchange = &recorded[0];
+        assert_eq!(
+            exchange.response.as_ref().map(|response| response.status),
+            Some(201)
+        );
+
+        let received_pos = exchange
+            .flow
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    crate::session::RequestFlowEvent::ResponseReceived { status: 200, .. }
+                )
+            })
+            .expect("flow must preserve the real upstream response status");
+        let modified_pos = exchange
+            .flow
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    crate::session::RequestFlowEvent::ResponseModified { .. }
+                )
+            })
+            .expect("flow must include response middleware modifications");
+        assert!(
+            received_pos < modified_pos,
+            "upstream receipt should appear before local response modification"
+        );
+        assert!(matches!(
+            exchange.flow.last(),
+            Some(crate::session::RequestFlowEvent::Completed { status: 201, .. })
+        ));
     }
 
     /// Chunked upstream responses must be relayed unchanged, recorded with the
