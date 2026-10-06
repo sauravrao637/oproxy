@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-17
+
 ### Added
 - Request flow timelines now capture the proxy lifecycle across network receipt,
   middleware decisions, generated responses, streamed responses, and terminal
@@ -73,6 +75,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Dead `MiddlewareAction::Pause` variant, the redundant `forward_class`/
   `select_class` helpers, and an unused WebSocket-over-h2 stub.
 
-[Unreleased]: https://github.com/sauravrao637/oproxy/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/sauravrao637/oproxy/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/sauravrao637/oproxy/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/sauravrao637/oproxy/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/sauravrao637/oproxy/compare/v0.1.8...v0.1.9
