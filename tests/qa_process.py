@@ -13,8 +13,7 @@ import time
 try:
     import requests
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
-    import requests
+    raise RuntimeError("Missing QA prerequisite: requests; install before running")
 
 from qa_matrix import REPO_ROOT
 
@@ -23,16 +22,17 @@ HEALTH_TIMEOUT_SECS = 20
 
 def binary_path():
     exe = "oproxy.exe" if os.name == "nt" else "oproxy"
-    return os.path.join(REPO_ROOT, "target", "debug", exe)
+    return os.environ.get("OPROXY_TEST_BINARY", os.path.join(
+        os.environ.get("CARGO_TARGET_DIR", os.path.join(REPO_ROOT, "target")), "debug", exe))
 
 
 def build(profile):
-    cmd = ["cargo", "build"]
+    cmd = ["cargo", "build", "--offline", "--locked"]
     features = profile.get("features")
     if features:
         cmd += ["--features", ",".join(features)]
     print(f"  $ {' '.join(cmd)}")
-    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
+    subprocess.run(cmd, cwd=REPO_ROOT, check=True, timeout=600)
 
 
 def wait_for_health(port, log_path):
@@ -59,16 +59,23 @@ def wait_for_health(port, log_path):
 def run_profile(name, profile):
     print(f"\n{'=' * 72}\nProfile: {name} — {profile.get('description', '')}\n{'=' * 72}")
 
-    build(profile)
+    if not profile.get("run"):
+        return {"<configuration: no required scripts>": 1}
+
+    try:
+        build(profile)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  BLOCKED: build failed: {exc}")
+        return {"<build>": 1}
 
     env = {**os.environ, "OPROXY_CONFIG": profile["config"], **profile.get("env", {})}
     log_path = os.path.join(REPO_ROOT, f"qa-runner-{name}.log")
     log_file = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen([binary_path()], cwd=REPO_ROOT, env=env,
-                             stdout=log_file, stderr=subprocess.STDOUT)
-
+    proc = None
     results = {}
     try:
+        proc = subprocess.Popen([binary_path()], cwd=REPO_ROOT, env=env,
+                                stdout=log_file, stderr=subprocess.STDOUT)
         if not wait_for_health(profile["port"], log_path):
             results["<startup>"] = 1
             return results
@@ -77,14 +84,19 @@ def run_profile(name, profile):
             script = os.path.join(REPO_ROOT, "tests", entry["script"])
             cmd = [sys.executable, script, *entry.get("args", [])]
             print(f"\n--- {entry['script']} ---\n  $ {' '.join(cmd[1:])}")
-            result = subprocess.run(cmd, cwd=REPO_ROOT)
+            result = subprocess.run(cmd, cwd=REPO_ROOT, timeout=entry.get("timeout", 300))
             results[entry["script"]] = result.returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  FAIL: profile execution did not complete: {exc}")
+        results["<execution>"] = 1
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
         log_file.close()
 
     return results

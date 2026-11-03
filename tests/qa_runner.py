@@ -15,11 +15,18 @@ which args) - no changes needed here.
 This file is just the CLI: matrix loading lives in qa_matrix.py, process
 build/launch/health/teardown lives in qa_process.py.
 
-Requires: requests, PyYAML (auto-installed if missing)
+Requires: requests, PyYAML (install before running)
 """
 
 import argparse
 import sys
+
+try:
+    import yaml
+    import requests
+except ImportError as exc:
+    print(f"BLOCKED: missing QA prerequisite: {exc}", file=sys.stderr)
+    sys.exit(2)
 
 # stdout is only line-buffered by Python when it's a real terminal; redirected
 # to a file/pipe (a log file, CI, this being run non-interactively) it's fully
@@ -55,8 +62,11 @@ def main():
     all_results = {name: run_profile(name, matrix[name]) for name in names}
 
     print(f"\n{'=' * 72}\nSummary\n{'=' * 72}")
-    failed = False
+    failed = not all_results
     for profile_name, scripts in all_results.items():
+        if not scripts:
+            print(f"  [FAIL] {profile_name}: no required scripts ran")
+            failed = True
         for script_name, code in scripts.items():
             status = "PASS" if code == 0 else "FAIL"
             failed = failed or code != 0
