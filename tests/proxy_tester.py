@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive Proxy Tester – auto‑venv, installs deps, runs all tests, cleans up.
+Comprehensive Proxy Tester – uses preinstalled dependencies and local fixtures.
 Tests HTTP/1.1, HTTP/2, HTTP/3 (QUIC), WebSocket, gRPC, SOCKS5 TCP/UDP.
 
 Note: HTTP/2 and HTTP/3 tests connect to a local test server via the proxy.
@@ -33,104 +33,18 @@ import atexit
 import time
 import argparse
 
-# ----------------------------------------------------------------------
-# Check if we are running inside the temporary venv (flag --run-tests)
-# ----------------------------------------------------------------------
+# Dependencies must be provisioned before execution; never install at runtime.
+# Retain --run-tests for compatibility with existing invocations.
 RUN_TESTS_FLAG = '--run-tests'
-
-if RUN_TESTS_FLAG not in sys.argv:
-    # --------------- BOOTSTRAP: create venv, install deps, re-launch ---------------
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--http-proxy')
-    parser.add_argument('--socks-proxy')
-    parser.add_argument('--h3-proxy', default=None,
-        help='HTTP/3 (QUIC) proxy URL, e.g. h3://localhost:8443. '
-             'Pass this only for profiles that enable the H3 listener.')
-    parser.add_argument('--target-host', default='127.0.0.1')
-    parser.add_argument('--timeout', type=int, default=10)
-    parser.add_argument('--verbose', action='store_true')
-    parser.add_argument('--expect-limits', action='store_true')
-    parser.add_argument('--admin-token', default=os.environ.get('OPROXY_ADMIN_TOKEN'))
-    args, unknown = parser.parse_known_args()
-
-    temp_dir = tempfile.mkdtemp(prefix='proxy_tester_venv_')
-    venv_dir = os.path.join(temp_dir, 'venv')
-
-    print(f"Creating temporary virtual environment at {venv_dir} ...")
-    subprocess.run([sys.executable, '-m', 'venv', venv_dir], check=True)
-
-    if os.name == 'nt':
-        pip_path = os.path.join(venv_dir, 'Scripts', 'pip.exe')
-        python_path = os.path.join(venv_dir, 'Scripts', 'python.exe')
-    else:
-        pip_path = os.path.join(venv_dir, 'bin', 'pip')
-        python_path = os.path.join(venv_dir, 'bin', 'python')
-
-    packages = [
-        'requests',
-        'httpx[http2]',
-        'websockets',
-        'grpcio',
-        'grpcio-tools',
-        'PySocks',
-        'hypercorn',
-        'brotli',
-        'zstandard',
-        'certifi',
-        'trustme',
-        'aioquic',  # HTTP/3 (QUIC) support; tests skip gracefully if absent
-    ]
-    print("Installing required packages (this may take a moment) ...")
-    subprocess.run([pip_path, 'install', *packages], check=True)
-
-    cmd = [
-        python_path,
-        os.path.abspath(__file__),
-        RUN_TESTS_FLAG,
-    ]
-    for arg in sys.argv[1:]:
-        if arg != RUN_TESTS_FLAG:
-            cmd.append(arg)
-
-    def cleanup():
-        print("\nCleaning up temporary venv...")
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception as e:
-            print(f"Cleanup error: {e}")
-
-    atexit.register(cleanup)
-
-    inner_process = None
-    def signal_handler(sig, frame):
-        if inner_process and inner_process.poll() is None:
-            inner_process.terminate()
-            try:
-                inner_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                inner_process.kill()
-        cleanup()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    inner_process = subprocess.Popen(cmd)
+import importlib
+for module in ('requests', 'httpx', 'h2', 'websockets', 'grpc', 'grpc_tools',
+               'socks', 'hypercorn', 'brotli', 'zstandard', 'certifi', 'trustme',
+               'aioquic'):
     try:
-        inner_process.wait()
-    except:
-        inner_process.terminate()
-        inner_process.wait()
-        raise
-    finally:
-        cleanup()
-        atexit.unregister(cleanup)
+        importlib.import_module(module)
+    except ImportError as exc:
+        raise SystemExit(f"BLOCKED: missing required prerequisite {module}: {exc}")
 
-    sys.exit(inner_process.returncode)
-
-# ----------------------------------------------------------------------
-# Inside venv: actual tests
-# ----------------------------------------------------------------------
 import argparse
 import asyncio
 import atexit
@@ -1738,29 +1652,10 @@ def test_socks5_udp(proxy_url, target_host, target_port, timeout, verbose):
     proxy_host = parsed.hostname
     proxy_port = parsed.port or 1080
     try:
-        s = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
-        s.settimeout(timeout)
-        s.bind(('0.0.0.0', 0))
-        message = b'Hello UDP'
-        s.sendto(message, (target_host, target_port))
-        data, addr = s.recvfrom(1024)
-        s.close()
-        if data == message:
-            print("[PASS] SOCKS5 UDP")
-            return True
-        else:
-            print(f"[FAIL] SOCKS5 UDP: received {data}")
-            return False
-    except socks.SOCKS5Error as e:
-        if '0x07' in str(e):
-            # UDP ASSOCIATE (cmd 0x07) is not implemented; skip rather than fail.
-            print(f"[SKIP] SOCKS5 UDP: UDP ASSOCIATE not supported by this proxy")
-            return None
-        print(f"[FAIL] SOCKS5 UDP: {e}")
-        if verbose:
-            traceback.print_exc()
-        return False
+        from fixtures.socks_checks import assert_udp_rejected
+        assert_udp_rejected(proxy_host, proxy_port, timeout)
+        print("[PASS] SOCKS5 UDP: verified unsupported-command rejection")
+        return True
     except Exception as e:
         print(f"[FAIL] SOCKS5 UDP: {e}")
         if verbose:
@@ -3025,7 +2920,9 @@ def _print_final_summary(all_results):
         status = "PASS" if ok is True else ("SKIP" if ok is None else "FAIL")
         print(f"  [{proxy_type}] {name}: {status}")
     print(f"\n{passed}/{total} tests passed" + (f" ({skipped} skipped)" if skipped else ""))
-    return passed == total
+    names = [(proxy_type, name) for proxy_type, name, _ in all_results]
+    return (bool(all_results) and skipped == 0 and passed == total
+            and len(names) == len(set(names)))
 
 
 def run_tests():

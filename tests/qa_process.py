@@ -84,7 +84,9 @@ def run_profile(name, profile):
             script = os.path.join(REPO_ROOT, "tests", entry["script"])
             cmd = [sys.executable, script, *entry.get("args", [])]
             print(f"\n--- {entry['script']} ---\n  $ {' '.join(cmd[1:])}")
-            result = subprocess.run(cmd, cwd=REPO_ROOT, timeout=entry.get("timeout", 300))
+            test_env = {**os.environ, "OPROXY_TEST_BINARY": os.path.abspath(binary_path())}
+            result = subprocess.run(cmd, cwd=REPO_ROOT, env=test_env,
+                                    timeout=entry.get("timeout", 300))
             results[entry["script"]] = result.returncode
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"  FAIL: profile execution did not complete: {exc}")

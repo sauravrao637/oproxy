@@ -6,6 +6,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from uuid import uuid4
 
 import requests
 import yaml
@@ -17,6 +18,8 @@ class IsolatedProxy:
         self.process = self.log = self.directory = None
         self.client = requests.Session()
         self.client.trust_env = False
+        self.admin_token = uuid4().hex
+        self.client.headers["x-oproxy-admin-token"] = self.admin_token
 
     def __enter__(self):
         try:
@@ -40,6 +43,7 @@ class IsolatedProxy:
             }), encoding="utf-8")
             env = {k: v for k, v in os.environ.items() if not k.startswith("OPROXY_")}
             env.update(OPROXY_CONFIG=str(config), OPROXY_UPDATE_CHECK="false")
+            env["OPROXY_ADMIN_TOKEN"] = self.admin_token
             if self.insecure_upstream is not None:
                 env["OPROXY_INSECURE_UPSTREAM"] = self.insecure_upstream
             self.log = (root / "startup.log").open("w", encoding="utf-8")

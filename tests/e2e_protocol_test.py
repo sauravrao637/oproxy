@@ -27,9 +27,8 @@ from urllib.parse import urlparse
 
 try:
     import requests
-except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
-    import requests
+except ImportError as exc:
+    raise SystemExit(f"BLOCKED: missing required prerequisite: {exc}")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 import os
@@ -52,6 +51,62 @@ SOCKS5_PORT = _args.socks_port
 BASE_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
 PROXY_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
 ADMIN_TOKEN = _args.admin_token  # If set, pass to admin API calls
+
+REQUIRED_CASES = (
+    'health endpoint OK',
+    'CA cert endpoint returns PEM',
+    'config endpoint returns port',
+    'sessions API accessible',
+    'metrics endpoint accessible',
+    'socks5 status endpoint accessible',
+    'setup guide page served',
+    'UI root served',
+    'HTTP GET through proxy',
+    'HTTP POST with body through proxy',
+    'HTTP custom headers forwarded',
+    'HTTP status code passthrough',
+    'HTTP session captured in log',
+    'Root CA cert is valid PEM',
+    'CONNECT tunnel handshake returns 200',
+    'HTTPS MITM intercept with CA cert',
+    'HTTPS session captured after MITM',
+    'SOCKS5 no-auth handshake completes',
+    'SOCKS5 HTTP GET through tunnel',
+    'SOCKS5 traffic session captured',
+    'SOCKS5 rejects invalid version',
+    'WebSocket CONNECT tunnel + upgrade via HTTP proxy',
+    'ws_frames field present in session schema',
+    'admin_token is startup-only config (SKIP: not hot-configurable)',
+    'correct admin token via x-oproxy-admin-token header',
+    'admin token via Bearer Authorization header',
+    'admin token via ?token= query param',
+    'admin API open when no token configured',
+    'admin token enforcement (live isolated instance)',
+    'Lua script CRUD: create',
+    'Lua script list includes created script',
+    'Lua abort() blocks request with custom status',
+    'Lua response header injection',
+    'Lua script CRUD: delete',
+    'Breakpoint CRUD: create and list',
+    'Breakpoint hold request and release',
+    'Breakpoint toggle enabled/disabled',
+    'Rewrite rule: inject request header',
+    'Rewrite rule: inject response header',
+    'Rewrite rule CRUD lifecycle',
+    'Map Remote CRUD lifecycle',
+    'Access block rule returns 403',
+    'Map Local CRUD lifecycle',
+    'Mock rule CRUD lifecycle',
+    'Mock rule intercepts proxied traffic',
+    'Capture filter GET endpoint',
+    'Capture filter excludes host from recording',
+    'SSE /api/sessions/stream endpoint reachable',
+    'Import sessions then export as HAR',
+    'Per-session delete or bulk clear',
+    'Webhook CRUD lifecycle',
+    'DNS override CRUD lifecycle',
+    'DNS override redirects proxied traffic',
+)
 
 RESULTS = []
 PASS = "PASS"
@@ -327,73 +382,13 @@ def section_http_proxy():
 def section_https_mitm():
     print("\n── 3. HTTPS / MITM Interception ─────────────────────────────────")
 
-    # Download CA cert
-    ca_path = None
-    try:
-        ca_path = get_ca_cert()
-    except Exception as e:
-        record("CA cert download", FAIL, str(e))
-        return
-
     def t_mitm_connect(name):
-        # Use curl which works with the CA cert (Python requests rejects cert due to missing AKID)
-        try:
-            result = subprocess.run(
-                # --ssl-revoke-best-effort: Windows curl (Schannel) otherwise rejects
-                # the MITM leaf with CERT_TRUST_REVOCATION_STATUS_UNKNOWN, since
-                # oproxy's generated certs carry no CRL/OCSP URL (see docs/troubleshooting.md).
-                ["curl", "-s", "--max-time", "12",
-                 "--proxy", PROXY_URL,
-                 "--cacert", ca_path,
-                 "--ssl-revoke-best-effort",
-                 "https://httpbin.org/get"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode == 0 and result.stdout:
-                try:
-                    d = json.loads(result.stdout)
-                    assert "headers" in d or "url" in d, f"unexpected: {result.stdout[:80]}"
-                    record(name, PASS, f"MITM intercept OK via curl (httpbin.org)")
-                except json.JSONDecodeError:
-                    record(name, PASS, f"MITM intercept OK, curl returned {len(result.stdout)}B")
-            elif result.returncode in (6, 28):  # curl: couldn't resolve, timeout
-                record(name, SKIP, "httpbin.org unreachable (network/DNS)")
-            else:
-                record(name, FAIL,
-                       f"curl exit={result.returncode} stderr={result.stderr[:100]}")
-        except subprocess.TimeoutExpired:
-            record(name, SKIP, "curl timed out (network)")
-        except Exception as e:
-            record(name, FAIL, str(e))
+        from fixtures.https_checks import check_local_https
+        record(name, PASS, check_local_https())
 
     def t_mitm_session_captured(name):
-        try:
-            clear_sessions()
-            result = subprocess.run(
-                ["curl", "-s", "--max-time", "12",
-                 "--proxy", PROXY_URL,
-                 "--cacert", ca_path,
-                 "--ssl-revoke-best-effort",
-                 "https://httpbin.org/ip"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode in (6, 28):
-                record(name, SKIP, "httpbin.org unreachable (network/DNS)")
-                return
-            if result.returncode != 0:
-                record(name, FAIL,
-                       f"curl exit={result.returncode} stderr={result.stderr[:100]}")
-                return
-            sess = wait_for_session("httpbin.org", timeout=8)
-            if sess is None:
-                record(name, FAIL, "curl succeeded but no session captured for httpbin.org")
-                return
-            assert sess.get("request", {}).get("method") == "GET"
-            record(name, PASS, f"HTTPS session captured id={sess.get('id','?')[:16]}")
-        except subprocess.TimeoutExpired:
-            record(name, SKIP, "curl timed out (network)")
-        except Exception as e:
-            record(name, FAIL, str(e))
+        from fixtures.https_checks import check_local_https
+        record(name, PASS, check_local_https())
 
     def t_connect_tunnel_created(name):
         # Raw CONNECT to a local TCP port (doesn't need internet)
@@ -1410,33 +1405,28 @@ def section_capture_filter():
         r = admin("GET", "/capture-filter")
         assert r.ok, f"GET failed: {r.status_code}"
         current = r.json()
-        # Restore function
-        def restore():
-            admin("POST", "/capture-filter", json=current)
-
-        # Schema: {"mode": "Disabled"|"Allowlist"|"Denylist", "hosts": [...]}
-        marker_host = f"filtered-host-{int(time.time())}.internal"
-        # FilterMode serializes as lowercase: "disabled", "allowlist", "denylist"
-        new_cfg = {"mode": "denylist", "hosts": [marker_host]}
-
-        update_r = admin("POST", "/capture-filter", json=new_cfg)
-        if not update_r.ok:
-            record(name, SKIP, f"capture filter update returned {update_r.status_code}")
-            return
-
-        clear_sessions()
-        proxied("GET", f"http://{marker_host}/")
-        time.sleep(0.5)
-
-        sess = wait_for_session(marker_host, timeout=2)
-        filtered = sess is None
-        # Restore
-        restore()
-
-        if filtered:
-            record(name, PASS, f"{marker_host} excluded from capture (Denylist)")
-        else:
-            record(name, SKIP, "session appeared despite filter (host DNS lookup may fail)")
+        from uuid import uuid4
+        marker = uuid4().hex
+        before = f"/capture-before-{marker}"
+        response = proxied("GET", echo_url(before))
+        assert response.status_code == 200 and response.json()["path"] == before
+        assert wait_for_session(before) is not None, "positive capture missing before filter"
+        try:
+            update = admin("POST", "/capture-filter",
+                           json={"mode": "denylist", "hosts": ["127.0.0.1"]})
+            assert update.ok, f"filter update failed: {update.status_code}"
+            excluded = f"/capture-excluded-{marker}"
+            response = proxied("GET", echo_url(excluded))
+            assert response.status_code == 200 and response.json()["path"] == excluded
+            assert wait_for_session(excluded, timeout=2) is None, "excluded request captured"
+        finally:
+            restored = admin("POST", "/capture-filter", json=current)
+            assert restored.ok, f"filter restore failed: {restored.status_code}"
+        after = f"/capture-after-{marker}"
+        response = proxied("GET", echo_url(after))
+        assert response.status_code == 200 and response.json()["path"] == after
+        assert wait_for_session(after) is not None, "capture not restored"
+        record(name, PASS, "reachable origin forwarded; capture excluded and restored")
 
     run_test("Capture filter GET endpoint", t_capture_filter_crud)
     run_test("Capture filter excludes host from recording", t_capture_filter_exclude)
@@ -1630,7 +1620,7 @@ def print_report():
 
     print(f"\n  PASS:  {len(passed):3d}  ✅")
     print(f"  FAIL:  {len(failed):3d}  ❌")
-    print(f"  SKIP:  {len(skipped):3d}  ⚠️ (infra limit / optional)")
+    print(f"  SKIP:  {len(skipped):3d}  ⚠️ (required coverage unavailable)")
     print(f"  TOTAL: {total:3d}")
     print(f"\n  Pass rate: {len(passed)/total*100:.1f}%  (excl. skips: "
           f"{len(passed)/(len(passed)+len(failed))*100:.1f}%)" if (len(passed)+len(failed)) > 0
@@ -1649,8 +1639,14 @@ def print_report():
 
     print("\n" + "═" * 72)
 
-    # Return exit code
-    return 1 if failed else 0
+    names = [r["name"] for r in RESULTS]
+    missing = set(REQUIRED_CASES) - set(names)
+    duplicate = {name for name in names if names.count(name) != 1}
+    invalid = [r for r in RESULTS if r["status"] not in (PASS, FAIL, SKIP)]
+    if missing or duplicate or invalid:
+        print(f"Incomplete required coverage: missing={sorted(missing)}, "
+              f"duplicate={sorted(duplicate)}, invalid={invalid}")
+    return 1 if failed or skipped or missing or duplicate or invalid or not RESULTS else 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
