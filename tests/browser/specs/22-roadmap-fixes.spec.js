@@ -137,14 +137,14 @@ test.describe('roadmap fixes', () => {
     await resetWorkspace(request);
     await page.goto('/');
     const port = new URL(process.env.OPROXY_BASE_URL || 'http://localhost:18080').port || '80';
-    const proxyPattern = new RegExp(`PROXY (127\\\\.0\\\\.0\\\\.1|localhost):${port}`);
+    const proxyPattern = new RegExp(`PROXY (127[.]0[.]0[.]1|localhost):${port}`);
     await expect(page.getByRole('button', { name: proxyPattern })).toBeVisible();
 
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
     const listener = page.locator('.insp-card').filter({ hasText: 'Listener' });
     await expect(listener).toContainText('Client proxy');
-    await expect(listener).toContainText(new RegExp(`(127\\\\.0\\\\.0\\\\.1|localhost):${port}`));
+    await expect(listener).toContainText(new RegExp(`(127[.]0[.]0[.]1|localhost):${port}`));
     // SOCKS5 row shows the active mode; 'tunnel-only' is the default when mode is unset.
     const socks5Info = await (await request.get('/admin/socks5/status')).json();
     const expectedMode = socks5Info.mode || 'tunnel-only';
