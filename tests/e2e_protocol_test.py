@@ -721,176 +721,88 @@ def section_websocket():
 def section_admin_token():
     print("\n── 6. Admin Token Authentication ────────────────────────────────")
 
-    TEST_TOKEN = f"ua-test-token-{int(time.time())}"
+    from fixtures.isolated_proxy import IsolatedProxy
+    from uuid import uuid4
+
+    def expect(client, url, expected, **kwargs):
+        # Query authentication can establish a cookie; test each credential independently.
+        client.cookies.clear()
+        response = client.get(url + "/admin/sessions", timeout=5, **kwargs)
+        assert response.status_code == expected, (
+            f"expected admin status {expected}, got {response.status_code}")
+        return response
 
     def t_set_token(name):
-        # admin_token is startup config (YAML/env), not hot-configurable.
-        # HotConfig only supports max_body_bytes.
-        # Test by checking /admin/config reports admin_auth_enabled.
-        r = admin("GET", "/config")
-        assert r.ok, f"config endpoint failed: {r.status_code}"
-        cfg = r.json()
-        # admin_auth_enabled reflects whether token is enforced
-        assert "admin_auth_enabled" in cfg, f"admin_auth_enabled missing from config: {cfg}"
-        record(name, SKIP,
-               f"admin_token is startup config only (admin_auth_enabled={cfg.get('admin_auth_enabled')}). "
-               "Tested via /admin/config. Token tests below require a restart with OPROXY_ADMIN_TOKEN env.")
+        token_a, token_b = uuid4().hex, uuid4().hex
+        with IsolatedProxy(admin_token=token_a) as proxy, requests.Session() as client:
+            client.trust_env = False
+            cfg = proxy.client.get(proxy.url + "/admin/config", timeout=5)
+            assert cfg.status_code == 200, f"config status={cfg.status_code}"
+            assert cfg.json()["admin_auth_enabled"] is True
+            def check(active, inactive):
+                expect(client, proxy.url, 200, headers={"x-oproxy-admin-token": active})
+                expect(client, proxy.url, 401, headers={"x-oproxy-admin-token": inactive})
+                expect(client, proxy.url, 401)
+            check(token_a, token_b)
+            proxy.configure(admin_token=token_b)
+            response = proxy.client.post(proxy.url + "/admin/config/reload", timeout=5)
+            assert response.status_code == 200, f"reload status={response.status_code}"
+            assert response.json()["reloaded"] is True
+            check(token_a, token_b)
+            proxy.restart()
+            check(token_b, token_a)
+        record(name, PASS, "isolated instance: reload preserves token A; restart activates B")
 
-    def t_token_via_header(name):
-        # Read the current config to check if token is configured
-        r = admin("GET", "/config")
-        assert r.ok, f"config endpoint returned {r.status_code}"
-        cfg = r.json()
-        # Config doesn't expose token value; use ADMIN_TOKEN env var if available
-        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
-        if not configured_token:
-            record(name, SKIP, "no admin_token configured in running instance")
-            return
-        # Test with correct token
-        r2 = requests.get(f"{BASE_URL}/admin/sessions",
-                          headers={"x-oproxy-admin-token": configured_token},
-                          timeout=10)
-        assert r2.ok, f"token auth failed: {r2.status_code}"
-        # Test with wrong token
-        r3 = requests.get(f"{BASE_URL}/admin/sessions",
-                          headers={"x-oproxy-admin-token": "wrong-token"},
-                          timeout=10)
-        assert r3.status_code == 401, f"expected 401 with wrong token, got {r3.status_code}"
-        record(name, PASS, "correct token passes, wrong token → 401")
-
-    def t_token_via_bearer(name):
-        r = admin("GET", "/config")
-        assert r.ok
-        cfg = r.json()
-        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
-        if not configured_token:
-            record(name, SKIP, "no admin_token configured")
-            return
-        r2 = requests.get(f"{BASE_URL}/admin/sessions",
-                          headers={"Authorization": f"Bearer {configured_token}"},
-                          timeout=10)
-        assert r2.ok, f"Bearer auth failed: {r2.status_code}"
-        record(name, PASS, "Bearer token accepted")
-
-    def t_token_via_query_param(name):
-        r = admin("GET", "/config")
-        assert r.ok
-        cfg = r.json()
-        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
-        if not configured_token:
-            record(name, SKIP, "no admin_token configured")
-            return
-        r2 = requests.get(f"{BASE_URL}/admin/sessions?token={configured_token}",
-                          timeout=10)
-        assert r2.ok, f"query param auth failed: {r2.status_code}"
-        record(name, PASS, "?token= query param accepted")
+    def check_transport(name, transport):
+        with IsolatedProxy() as proxy, requests.Session() as client:
+            client.trust_env = False
+            for token, expected in ((proxy.admin_token, 200), ("wrong-token", 401)):
+                kwargs = ({"params": {"token": token}} if transport == "query" else
+                          {"headers": {"Authorization": f"Bearer {token}"}} if transport == "bearer" else
+                          {"headers": {"x-oproxy-admin-token": token}})
+                expect(client, proxy.url, expected, **kwargs)
+            expect(client, proxy.url, 401)
+        # Keep the primary profile's applicable authentication assertion as well.
+        cfg = admin("GET", "/config")
+        assert cfg.status_code == 200, f"primary config status={cfg.status_code}"
+        if cfg.json()["admin_auth_enabled"]:
+            assert ADMIN_TOKEN, "primary admin token required"
+            with requests.Session() as client:
+                client.trust_env = False
+                kwargs = ({"params": {"token": ADMIN_TOKEN}} if transport == "query" else
+                          {"headers": {"Authorization": f"Bearer {ADMIN_TOKEN}"}} if transport == "bearer" else
+                          {"headers": {"x-oproxy-admin-token": ADMIN_TOKEN}})
+                expect(client, BASE_URL, 200, **kwargs)
+                expect(client, BASE_URL, 401)
+            context = "primary authenticated profile also verified"
+        else:
+            context = "primary authentication inapplicable (open profile)"
+        record(name, PASS, f"isolated {transport}: valid=200, wrong/missing=401; {context}")
 
     def t_no_token_required_when_unset(name):
-        r = admin("GET", "/config")
-        assert r.ok
-        cfg = r.json()
-        if cfg.get("admin_auth_enabled"):
-            record(name, SKIP, "token is enforced; skipping open-access test")
-            return
-        r2 = admin("GET", "/sessions")
-        assert r2.ok, f"open access failed: {r2.status_code}"
-        record(name, PASS, "admin API accessible without token when none configured")
+        with IsolatedProxy(open_admin=True) as proxy, requests.Session() as client:
+            client.trust_env = False
+            cfg = client.get(proxy.url + "/admin/config", timeout=5)
+            assert cfg.status_code == 200, f"config status={cfg.status_code}"
+            assert cfg.json()["admin_auth_enabled"] is False
+            expect(client, proxy.url, 200)
+        record(name, PASS, "isolated token-free loopback instance accepts unauthenticated access")
 
     def t_token_enforcement_live(name):
-        """Spin up a temporary oproxy on a free port with admin token set."""
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        exe_name = "oproxy.exe" if os.name == "nt" else "oproxy"
-        binary = os.path.join(repo_root, "target", "debug", exe_name)
-        if not os.path.exists(binary):
-            binary = os.path.join(repo_root, "target", "release", exe_name)
-        if not os.path.exists(binary):
-            record(name, SKIP, "oproxy binary not found for live token test (run `cargo build` first)")
-            return
-
-        # Find free port
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            test_port = s.getsockname()[1]
-
-        token = "ua-test-secret-token-12345"
-        import tempfile
-        tmpdir = tempfile.mkdtemp(prefix="oproxy_token_test_")
-
-        proc = subprocess.Popen(
-            [binary],
-            env={**os.environ,
-                 "OPROXY_PORT": str(test_port),
-                 "OPROXY_ADMIN_TOKEN": token,
-                 "OPROXY_STORAGE_PATH": tmpdir,
-                 "OPROXY_MITM_ENABLED": "false",
-                 "RUST_LOG": "error"},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-
-        base = f"http://127.0.0.1:{test_port}"
-        # Wait for startup
-        deadline = time.time() + 8
-        started = False
-        while time.time() < deadline:
-            try:
-                r = requests.get(f"{base}/health", timeout=1)
-                if r.ok:
-                    started = True
-                    break
-            except Exception:
-                pass
-            time.sleep(0.2)
-
-        if not started:
-            proc.terminate()
-            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
-            record(name, SKIP, "token-protected instance failed to start")
-            return
-
-        try:
-            # Without token → 401
-            r_unauth = requests.get(f"{base}/admin/sessions", timeout=5)
-            assert r_unauth.status_code == 401, \
-                f"expected 401 without token, got {r_unauth.status_code}"
-
-            # With wrong token → 401
-            r_wrong = requests.get(f"{base}/admin/sessions",
-                                   headers={"x-oproxy-admin-token": "wrong"},
-                                   timeout=5)
-            assert r_wrong.status_code == 401, \
-                f"expected 401 with wrong token, got {r_wrong.status_code}"
-
-            # With correct token via x-oproxy-admin-token → 200
-            r_ok = requests.get(f"{base}/admin/sessions",
-                                 headers={"x-oproxy-admin-token": token},
-                                 timeout=5)
-            assert r_ok.ok, f"correct token rejected: {r_ok.status_code}"
-
-            # With correct token via Bearer → 200
-            r_bearer = requests.get(f"{base}/admin/sessions",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                    timeout=5)
-            assert r_bearer.ok, f"Bearer token rejected: {r_bearer.status_code}"
-
-            # With correct token via ?token= → 200
-            r_qp = requests.get(f"{base}/admin/sessions?token={token}", timeout=5)
-            assert r_qp.ok, f"query param token rejected: {r_qp.status_code}"
-
-            record(name, PASS,
-                   "no-token→401, wrong-token→401, correct x-header→200, Bearer→200, ?token=→200")
-        except AssertionError:
-            raise
-        except Exception as e:
-            record(name, FAIL, str(e))
-        finally:
-            proc.terminate()
-            proc.wait(timeout=3)
-            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+        with IsolatedProxy() as proxy, requests.Session() as client:
+            client.trust_env = False
+            expect(client, proxy.url, 401)
+            expect(client, proxy.url, 401, headers={"x-oproxy-admin-token": "wrong"})
+            expect(client, proxy.url, 200, headers={"x-oproxy-admin-token": proxy.admin_token})
+        record(name, PASS, "isolated instance: missing/wrong token=401, correct token=200")
 
     run_test("admin_token is startup-only config (SKIP: not hot-configurable)", t_set_token)
-    run_test("correct admin token via x-oproxy-admin-token header", t_token_via_header)
-    run_test("admin token via Bearer Authorization header", t_token_via_bearer)
-    run_test("admin token via ?token= query param", t_token_via_query_param)
+    run_test("correct admin token via x-oproxy-admin-token header",
+             lambda name: check_transport(name, "header"))
+    run_test("admin token via Bearer Authorization header",
+             lambda name: check_transport(name, "bearer"))
+    run_test("admin token via ?token= query param",
+             lambda name: check_transport(name, "query"))
     run_test("admin API open when no token configured", t_no_token_required_when_unset)
     run_test("admin token enforcement (live isolated instance)", t_token_enforcement_live)
 
