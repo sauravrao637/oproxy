@@ -59,5 +59,49 @@ class TrustBoundaryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 60, result.stderr)
 
 
+class AuthenticationLifecycleTests(unittest.TestCase):
+    def test_token_changes_require_restart(self):
+        import requests
+        with IsolatedProxy(admin_token="token-a") as proxy:
+            ca = proxy.ca_path.read_bytes()
+            storage_marker = proxy.root / "storage" / "lifecycle-marker"
+            storage_marker.parent.mkdir(exist_ok=True)
+            storage_marker.write_text("persist", encoding="utf-8")
+            with requests.Session() as client:
+                client.trust_env = False
+                def status(token):
+                    headers = {"x-oproxy-admin-token": token} if token else {}
+                    return client.get(proxy.url + "/admin/sessions",
+                                      headers=headers, timeout=3).status_code
+                self.assertEqual(status("token-a"), 200)
+                self.assertEqual(status("token-b"), 401)
+                self.assertEqual(status(None), 401)
+                proxy.configure(admin_token="token-b")
+                response = proxy.client.post(proxy.url + "/admin/config/reload", timeout=3)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["reloaded"])
+                self.assertEqual(status("token-a"), 200)
+                self.assertEqual(status("token-b"), 401)
+                old_process = proxy.process
+                proxy.restart()
+                self.assertIsNotNone(old_process.poll())
+                self.assertEqual(status("token-a"), 401)
+                self.assertEqual(status("token-b"), 200)
+                self.assertEqual(status(None), 401)
+                self.assertEqual(proxy.ca_path.read_bytes(), ca)
+                self.assertEqual(storage_marker.read_text(encoding="utf-8"), "persist")
+
+    def test_open_instance_has_no_inherited_token(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"OPROXY_ADMIN_TOKEN": "inherited-token"}):
+            with IsolatedProxy(open_admin=True) as proxy:
+                self.assertNotIn("x-oproxy-admin-token", proxy.client.headers)
+                response = proxy.client.get(proxy.url + "/admin/config", timeout=3)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertFalse(response.json()["admin_auth_enabled"])
+                self.assertEqual(proxy.client.get(
+                    proxy.url + "/admin/sessions", timeout=3).status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()
