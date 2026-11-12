@@ -3,6 +3,18 @@
 import socket
 
 
+def assert_invalid_version_rejected(host, port, timeout):
+    """Invalid protocol versions must close/reset, not negotiate or stall."""
+    with socket.create_connection((host, port), timeout=timeout) as connection:
+        connection.settimeout(timeout)
+        connection.sendall(b"\x04\x01\x00\x50\x7f\x00\x00\x01\x00")
+        try:
+            reply = connection.recv(8)
+        except ConnectionResetError:
+            return
+        assert reply == b"", f"Invalid version received unexpected reply: {reply!r}"
+
+
 def receive_exact(connection, size):
     data = b""
     while len(data) < size:

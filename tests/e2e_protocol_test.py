@@ -523,26 +523,9 @@ def section_socks5():
             record(name, FAIL, str(e))
 
     def t_socks5_refuses_invalid_version(name):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        sock.connect((PROXY_HOST, SOCKS5_PORT))
-        try:
-            # Send SOCKS4 greeting (version 4)
-            sock.sendall(b"\x04\x01\x00\x50\x7f\x00\x00\x01\x00")
-            resp = sock.recv(8)
-            # Should get a SOCKS5 error or connection close
-            # Any response that's not SOCKS4 confirmation is OK
-            if len(resp) == 0:
-                record(name, PASS, "connection closed on invalid version")
-            elif resp[0] == 5:
-                # SOCKS5 error response
-                record(name, PASS, f"SOCKS5 error response: {resp.hex()}")
-            else:
-                record(name, PASS, f"rejected or closed: {resp.hex()[:20]}")
-        except Exception as e:
-            record(name, PASS, f"connection reset/closed: {type(e).__name__}")
-        finally:
-            sock.close()
+        from fixtures.socks_checks import assert_invalid_version_rejected
+        assert_invalid_version_rejected(PROXY_HOST, SOCKS5_PORT, 3)
+        record(name, PASS, "invalid version connection closed/reset")
 
     run_test("SOCKS5 no-auth handshake completes", t_socks5_handshake)
     run_test("SOCKS5 HTTP GET through tunnel", t_socks5_http_request)
