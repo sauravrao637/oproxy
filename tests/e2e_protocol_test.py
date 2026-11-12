@@ -1076,9 +1076,10 @@ def _run_breakpoint_checks(admin, proxied):
 
         if not pending:
             t.join(1)
-            record(name, SKIP, "request not held (path matching may differ)")
             cleanup_bp()
-            return
+            raise AssertionError("request did not enter the pending breakpoint queue")
+
+        assert t.is_alive() and result[0] is None, "request completed before release"
 
         p_id = pending[0]["id"]
         # Release it
@@ -1090,7 +1091,10 @@ def _run_breakpoint_checks(admin, proxied):
         t.join(5)
         assert result[0] is not None and not isinstance(result[0], Exception), \
             f"proxied request failed after release: {result[0]}"
-        assert result[0].ok, f"status after release: {result[0].status_code}"
+        assert result[0].status_code == 200, f"status after release: {result[0].status_code}"
+        body = result[0].json()
+        assert body.get("method") == "GET", f"wrong released method: {body}"
+        assert body.get("path") == "/bp-hold-test", f"wrong released path: {body}"
         record(name, PASS, f"held and released; response status={result[0].status_code}")
         cleanup_bp()
 
