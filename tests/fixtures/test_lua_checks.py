@@ -24,6 +24,11 @@ class LuaChecksTests(unittest.TestCase):
             ("/lua-header-test", 502, "upstream failed"),
         )
         with IsolatedProxy() as proxy:
+            for name in ("ua-test-noop", "ua-test-user", "probe-test"):
+                seeded = proxy.client.post(proxy.url + "/admin/scripts", json={
+                    "id": "", "name": name, "enabled": False, "code": "-- preserved",
+                }, timeout=5)
+                seeded.raise_for_status()
             initial = proxy.client.get(proxy.url + "/admin/scripts", timeout=5)
             initial.raise_for_status()
             original_scripts = initial.json()
@@ -63,6 +68,25 @@ class LuaChecksTests(unittest.TestCase):
                         remaining = proxy.client.get(proxy.url + "/admin/scripts", timeout=5)
                         remaining.raise_for_status()
                         self.assertEqual(remaining.json(), original_scripts)
+
+                # An interruption outside normal assertion handling must still clean up.
+                original_run = suite.run_test
+
+                def interrupted(name, fn):
+                    if name == "Lua script list includes created script":
+                        raise KeyboardInterrupt("deliberate interruption")
+                    original_run(name, fn)
+
+                with patch.object(suite, "BASE_URL", proxy.url), \
+                     patch.object(suite, "ADMIN_TOKEN", proxy.admin_token), \
+                     patch.object(suite, "RESULTS", []), \
+                     patch.object(suite, "run_test", interrupted), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        suite.section_lua()
+                remaining = proxy.client.get(proxy.url + "/admin/scripts", timeout=5)
+                remaining.raise_for_status()
+                self.assertEqual(remaining.json(), original_scripts)
             finally:
                 suite.ECHO_SERVER.shutdown()
                 suite.ECHO_SERVER.server_close()

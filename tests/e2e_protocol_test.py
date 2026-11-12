@@ -827,24 +827,26 @@ def section_admin_token():
 def section_lua():
     print("\n── 7. Lua Scripting ─────────────────────────────────────────────")
 
-    # Clean up any stale ua-test scripts from previous runs
-    stale = admin("GET", "/scripts").json()
-    for s in stale:
-        if s.get("name", "").startswith("ua-test") or s.get("name") == "probe-test":
-            admin("DELETE", f"/scripts/{s['id']}")
-
+    from uuid import uuid4
+    prefix = "lua-check-" + uuid4().hex
+    noop_name = prefix + "-noop"
+    abort_name = prefix + "-abort"
+    header_name = prefix + "-header"
+    abort_path = "/" + prefix + "/lua-abort-test"
+    header_path = "/" + prefix + "/lua-header-test"
+    owned_names = {noop_name, abort_name, header_name}
     created_ids = []
 
     def t_lua_create(name):
         r = admin("POST", "/scripts", json={
-            "id": "", "name": "ua-test-noop", "enabled": True,
+            "id": "", "name": noop_name, "enabled": True,
             "code": "-- noop script",
         })
         assert r.ok, f"create failed: {r.status_code} {r.text}"
         # POST returns {"ok":true}; find the script by name in the list
         scripts = admin("GET", "/scripts").json()
-        script = next((s for s in scripts if s.get("name") == "ua-test-noop"), None)
-        assert script is not None, "ua-test-noop not found after create"
+        script = next((s for s in scripts if s.get("name") == noop_name), None)
+        assert script is not None, f"{noop_name} not found after create"
         created_ids.append(script["id"])
         record(name, PASS, f"script id={script['id'][:16]}")
 
@@ -853,29 +855,29 @@ def section_lua():
         assert r.ok, f"list failed: {r.status_code}"
         scripts = r.json()
         assert isinstance(scripts, list), f"not a list: {type(scripts)}"
-        assert any(s.get("name") == "ua-test-noop" for s in scripts), \
-            "ua-test-noop not in list"
-        record(name, PASS, f"found ua-test-noop in {len(scripts)} scripts")
+        assert any(s.get("name") == noop_name for s in scripts), \
+            f"{noop_name} not in list"
+        record(name, PASS, f"found created script in {len(scripts)} scripts")
 
     def t_lua_abort_script(name):
         """Create a script that aborts requests to a specific path."""
         r = admin("POST", "/scripts", json={
-            "id": "", "name": "ua-test-abort", "enabled": True,
+            "id": "", "name": abort_name, "enabled": True,
             # Lua gets request.uri (full URI), not request.path — check by string.find.
             # `-` is a Lua pattern quantifier (lazy repeat), not a literal dash, so the
             # 4th arg (plain-text find) is required for a path containing dashes to
             # ever match. Scripts run on both the request and response pass, so guard
             # on `request` being non-nil (it's nil during the response pass).
-            "code": """
-if request and string.find(request.uri, "/lua-abort-test", 1, true) then
+            "code": f"""
+if request and string.find(request.uri, "{abort_path}", 1, true) then
   abort(418, "lua blocked this")
 end
 """,
         })
         assert r.ok, f"create abort script failed: {r.status_code}"
         scripts = admin("GET", "/scripts").json()
-        script = next((s for s in scripts if s.get("name") == "ua-test-abort"), None)
-        assert script is not None, "ua-test-abort not found"
+        script = next((s for s in scripts if s.get("name") == abort_name), None)
+        assert script is not None, f"{abort_name} not found"
         script_id = script["id"]
         created_ids.append(script_id)
 
@@ -883,7 +885,7 @@ end
         time.sleep(0.3)
 
         # Proxy a request to the abort path
-        r2 = proxied("GET", echo_url("/lua-abort-test"))
+        r2 = proxied("GET", echo_url(abort_path))
         assert r2.status_code == 418, \
             f"Lua abort expected 418, got {r2.status_code}: {r2.text[:100]}"
         assert r2.text == "lua blocked this", f"wrong body: {r2.text[:100]}"
@@ -892,7 +894,7 @@ end
     def t_lua_header_injection(name):
         """Create a script that injects a response header."""
         r = admin("POST", "/scripts", json={
-            "id": "", "name": "ua-test-header-inject", "enabled": True,
+            "id": "", "name": header_name, "enabled": True,
             # Scripts run on both the request and response pass; guard on `response`
             # being non-nil (it's nil during the request pass) to avoid a spurious
             # "nil value" warning every request.
@@ -904,12 +906,12 @@ end
         })
         assert r.ok, f"create header inject script failed: {r.status_code}"
         scripts = admin("GET", "/scripts").json()
-        script = next((s for s in scripts if s.get("name") == "ua-test-header-inject"), None)
-        assert script is not None, "ua-test-header-inject not found"
+        script = next((s for s in scripts if s.get("name") == header_name), None)
+        assert script is not None, f"{header_name} not found"
         created_ids.append(script["id"])
         time.sleep(0.3)
 
-        r2 = proxied("GET", echo_url("/lua-header-test"))
+        r2 = proxied("GET", echo_url(header_path))
         # The echo server returns 200, the header should be injected by Lua
         injected = r2.headers.get("x-lua-injected")
         assert r2.status_code == 200, \
@@ -919,27 +921,31 @@ end
         record(name, PASS, "Lua response header injection confirmed")
 
     def t_lua_delete(name):
-        # Delete scripts from this run
-        for sid in created_ids:
+        # Recover IDs even when creation succeeded but its follow-up check failed.
+        response = admin("GET", "/scripts")
+        assert response.ok, f"cleanup list failed: {response.status_code}"
+        owned_ids = set(created_ids)
+        owned_ids.update(s["id"] for s in response.json()
+                         if s.get("name") in owned_names)
+        errors = []
+        for sid in owned_ids:
             r = admin("DELETE", f"/scripts/{sid}")
-            assert r.ok or r.status_code == 404, f"delete {sid} failed: {r.status_code}"
-        created_ids.clear()
-        # Also clean up any leftover ua-test scripts from previous runs
-        all_scripts = admin("GET", "/scripts").json()
-        for s in all_scripts:
-            if s.get("name", "").startswith("ua-test"):
-                admin("DELETE", f"/scripts/{s['id']}")
-        # Verify clean
-        final = admin("GET", "/scripts").json()
-        assert not any(s.get("name", "").startswith("ua-test") for s in final), \
-            f"ua-test scripts still present: {[s['name'] for s in final if s.get('name','').startswith('ua-test')]}"
-        record(name, PASS, "all ua-test scripts deleted")
+            if not (r.ok or r.status_code == 404):
+                errors.append(f"delete {sid} failed: {r.status_code}")
+        response = admin("GET", "/scripts")
+        assert response.ok, f"cleanup verification failed: {response.status_code}"
+        remaining = [s["id"] for s in response.json()
+                     if s.get("name") in owned_names or s["id"] in owned_ids]
+        assert not errors and not remaining, f"cleanup errors={errors}; remaining={remaining}"
+        record(name, PASS, "all scripts created by this run deleted")
 
-    run_test("Lua script CRUD: create", t_lua_create)
-    run_test("Lua script list includes created script", t_lua_list)
-    run_test("Lua abort() blocks request with custom status", t_lua_abort_script)
-    run_test("Lua response header injection", t_lua_header_injection)
-    run_test("Lua script CRUD: delete", t_lua_delete)
+    try:
+        run_test("Lua script CRUD: create", t_lua_create)
+        run_test("Lua script list includes created script", t_lua_list)
+        run_test("Lua abort() blocks request with custom status", t_lua_abort_script)
+        run_test("Lua response header injection", t_lua_header_injection)
+    finally:
+        run_test("Lua script CRUD: delete", t_lua_delete)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
