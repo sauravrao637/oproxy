@@ -884,14 +884,10 @@ end
 
         # Proxy a request to the abort path
         r2 = proxied("GET", echo_url("/lua-abort-test"))
-        if r2.status_code == 418:
-            assert "lua blocked" in r2.text, f"wrong body: {r2.text[:100]}"
-            record(name, PASS, "Lua abort() returned 418 with custom body")
-        elif r2.status_code == 200:
-            # Script may not be active yet or path matching different
-            record(name, SKIP, f"script didn't abort (path matching? echo returned 200)")
-        else:
-            record(name, SKIP, f"unexpected status {r2.status_code}: {r2.text[:80]}")
+        assert r2.status_code == 418, \
+            f"Lua abort expected 418, got {r2.status_code}: {r2.text[:100]}"
+        assert r2.text == "lua blocked this", f"wrong body: {r2.text[:100]}"
+        record(name, PASS, "Lua abort() returned 418 with exact custom body")
 
     def t_lua_header_injection(name):
         """Create a script that injects a response header."""
@@ -916,11 +912,11 @@ end
         r2 = proxied("GET", echo_url("/lua-header-test"))
         # The echo server returns 200, the header should be injected by Lua
         injected = r2.headers.get("x-lua-injected")
-        if injected == "yes":
-            record(name, PASS, "Lua response header injection confirmed")
-        else:
-            record(name, SKIP,
-                   f"header not injected (may need inline path filter). Got: {dict(r2.headers)}")
+        assert r2.status_code == 200, \
+            f"Lua header request expected 200, got {r2.status_code}"
+        assert injected == "yes", \
+            f"Lua response header missing or incorrect: {dict(r2.headers)}"
+        record(name, PASS, "Lua response header injection confirmed")
 
     def t_lua_delete(name):
         # Delete scripts from this run
