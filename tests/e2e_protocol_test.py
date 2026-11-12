@@ -982,6 +982,35 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 def section_breakpoints():
     print("\n── 8. Breakpoints ───────────────────────────────────────────────")
+    from fixtures.isolated_proxy import IsolatedProxy
+
+    names = [name for name in REQUIRED_CASES if name.startswith("Breakpoint ")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
+
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_breakpoint_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated breakpoint prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_breakpoint_checks(admin, proxied):
+    """Exercise breakpoints using administration and traffic for an owned instance."""
 
     def cleanup_bp():
         rules = admin("GET", "/breakpoints").json()
