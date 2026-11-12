@@ -1161,6 +1161,34 @@ def _run_breakpoint_checks(admin, proxied):
 def section_rewrites():
     print("\n── 9. Rewrites & Rule Sets ──────────────────────────────────────")
 
+    from fixtures.isolated_proxy import IsolatedProxy
+
+    names = [name for name in REQUIRED_CASES if name.startswith("Rewrite rule")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
+
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_rewrite_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated rewrite prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_rewrite_checks(admin, proxied):
     def cleanup_rules(prefix="ua-rw-"):
         rules = admin("GET", "/rule-sets").json()
         for r in rules:
@@ -1184,11 +1212,8 @@ def section_rewrites():
         assert r2.ok, f"proxied request failed: {r2.status_code}"
         d = r2.json()
         hdrs = {k.lower(): v for k, v in d["headers"].items()}
-        if "x-rewritten" in hdrs:
-            assert hdrs["x-rewritten"] == "yes", f"wrong value: {hdrs['x-rewritten']}"
-            record(name, PASS, "request header injected by rewrite rule")
-        else:
-            record(name, SKIP, f"header not injected (path match?). Headers: {list(hdrs.keys())[:8]}")
+        assert hdrs.get("x-rewritten") == "yes", f"wrong or absent request header: {hdrs}"
+        record(name, PASS, "request header injected by rewrite rule")
         cleanup_rules()
 
     def t_rule_response_header(name):
@@ -1206,10 +1231,9 @@ def section_rewrites():
 
         r2 = proxied("GET", echo_url("/rw-resp-hdr-test"))
         injected = r2.headers.get("x-resp-rewritten")
-        if injected == "injected":
-            record(name, PASS, "response header injected by rewrite rule")
-        else:
-            record(name, SKIP, f"header not injected. Response headers: {dict(list(r2.headers.items())[:6])}")
+        assert r2.status_code == 200, f"proxied request failed: {r2.status_code}"
+        assert injected == "injected", f"wrong or absent response header: {injected!r}"
+        record(name, PASS, "response header injected by rewrite rule")
         cleanup_rules()
 
     def t_rule_crud(name):
