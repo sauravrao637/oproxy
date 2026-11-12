@@ -3,6 +3,7 @@
 import contextlib
 import importlib
 import io
+import os
 import sys
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,50 @@ from fixtures.isolated_proxy import IsolatedProxy
 
 
 class LuaChecksTests(unittest.TestCase):
+    def test_section_isolates_scripts_and_traffic(self):
+        with patch.object(sys, "argv", ["e2e_protocol_test.py"]):
+            suite = importlib.import_module("e2e_protocol_test")
+        with IsolatedProxy() as primary:
+            initial = primary.client.get(primary.url + "/admin/scripts", timeout=5).json()
+            results = []
+            suite.start_echo_server()
+            original_record = suite.record
+
+            def record(name, status, *args):
+                if name == "Lua response header injection":
+                    response = primary.client.get(suite.echo_url("/primary-probe"),
+                                                  proxies={"http": primary.url}, timeout=5)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertNotIn("x-lua-injected", response.headers)
+                original_record(name, status, *args)
+
+            try:
+                with patch.object(suite, "RESULTS", results), \
+                     patch.object(suite, "record", record), \
+                     patch.object(suite, "admin", side_effect=AssertionError("primary admin used")), \
+                     patch.object(suite, "proxied", side_effect=AssertionError("primary traffic used")), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    suite.section_lua()
+                self.assertEqual(len(results), 5, results)
+                self.assertTrue(all(r["status"] == "PASS" for r in results), results)
+                self.assertEqual(primary.client.get(primary.url + "/admin/scripts",
+                                                    timeout=5).json(), initial)
+            finally:
+                suite.ECHO_SERVER.shutdown()
+                suite.ECHO_SERVER.server_close()
+
+    def test_missing_binary_fails_all_required_lua_cases(self):
+        with patch.object(sys, "argv", ["e2e_protocol_test.py"]):
+            suite = importlib.import_module("e2e_protocol_test")
+        results = []
+        with patch.dict(os.environ, {"OPROXY_TEST_BINARY": __file__ + ".missing"}), \
+             patch.object(suite, "RESULTS", results), \
+             contextlib.redirect_stdout(io.StringIO()):
+            suite.section_lua()
+        self.assertEqual(len(results), 5, results)
+        self.assertTrue(all(r["status"] == "FAIL" for r in results), results)
+        self.assertTrue(all("Missing tested binary" in r["detail"] for r in results))
+
     def test_live_and_incorrect_responses(self):
         with patch.object(sys, "argv", ["e2e_protocol_test.py"]):
             suite = importlib.import_module("e2e_protocol_test")
@@ -55,7 +100,7 @@ class LuaChecksTests(unittest.TestCase):
                              patch.object(suite, "RESULTS", results), \
                              patch.object(suite, "proxied", request), \
                              contextlib.redirect_stdout(io.StringIO()):
-                            suite.section_lua()
+                            suite._run_lua_checks(suite.admin, suite.proxied)
                         self.assertEqual(len(results), 5, results)
                         failures = [r for r in results if r["status"] != "PASS"]
                         if path is None:
@@ -83,7 +128,7 @@ class LuaChecksTests(unittest.TestCase):
                      patch.object(suite, "run_test", interrupted), \
                      contextlib.redirect_stdout(io.StringIO()):
                     with self.assertRaises(KeyboardInterrupt):
-                        suite.section_lua()
+                        suite._run_lua_checks(suite.admin, suite.proxied)
                 remaining = proxy.client.get(proxy.url + "/admin/scripts", timeout=5)
                 remaining.raise_for_status()
                 self.assertEqual(remaining.json(), original_scripts)
