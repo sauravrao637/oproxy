@@ -1012,6 +1012,11 @@ def section_breakpoints():
 def _run_breakpoint_checks(admin, proxied):
     """Exercise breakpoints using administration and traffic for an owned instance."""
 
+    from uuid import uuid4
+    marker = uuid4().hex
+    hold_path = "/bp-hold-test-" + marker
+    hold_url = echo_url(hold_path)
+
     def cleanup_bp():
         rules = admin("GET", "/breakpoints").json()
         for r in rules:
@@ -1027,7 +1032,7 @@ def _run_breakpoint_checks(admin, proxied):
         cleanup_bp()
         r = admin("POST", "/breakpoints", json={
             "id": "", "enabled": True, "bp_type": "Request",
-            "location": {"host": "bp-test.example.com", "path": None,
+            "location": {"host": f"bp-{marker}.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
         })
@@ -1036,7 +1041,7 @@ def _run_breakpoint_checks(admin, proxied):
         rules = admin("GET", "/breakpoints").json()
         bp = next(
             (ru for ru in rules
-             if ru.get("location", {}).get("host") == "bp-test.example.com"),
+             if ru.get("location", {}).get("host") == f"bp-{marker}.example.com"),
             None,
         )
         assert bp is not None, f"BP not in list: {rules}"
@@ -1047,7 +1052,7 @@ def _run_breakpoint_checks(admin, proxied):
         # Create breakpoint matching our echo server path
         r = admin("POST", "/breakpoints", json={
             "id": "", "enabled": True, "bp_type": "Request",
-            "location": {"host": None, "path": "/bp-hold-test",
+            "location": {"host": None, "path": hold_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
         })
@@ -1058,7 +1063,7 @@ def _run_breakpoint_checks(admin, proxied):
         result = [None]
         def do_req():
             try:
-                result[0] = proxied("GET", echo_url("/bp-hold-test"), timeout=15)
+                result[0] = proxied("GET", hold_url, timeout=15)
             except Exception as e:
                 result[0] = e
 
@@ -1070,7 +1075,12 @@ def _run_breakpoint_checks(admin, proxied):
         pending = []
         while time.time() < deadline:
             pending = admin("GET", "/breakpoints/pending").json()
+            pending = [p for p in pending
+                       if p.get("bp_type") == "Request"
+                       and p.get("context", {}).get("Request", {}).get("method") == "GET"
+                       and p.get("context", {}).get("Request", {}).get("uri") == hold_url]
             if pending:
+                assert len(pending) == 1, f"duplicate pending request: {pending}"
                 break
             time.sleep(0.3)
 
@@ -1094,7 +1104,7 @@ def _run_breakpoint_checks(admin, proxied):
         assert result[0].status_code == 200, f"status after release: {result[0].status_code}"
         body = result[0].json()
         assert body.get("method") == "GET", f"wrong released method: {body}"
-        assert body.get("path") == "/bp-hold-test", f"wrong released path: {body}"
+        assert body.get("path") == hold_path, f"wrong released path: {body}"
         record(name, PASS, f"held and released; response status={result[0].status_code}")
         cleanup_bp()
 
@@ -1102,7 +1112,7 @@ def _run_breakpoint_checks(admin, proxied):
         cleanup_bp()
         r = admin("POST", "/breakpoints", json={
             "id": "", "enabled": True, "bp_type": "Request",
-            "location": {"host": "toggle.example.com", "path": None,
+            "location": {"host": f"toggle-{marker}.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
         })
@@ -1111,7 +1121,7 @@ def _run_breakpoint_checks(admin, proxied):
         rules = admin("GET", "/breakpoints").json()
         rule = next(
             (ru for ru in rules
-             if ru.get("location", {}).get("host") == "toggle.example.com"),
+             if ru.get("location", {}).get("host") == f"toggle-{marker}.example.com"),
             None,
         )
         assert rule is not None, "BP not found after create"

@@ -25,7 +25,7 @@ class BreakpointChecksTests(unittest.TestCase):
                         if fault == "pending" and method == "POST" and path == "/breakpoints":
                             # Remove the hold rule to simulate a matcher that never pauses.
                             rule = response.json()
-                            if rule["location"].get("path") == "/bp-hold-test":
+                            if rule["location"].get("path") and rule["location"]["path"].startswith("/bp-hold-test-"):
                                 proxy.client.delete(proxy.url + "/admin/breakpoints/" + rule["id"],
                                                     timeout=5).raise_for_status()
                         return response
@@ -49,6 +49,34 @@ class BreakpointChecksTests(unittest.TestCase):
                     self.assertEqual(hold["status"], "FAIL", results)
                     expected = {"status": "status after release", "pending": "did not enter"}
                     self.assertIn(expected.get(fault, "wrong released"), hold["detail"])
+        finally:
+            suite.ECHO_SERVER.shutdown()
+            suite.ECHO_SERVER.server_close()
+
+    def test_unrelated_pending_request_is_not_released(self):
+        suite = self.suite()
+        suite.start_echo_server()
+        try:
+            with IsolatedProxy() as proxy:
+                def admin(method, path, **kwargs):
+                    self.assertNotIn("unrelated-request/resolve", path)
+                    response = proxy.client.request(method, proxy.url + "/admin" + path,
+                                                    timeout=5, **kwargs)
+                    if method == "GET" and path == "/breakpoints/pending" and response.json():
+                        unrelated = {"id": "unrelated-request", "bp_type": "Request",
+                                     "context": {"Request": {"method": "GET",
+                                                             "uri": "http://unrelated.invalid/"}}}
+                        response._content = json.dumps([unrelated] + response.json()).encode()
+                    return response
+
+                def proxied(method, url, **kwargs):
+                    return proxy.client.request(method, url, proxies={"http": proxy.url}, **kwargs)
+
+                results = []
+                with patch.object(suite, "RESULTS", results), contextlib.redirect_stdout(io.StringIO()):
+                    suite._run_breakpoint_checks(admin, proxied)
+                self.assertEqual(len(results), 3, results)
+                self.assertTrue(all(r["status"] == "PASS" for r in results), results)
         finally:
             suite.ECHO_SERVER.shutdown()
             suite.ECHO_SERVER.server_close()
