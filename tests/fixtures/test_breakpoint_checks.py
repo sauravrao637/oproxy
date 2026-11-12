@@ -53,6 +53,24 @@ class BreakpointChecksTests(unittest.TestCase):
             suite.ECHO_SERVER.shutdown()
             suite.ECHO_SERVER.server_close()
 
+    def test_interruption_cleans_created_rule(self):
+        suite = self.suite()
+        with IsolatedProxy() as proxy:
+            def admin(method, path, **kwargs):
+                response = proxy.client.request(method, proxy.url + "/admin" + path,
+                                                timeout=5, **kwargs)
+                if method == "POST" and path == "/breakpoints":
+                    response.raise_for_status()
+                    raise KeyboardInterrupt("interrupted after creation")
+                return response
+
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaises(KeyboardInterrupt):
+                suite._run_breakpoint_checks(admin, None)
+            response = proxy.client.get(proxy.url + "/admin/breakpoints", timeout=5)
+            response.raise_for_status()
+            self.assertEqual(response.json(), [])
+
     def suite(self):
         with patch.object(sys, "argv", ["e2e_protocol_test.py"]):
             return importlib.import_module("e2e_protocol_test")

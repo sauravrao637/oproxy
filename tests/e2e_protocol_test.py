@@ -1132,9 +1132,17 @@ def _run_breakpoint_checks(admin, proxied):
         record(name, PASS, "BP toggle enabled→disabled confirmed")
         cleanup_bp()
 
-    run_test("Breakpoint CRUD: create and list", t_bp_crud)
-    run_test("Breakpoint hold request and release", t_bp_hold_and_release)
-    run_test("Breakpoint toggle enabled/disabled", t_bp_toggle)
+    def checked_case(check):
+        def execute(name):
+            try:
+                check(name)
+            finally:
+                cleanup_bp()
+        return execute
+
+    run_test("Breakpoint CRUD: create and list", checked_case(t_bp_crud))
+    run_test("Breakpoint hold request and release", checked_case(t_bp_hold_and_release))
+    run_test("Breakpoint toggle enabled/disabled", checked_case(t_bp_toggle))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
