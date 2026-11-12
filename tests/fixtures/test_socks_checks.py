@@ -1,8 +1,40 @@
+import copy
 import socket
 import unittest
 from unittest.mock import MagicMock, patch
 
-from fixtures.socks_checks import assert_invalid_version_rejected, assert_udp_rejected
+from fixtures.socks_checks import assert_invalid_version_rejected, assert_udp_rejected, completed_tunnel, wait_tunnel_capture
+
+
+class TunnelCaptureTests(unittest.TestCase):
+    def test_terminal_destination_protocol_and_counters_required(self):
+        exchange = {
+            "request": {"method": "CONNECT", "uri": "socks5://127.0.0.1:1234"},
+            "protocol_context": {"downstream": "socks5", "body_mode": "tunnel"},
+            "events": [{"type": "tunnel_opened"},
+                       {"type": "tunnel_closed", "bytes_up": 1, "bytes_down": 1}],
+        }
+        self.assertTrue(completed_tunnel(exchange, "127.0.0.1", 1234))
+        for key, field, value in (("request", "method", "GET"),
+                                  ("request", "uri", "socks5://127.0.0.1:5678"),
+                                  ("protocol_context", "downstream", "http1"),
+                                  ("protocol_context", "body_mode", "buffered")):
+            changed = copy.deepcopy(exchange)
+            changed[key][field] = value
+            self.assertFalse(completed_tunnel(changed, "127.0.0.1", 1234))
+        for events in ([], exchange["events"][:1], exchange["events"][1:]):
+            changed = dict(exchange, events=events)
+            self.assertFalse(completed_tunnel(changed, "127.0.0.1", 1234))
+        for counter in ("bytes_up", "bytes_down"):
+            changed = copy.deepcopy(exchange)
+            changed["events"][1][counter] = 0
+            self.assertFalse(completed_tunnel(changed, "127.0.0.1", 1234))
+
+    def test_missing_capture_fails(self):
+        request = MagicMock()
+        request.return_value.json.return_value = {"sessions": []}
+        with self.assertRaisesRegex(AssertionError, "No completed SOCKS5"):
+            wait_tunnel_capture(request, "127.0.0.1", 1234, timeout=.01)
 
 
 class InvalidVersionTests(unittest.TestCase):

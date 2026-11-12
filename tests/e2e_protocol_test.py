@@ -498,29 +498,37 @@ def section_socks5():
         record(name, PASS, "HTTP GET over SOCKS5 succeeded")
 
     def t_socks5_session_captured(name):
-        clear_sessions()
+        from fixtures.socks_checks import wait_tunnel_capture
+        from uuid import uuid4
+        # A fresh destination distinguishes this tunnel from prior captures.
+        origin = HTTPServer(("127.0.0.1", 0), EchoHandler)
+        worker = threading.Thread(target=origin.serve_forever, daemon=True)
+        worker.start()
+        port = origin.server_address[1]
+        marker = uuid4().hex
         try:
-            sock = socks5_connect_raw(PROXY_HOST, ECHO_PORT)
-            marker = f"socks5-marker-{int(time.time())}"
-            req = f"GET /{marker} HTTP/1.1\r\nHost: 127.0.0.1:{ECHO_PORT}\r\nConnection: close\r\n\r\n"
-            sock.sendall(req.encode())
-            sock.settimeout(3)
-            response = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
-            sock.close()
-            sess = wait_for_session(marker)
-            if sess is not None:
-                record(name, PASS, f"SOCKS5 session captured, id={sess.get('id','?')[:16]}")
-            else:
-                # SOCKS5 tunnels may not be MITM'd (no MITM host cert),
-                # so session capture depends on whether MITM is active
-                record(name, SKIP, "session not captured (MITM may not apply to plain TCP via SOCKS5)")
-        except Exception as e:
-            record(name, FAIL, str(e))
+            with socks5_connect_raw("127.0.0.1", port) as sock:
+                sock.sendall((f"GET /{marker} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                              "Connection: close\r\n\r\n").encode())
+                response = b""
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+            headers, body = response.split(b"\r\n\r\n", 1)
+            assert headers.split(b"\r\n", 1)[0].endswith(b" 200 OK"), headers
+            payload = json.loads(body)
+            assert payload["method"] == "GET" and payload["path"] == f"/{marker}", payload
+            def capture_api(method, path):
+                headers = {"x-oproxy-admin-token": ADMIN_TOKEN} if ADMIN_TOKEN else {}
+                return api(method, path, headers=headers)
+            wait_tunnel_capture(capture_api, "127.0.0.1", port)
+            record(name, PASS, "unique destination, terminal SOCKS5 tunnel and bidirectional bytes verified")
+        finally:
+            origin.shutdown()
+            origin.server_close()
+            worker.join(timeout=3)
 
     def t_socks5_refuses_invalid_version(name):
         from fixtures.socks_checks import assert_invalid_version_rejected

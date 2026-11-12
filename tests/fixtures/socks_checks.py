@@ -1,6 +1,42 @@
 """Verify the supported SOCKS5 command boundary on the wire."""
 
 import socket
+import time
+
+
+def completed_tunnel(exchange, host, port):
+    request = exchange.get("request") or {}
+    protocol = exchange.get("protocol_context") or {}
+    events = exchange.get("events") or []
+    return (request.get("method") == "CONNECT"
+            and request.get("uri") == f"socks5://{host}:{port}"
+            and protocol.get("downstream") == "socks5"
+            and protocol.get("body_mode") == "tunnel"
+            and any(e.get("type") == "tunnel_opened" for e in events)
+            and any(e.get("type") == "tunnel_closed"
+                    and e.get("bytes_up", 0) > 0 and e.get("bytes_down", 0) > 0
+                    for e in events))
+
+
+def wait_tunnel_capture(api_request, host, port, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = api_request("GET", "/api/sessions")
+        response.raise_for_status()
+        payload = response.json()
+        sessions = payload.get("sessions") if isinstance(payload, dict) else payload
+        assert isinstance(sessions, list), "Malformed sessions response"
+        for session in sessions:
+            if (session.get("request") or {}).get("uri") != f"socks5://{host}:{port}":
+                continue
+            response = api_request("GET", f"/api/sessions/{session['id']}")
+            response.raise_for_status()
+            detail = response.json()
+            exchange = detail.get("exchange", detail)
+            if completed_tunnel(exchange, host, port):
+                return exchange
+        time.sleep(.05)
+    raise AssertionError(f"No completed SOCKS5 tunnel capture for {host}:{port}")
 
 
 def assert_invalid_version_rejected(host, port, timeout):
