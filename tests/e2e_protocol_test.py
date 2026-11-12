@@ -429,13 +429,36 @@ def section_https_mitm():
 def section_socks5():
     print("\n── 4. SOCKS5 Proxy ──────────────────────────────────────────────")
 
-    if not socks5_enabled():
-        for t in ("SOCKS5 no-auth handshake completes", "SOCKS5 HTTP GET through tunnel",
-                  "SOCKS5 traffic session captured", "SOCKS5 rejects invalid version"):
-            record(t, SKIP, "SOCKS5 not enabled on this oproxy instance")
+    if socks5_enabled():
+        _run_socks5_cases(PROXY_HOST, SOCKS5_PORT, BASE_URL, ADMIN_TOKEN)
         return
 
-    def socks5_connect_raw(target_host, target_port, src_host=PROXY_HOST, src_port=SOCKS5_PORT):
+    from fixtures.isolated_proxy import IsolatedProxy
+    names = ("SOCKS5 no-auth handshake completes", "SOCKS5 HTTP GET through tunnel",
+             "SOCKS5 traffic session captured", "SOCKS5 rejects invalid version")
+    print("Primary SOCKS5 listener is disabled; checking isolated tested binary")
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            proxy.configure(socks5_port=port)
+            proxy.restart()
+            _run_socks5_cases("127.0.0.1", port, proxy.url, proxy.admin_token)
+    except Exception as exc:
+        # Setup or cleanup failure invalidates the entire isolated execution.
+        del RESULTS[start:]
+        for name in names:
+            record(name, FAIL, f"isolated SOCKS5 prerequisite/lifecycle failed: {exc}")
+    else:
+        for result in RESULTS[start:]:
+            result["detail"] = ("primary listener disabled; isolated tested binary: "
+                                + result.get("detail", ""))
+
+
+def _run_socks5_cases(host, port, base_url, admin_token):
+    def socks5_connect_raw(target_host, target_port, src_host=host, src_port=port):
         """Perform RFC 1928 no-auth SOCKS5 handshake. Return connected socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
@@ -521,8 +544,8 @@ def section_socks5():
             payload = json.loads(body)
             assert payload["method"] == "GET" and payload["path"] == f"/{marker}", payload
             def capture_api(method, path):
-                headers = {"x-oproxy-admin-token": ADMIN_TOKEN} if ADMIN_TOKEN else {}
-                return api(method, path, headers=headers)
+                headers = {"x-oproxy-admin-token": admin_token} if admin_token else {}
+                return requests.request(method, base_url + path, headers=headers, timeout=10)
             wait_tunnel_capture(capture_api, "127.0.0.1", port)
             record(name, PASS, "unique destination, terminal SOCKS5 tunnel and bidirectional bytes verified")
         finally:
@@ -532,7 +555,7 @@ def section_socks5():
 
     def t_socks5_refuses_invalid_version(name):
         from fixtures.socks_checks import assert_invalid_version_rejected
-        assert_invalid_version_rejected(PROXY_HOST, SOCKS5_PORT, 3)
+        assert_invalid_version_rejected(host, port, 3)
         record(name, PASS, "invalid version connection closed/reset")
 
     run_test("SOCKS5 no-auth handshake completes", t_socks5_handshake)
