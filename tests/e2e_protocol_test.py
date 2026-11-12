@@ -1417,25 +1417,8 @@ def section_misc():
         clear_sessions()
 
     def t_session_delete(name):
-        sample_id = f"del-test-{int(time.time())}"
-        sample = {
-            "id": sample_id,
-            "timestamp": utc_iso_z(),
-            "request": {"method": "GET", "uri": "http://del.test/",
-                        "headers": {}, "body": "", "host": "del.test",
-                        "body_bytes": None},
-            "response": None, "metrics": None, "ws_frames": [],
-        }
-        admin("POST", "/sessions/import", json={"sessions": [sample], "merge": False})
-        del_r = admin("DELETE", f"/sessions/{sample_id}")
-        if del_r.ok:
-            sessions = get_sessions()
-            assert not any(s["id"] == sample_id for s in sessions), "session not deleted"
-            record(name, PASS, "individual session delete works")
-        elif del_r.status_code == 404:
-            record(name, SKIP, "per-session DELETE not supported (bulk only)")
-        else:
-            record(name, FAIL, f"delete returned {del_r.status_code}")
+        from fixtures.session_checks import check_session_deletion
+        record(name, PASS, check_session_deletion())
 
     def t_webhooks_crud(name):
         hooks = admin("GET", "/webhooks").json()
