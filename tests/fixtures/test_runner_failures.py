@@ -12,6 +12,24 @@ import unittest
 
 
 class RunnerFailureTests(unittest.TestCase):
+    def test_missing_runner_module_fails_before_matrix_import(self):
+        script = """import builtins
+original = builtins.__import__
+def importing(name, *args, **kwargs):
+    if name == 'yaml':
+        raise ModuleNotFoundError('injected missing yaml prerequisite')
+    if name == 'qa_matrix':
+        raise AssertionError('matrix imported before preflight')
+    return original(name, *args, **kwargs)
+builtins.__import__ = importing
+import qa_runner
+"""
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("missing QA prerequisite", result.stderr)
+        self.assertIn("injected missing yaml", result.stderr)
+
     def test_timeout_reaps_live_isolated_proxy_and_scratch(self):
         result = self.run_fault("timeout")
         combined = result.stdout + result.stderr

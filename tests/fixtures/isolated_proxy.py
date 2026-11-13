@@ -3,10 +3,12 @@
 import os
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 import requests
 import yaml
@@ -68,6 +70,10 @@ class IsolatedProxy:
         return self.start()
 
     def start(self):
+        with socket.socket() as listener:
+            if os.name == "nt":
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            listener.bind(("127.0.0.1", urlsplit(self.url).port))
         env = {k: v for k, v in os.environ.items() if not k.startswith("OPROXY_")}
         env.update(OPROXY_CONFIG=str(self.config_path), OPROXY_UPDATE_CHECK="false")
         if self.insecure_upstream is not None:
@@ -83,6 +89,13 @@ class IsolatedProxy:
                 if self.client.get(self.url + "/health", timeout=.5).ok:
                     response = self.client.get(self.url + "/admin/ca", timeout=3)
                     response.raise_for_status()
+                    owned_ca = (self.root / "certs" / "root.crt").read_text(encoding="utf-8")
+                    try:
+                        same_ca = ssl.PEM_cert_to_DER_cert(response.text) == ssl.PEM_cert_to_DER_cert(owned_ca)
+                    except ValueError:
+                        same_ca = False
+                    if not same_ca or self.process.poll() is not None:
+                        raise RuntimeError("Readiness response does not belong to the isolated proxy")
                     self.ca_path = self.root / "client-ca.pem"
                     self.ca_path.write_text(response.text, encoding="utf-8")
                     return self
