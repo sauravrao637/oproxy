@@ -1609,58 +1609,56 @@ def section_misc():
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 14: DNS OVERRIDES
 # ──────────────────────────────────────────────────────────────────────────────
+def _check_dns(admin, proxied=None):
+    from uuid import uuid4
+
+    host = "dns-" + uuid4().hex + ".test"
+    path = "/" + uuid4().hex
+
+    def rules():
+        response = admin("GET", "/dns")
+        response.raise_for_status()
+        return response.json()
+
+    original = rules()
+    expected = dict(original, **{host: "127.0.0.1"})
+    try:
+        response = admin("POST", "/dns", json=expected)
+        response.raise_for_status()
+        assert rules() == expected, "DNS override map did not preserve exact values"
+        if proxied is not None:
+            response = proxied("GET", f"http://{host}:{ECHO_PORT}{path}")
+            assert response.status_code == 200, f"DNS redirect status: {response.status_code}"
+            body = response.json()
+            assert body.get("method") == "GET", f"DNS redirect method: {body}"
+            assert body.get("path") == path, f"DNS redirect path: {body}"
+    finally:
+        admin("DELETE", "/dns/" + host).raise_for_status()
+        assert rules() == original, "DNS cleanup did not restore original map"
+
+
 def section_dns():
     print("\n── 14. DNS Overrides ────────────────────────────────────────────")
 
-    def t_dns_crud(name):
-        # DNS uses /admin/dns with {host: ip} map, DELETE by /admin/dns/{host}
-        r = admin("GET", "/dns")
-        assert r.ok, f"DNS GET failed: {r.status_code}"
-        existing = r.json()
+    def check(name, redirect):
+        from fixtures.isolated_proxy import IsolatedProxy
 
-        # Add our test entry
-        new_map = dict(existing)
-        new_map["ua-dns-test.example.com"] = "127.0.0.1"
-        r2 = admin("POST", "/dns", json=new_map)
-        assert r2.ok or r2.status_code in (200, 201, 204), \
-            f"DNS POST failed: {r2.status_code} {r2.text}"
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
 
-        rules2 = admin("GET", "/dns").json()
-        assert "ua-dns-test.example.com" in rules2, f"key missing: {rules2}"
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=5, **kwargs)
 
-        del_r = admin("DELETE", "/dns/ua-dns-test.example.com")
-        assert del_r.ok, f"DNS DELETE failed: {del_r.status_code}"
+            def isolated_request(method, url):
+                return traffic.request(method, url, proxies={"http": proxy.url}, timeout=5)
 
-        rules3 = admin("GET", "/dns").json()
-        assert "ua-dns-test.example.com" not in rules3, "key not deleted"
-        record(name, PASS, "DNS override CRUD: add to map → list → delete by host")
+            _check_dns(isolated_admin, isolated_request if redirect else None)
+        record(name, PASS, "isolated unique DNS override verified and removed" +
+               ("; exact local GET response verified" if redirect else ""))
 
-    def t_dns_redirect_traffic(name):
-        # Set DNS override: ua-dns-target.example.com → 127.0.0.1
-        existing = admin("GET", "/dns").json()
-        new_map = dict(existing)
-        new_map["ua-dns-target.example.com"] = "127.0.0.1"
-        r = admin("POST", "/dns", json=new_map)
-        assert r.ok or r.status_code in (200, 201, 204), \
-            f"DNS POST failed: {r.status_code}"
-        time.sleep(0.3)
-
-        # Request to ua-dns-target.example.com:<ECHO_PORT> via proxy
-        r2 = proxied("GET", f"http://ua-dns-target.example.com:{ECHO_PORT}/dns-redir-test")
-        # Cleanup
-        admin("DELETE", "/dns/ua-dns-target.example.com")
-
-        if r2.ok:
-            d = r2.json()
-            assert d["path"] == "/dns-redir-test"
-            record(name, PASS, "DNS override redirected traffic to echo server")
-        elif r2.status_code in (502, 503, 504):
-            record(name, SKIP, f"DNS redirect may need same port as echo (status={r2.status_code})")
-        else:
-            record(name, SKIP, f"unexpected status {r2.status_code} {r2.text[:60]}")
-
-    run_test("DNS override CRUD lifecycle", t_dns_crud)
-    run_test("DNS override redirects proxied traffic", t_dns_redirect_traffic)
+    run_test("DNS override CRUD lifecycle", lambda name: check(name, False))
+    run_test("DNS override redirects proxied traffic", lambda name: check(name, True))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
