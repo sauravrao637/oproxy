@@ -41,11 +41,21 @@ class RequiredReportTests(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
         report = namespace["_print_final_summary"]
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertTrue(report([("HTTP", "response", True)]))
+            required = {("HTTP", "response")}
+            self.assertTrue(report([("HTTP", "response", True)], required))
             for results in ([], [("HTTP", "response", None)],
                             [("HTTP", "response", False)],
                             [("HTTP", "response", True)] * 2):
-                self.assertFalse(report(results))
+                self.assertFalse(report(results, required))
+            from fixtures.protocol_inventory import required_protocol_cases
+            for options in ((True, True, True, False), (True, True, False, False),
+                            (True, False, False, True)):
+                required = required_protocol_cases(*options)
+                results = [(group, name, True) for group, name in sorted(required)]
+                self.assertTrue(report(results, required))
+                for index in range(len(results)):
+                    self.assertFalse(report(results[:index] + results[index + 1:], required))
+                self.assertFalse(report(results + [("extra", "unexpected", True)], required))
 
 
 if __name__ == "__main__":

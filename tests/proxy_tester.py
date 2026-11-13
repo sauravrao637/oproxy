@@ -2909,7 +2909,7 @@ def test_http3_session_events(h3_proxy_url, http_proxy_url, target_host, target_
 # ----------------------------------------------------------------------
 # Main inner test runner
 # ----------------------------------------------------------------------
-def _print_final_summary(all_results):
+def _print_final_summary(all_results, required_cases):
     print("\n" + "="*40)
     print("FINAL TEST SUMMARY")
     print("-"*40)
@@ -2921,8 +2921,13 @@ def _print_final_summary(all_results):
         print(f"  [{proxy_type}] {name}: {status}")
     print(f"\n{passed}/{total} tests passed" + (f" ({skipped} skipped)" if skipped else ""))
     names = [(proxy_type, name) for proxy_type, name, _ in all_results]
-    return (bool(all_results) and skipped == 0 and passed == total
-            and len(names) == len(set(names)))
+    missing = set(required_cases) - set(names)
+    unexpected = set(names) - set(required_cases)
+    if missing or unexpected:
+        print(f"Incomplete required coverage: missing={sorted(missing)}, "
+              f"unexpected={sorted(unexpected)}")
+    return (bool(required_cases) and bool(all_results) and skipped == 0 and passed == total
+            and not missing and not unexpected and len(names) == len(set(names)))
 
 
 def run_tests():
@@ -2969,6 +2974,8 @@ def run_tests():
     http1_base_url = f"http://{target_host}:{http1_port}"
 
     all_results = []
+    from fixtures.protocol_inventory import required_protocol_cases
+    required_cases = required_protocol_cases(http_proxy, socks_proxy, h3_proxy, expect_limits)
 
     if expect_limits:
         print("\n=== Testing limits profile:", http_proxy)
@@ -2986,7 +2993,7 @@ def run_tests():
             http_proxy, http1_base_url, timeout, verbose
         ))
 
-        ok = _print_final_summary(all_results)
+        ok = _print_final_summary(all_results, required_cases)
         server_manager.stop_all()
         if not ok:
             sys.exit(1)
@@ -3120,7 +3127,7 @@ def run_tests():
             h3_proxy, http_proxy, target_host, http1_port, timeout, verbose
         ))
 
-    ok = _print_final_summary(all_results)
+    ok = _print_final_summary(all_results, required_cases)
     server_manager.stop_all()
     if not ok:
         sys.exit(1)
