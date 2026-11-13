@@ -1286,6 +1286,44 @@ def _run_rewrite_checks(admin, proxied):
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 10: MAP REMOTE & ACCESS RULES
 # ──────────────────────────────────────────────────────────────────────────────
+def _check_access_block(admin, proxied):
+    import uuid
+
+    rule_name = "ua-access-" + uuid.uuid4().hex
+    request_path = "/" + rule_name
+    url = echo_url(request_path)
+
+    def assert_forwarded():
+        response = proxied("GET", url)
+        assert response.status_code == 200, f"forwarding status: {response.status_code}"
+        body = response.json()
+        assert body.get("method") == "GET", f"forwarding method: {body}"
+        assert body.get("path") == request_path, f"forwarding path: {body}"
+
+    def cleanup():
+        response = admin("GET", "/access-rules")
+        response.raise_for_status()
+        for rule in response.json():
+            if rule.get("name") == rule_name:
+                admin("DELETE", f"/access-rules/{rule['id']}").raise_for_status()
+
+    assert_forwarded()
+    try:
+        response = admin("POST", "/access-rules", json={
+            "id": "", "name": rule_name, "enabled": True,
+            "location": {"host": "127.0.0.1", "path": request_path,
+                         "port": ECHO_PORT, "protocol": "http", "query": None,
+                         "methods": ["GET"], "mode": "glob"},
+            "action": "block",
+        })
+        response.raise_for_status()
+        blocked = proxied("GET", url)
+        assert blocked.status_code == 403, f"access rule did not block: {blocked.status_code}"
+    finally:
+        cleanup()
+    assert_forwarded()
+
+
 def section_mappings():
     print("\n── 10. Map Remote & Access Rules ────────────────────────────────")
 
@@ -1314,35 +1352,21 @@ def section_mappings():
         record(name, PASS, "map-remote CRUD: create → list → delete")
 
     def t_access_block_rule(name):
-        # Cleanup
-        rules = admin("GET", "/access-rules").json()
-        for r in rules:
-            if str(r.get("name","")).startswith("ua-access-"):
-                admin("DELETE", f"/access-rules/{r['id']}")
+        from fixtures.isolated_proxy import IsolatedProxy
 
-        # Create block rule
-        r = admin("POST", "/access-rules", json={
-            "id": "", "name": "ua-access-block", "enabled": True,
-            "location": {"host": None, "path": "/ua-blocked-path",
-                         "port": None, "protocol": None, "query": None,
-                         "methods": [], "mode": "glob"},
-            "action": "block",
-        })
-        assert r.ok, f"create access rule failed: {r.status_code} {r.text}"
-        time.sleep(0.3)
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
 
-        r2 = proxied("GET", echo_url("/ua-blocked-path"))
-        if r2.status_code == 403:
-            record(name, PASS, "access block rule: blocked with 403")
-        else:
-            record(name, SKIP,
-                   f"not blocked (path match?), got {r2.status_code}")
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
 
-        # Cleanup
-        rules = admin("GET", "/access-rules").json()
-        for r in rules:
-            if str(r.get("name","")).startswith("ua-access-"):
-                admin("DELETE", f"/access-rules/{r['id']}")
+            def isolated_request(method, url):
+                return traffic.request(method, url, proxies={"http": proxy.url},
+                                       timeout=10)
+
+            _check_access_block(isolated_admin, isolated_request)
+        record(name, PASS, "isolated access rule blocks with 403 and restores local forwarding")
 
     def t_map_local_crud(name):
         rules = admin("GET", "/map-local-rules").json()
