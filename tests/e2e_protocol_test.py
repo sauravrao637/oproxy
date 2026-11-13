@@ -43,6 +43,8 @@ _arg_parser.add_argument(
 _arg_parser.add_argument("--host", default="127.0.0.1", help="oproxy bind/admin host")
 _arg_parser.add_argument("--port", type=int, default=8080, help="oproxy HTTP proxy/admin port")
 _arg_parser.add_argument("--socks-port", type=int, default=1080, help="oproxy SOCKS5 port")
+_arg_parser.add_argument("--upstream-policy", choices=("reject", "accept"),
+                         help="Expected upstream trust policy for a custom port; standard ports use qa-matrix.yaml")
 _args = _arg_parser.parse_args()
 
 PROXY_HOST = _args.host
@@ -383,8 +385,11 @@ def section_https_mitm():
     print("\n── 3. HTTPS / MITM Interception ─────────────────────────────────")
 
     def t_mitm_connect(name):
-        from fixtures.https_checks import check_local_https
-        record(name, PASS, check_local_https())
+        from fixtures.https_checks import (check_local_https, check_primary_https,
+                                          primary_upstream_policy)
+        expected = primary_upstream_policy(PROXY_PORT, _args.upstream_policy)
+        primary = check_primary_https(BASE_URL, ADMIN_TOKEN, expected)
+        record(name, PASS, primary + "; " + check_local_https())
 
     def t_mitm_session_captured(name):
         from fixtures.https_checks import check_local_https

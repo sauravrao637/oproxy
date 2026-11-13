@@ -10,12 +10,48 @@ import unittest
 from unittest.mock import patch
 
 from fixtures.https_checks import (check_local_https, completed_capture,
-                                  request_https, validate_response, wait_capture)
+                                  request_https, validate_response, wait_capture,
+                                  check_primary_https, check_upstream_policy,
+                                  primary_upstream_policy, validate_upstream_rejection)
 from fixtures.https_origin import HttpsOrigin
 from fixtures.isolated_proxy import IsolatedProxy
 
 
 class HttpsChecksTests(unittest.TestCase):
+    def test_profile_expectations(self):
+        self.assertTrue(primary_upstream_policy(8080))
+        self.assertFalse(primary_upstream_policy(8081))
+        self.assertTrue(primary_upstream_policy(8082))
+        with self.assertRaisesRegex(RuntimeError, "Unknown primary profile"):
+            primary_upstream_policy(12345)
+        self.assertFalse(primary_upstream_policy(12345, "reject"))
+        self.assertTrue(primary_upstream_policy(12345, "accept"))
+
+    def test_primary_trust_policy_and_wrong_expectations(self):
+        for value in (None, "0", "false", "invalid", "1", "true", "yes"):
+            with self.subTest(override=value), IsolatedProxy(value) as primary:
+                accept = value in ("1", "true", "yes")
+                detail = check_primary_https(primary.url, primary.admin_token, accept)
+                self.assertIn("primary upstream", detail)
+                with self.assertRaises(AssertionError):
+                    check_primary_https(primary.url, primary.admin_token, not accept)
+
+    def test_rejection_requires_certificate_diagnostic(self):
+        for code, body, status in [(0, "Connection refused", "502"),
+                                   (0, "TLS certificate verification failed", "200"),
+                                   (35, "TLS certificate verification failed", "502")]:
+            with self.subTest(code=code, body=body), self.assertRaises(AssertionError):
+                validate_upstream_rejection(subprocess.CompletedProcess(
+                    [], code, body + "\n" + status, "TLS failed"))
+
+    def test_primary_readiness_failure_cannot_pass_as_rejection(self):
+        failure = subprocess.CompletedProcess([], 7, "\n000", "origin stopped")
+        with IsolatedProxy() as primary, \
+             patch("fixtures.https_checks.request_https", return_value=failure) as request:
+            with self.assertRaisesRegex(AssertionError, "curl exit=7"):
+                check_upstream_policy(primary, False)
+            self.assertEqual(request.call_count, 1)
+
     def test_stopped_origin_fails_after_success(self):
         with HttpsOrigin() as origin, IsolatedProxy("1") as proxy:
             path = "/echo?nonce=stop"
@@ -56,6 +92,8 @@ class HttpsChecksTests(unittest.TestCase):
             suite = importlib.import_module("e2e_protocol_test")
         with IsolatedProxy("1") as primary, patch.object(suite, "RESULTS", []), \
              patch.object(suite, "BASE_URL", primary.url), \
+             patch.object(suite, "ADMIN_TOKEN", primary.admin_token), \
+             patch.object(suite._args, "upstream_policy", "accept"), \
              patch.object(suite, "PROXY_PORT", urlsplit(primary.url).port):
             suite.section_https_mitm()
             self.assertEqual(len(suite.RESULTS), 4)
