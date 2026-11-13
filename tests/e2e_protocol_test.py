@@ -1568,39 +1568,8 @@ def section_misc():
             record(name, FAIL, str(e))
 
     def t_import_export(name):
-        clear_sessions()
-        sid = f"import-export-{int(time.time())}"
-        sample = {
-            "id": sid,
-            "timestamp": utc_iso_z(),
-            "request": {"method": "GET", "uri": "http://export.test/path",
-                        "headers": {}, "body": "", "host": "export.test",
-                        "body_bytes": None},
-            "response": {"status": 200, "headers": {}, "body": "ok",
-                         "request_uri": "http://export.test/path",
-                         "session_id": sid,
-                         "ttfb_ms": 5, "body_ms": 3, "body_bytes": None},
-            "metrics": {"latency_ms": 42, "request_size_bytes": 0,
-                        "response_size_bytes": 2, "status_code": 200,
-                        "ttfb_ms": 5, "body_ms": 3},
-            "ws_frames": [],
-        }
-        r = admin("POST", "/sessions/import", json={"sessions": [sample], "merge": False})
-        assert r.ok, f"import failed: {r.status_code} {r.text}"
-
-        sess = wait_for_session("export.test")
-        assert sess is not None, "imported session not found"
-
-        # Export as HAR — correct path is /admin/sessions/export/har
-        har_r = admin("GET", "/sessions/export/har")
-        if har_r.ok:
-            har = har_r.json()
-            assert "log" in har, f"HAR missing 'log': {list(har.keys())}"
-            assert len(har["log"].get("entries", [])) >= 1
-            record(name, PASS, f"import→session→HAR export: {len(har['log']['entries'])} entries")
-        else:
-            record(name, SKIP, f"HAR export endpoint returned {har_r.status_code}")
-        clear_sessions()
+        from fixtures.har_checks import check_har_export
+        record(name, PASS, check_har_export())
 
     def t_session_delete(name):
         from fixtures.session_checks import check_session_deletion
