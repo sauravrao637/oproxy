@@ -1189,18 +1189,27 @@ def section_rewrites():
 
 
 def _run_rewrite_checks(admin, proxied):
-    def cleanup_rules(prefix="ua-rw-"):
-        rules = admin("GET", "/rule-sets").json()
+    import uuid
+
+    prefix = "ua-rw-" + uuid.uuid4().hex + "-"
+    request_path = "/" + prefix + "/rw-req-hdr-test"
+    response_path = "/" + prefix + "/rw-resp-hdr-test"
+
+    def cleanup_rules():
+        response = admin("GET", "/rule-sets")
+        response.raise_for_status()
+        rules = response.json()
         for r in rules:
             if str(r.get("name", "")).startswith(prefix):
-                admin("DELETE", f"/rule-sets/{r['id']}")
+                response = admin("DELETE", f"/rule-sets/{r['id']}")
+                response.raise_for_status()
 
     def t_rule_add_request_header(name):
         cleanup_rules()
         r = admin("POST", "/rule-sets", json={
-            "id": "", "name": "ua-rw-req-header", "enabled": True,
+            "id": "", "name": prefix + "req-header", "enabled": True,
             "applies_to": "request",
-            "location": {"host": None, "path": "/rw-req-hdr-test",
+            "location": {"host": None, "path": request_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
             "actions": [{"type": "set_header", "name": "x-rewritten", "value": "yes"}],
@@ -1208,7 +1217,7 @@ def _run_rewrite_checks(admin, proxied):
         assert r.ok, f"create rule failed: {r.status_code} {r.text}"
         time.sleep(0.3)
 
-        r2 = proxied("GET", echo_url("/rw-req-hdr-test"))
+        r2 = proxied("GET", echo_url(request_path))
         assert r2.ok, f"proxied request failed: {r2.status_code}"
         d = r2.json()
         hdrs = {k.lower(): v for k, v in d["headers"].items()}
@@ -1219,9 +1228,9 @@ def _run_rewrite_checks(admin, proxied):
     def t_rule_response_header(name):
         cleanup_rules()
         r = admin("POST", "/rule-sets", json={
-            "id": "", "name": "ua-rw-resp-header", "enabled": True,
+            "id": "", "name": prefix + "resp-header", "enabled": True,
             "applies_to": "response",
-            "location": {"host": None, "path": "/rw-resp-hdr-test",
+            "location": {"host": None, "path": response_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
             "actions": [{"type": "set_header", "name": "x-resp-rewritten", "value": "injected"}],
@@ -1229,7 +1238,7 @@ def _run_rewrite_checks(admin, proxied):
         assert r.ok, f"create rule failed: {r.status_code}"
         time.sleep(0.3)
 
-        r2 = proxied("GET", echo_url("/rw-resp-hdr-test"))
+        r2 = proxied("GET", echo_url(response_path))
         injected = r2.headers.get("x-resp-rewritten")
         assert r2.status_code == 200, f"proxied request failed: {r2.status_code}"
         assert injected == "injected", f"wrong or absent response header: {injected!r}"
@@ -1237,10 +1246,10 @@ def _run_rewrite_checks(admin, proxied):
         cleanup_rules()
 
     def t_rule_crud(name):
-        cleanup_rules("ua-rw-crud-")
+        cleanup_rules()
         # Create
         r = admin("POST", "/rule-sets", json={
-            "id": "", "name": "ua-rw-crud-1", "enabled": True,
+            "id": "", "name": prefix + "crud-1", "enabled": True,
             "applies_to": "request",
             "location": {"host": "crud.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
@@ -1261,9 +1270,17 @@ def _run_rewrite_checks(admin, proxied):
         assert not any(ru["id"] == rule_id for ru in rules2), "rule still in list"
         record(name, PASS, "rule CRUD: create → list → delete")
 
-    run_test("Rewrite rule: inject request header", t_rule_add_request_header)
-    run_test("Rewrite rule: inject response header", t_rule_response_header)
-    run_test("Rewrite rule CRUD lifecycle", t_rule_crud)
+    def run_clean(name, check):
+        def wrapped(case_name):
+            try:
+                check(case_name)
+            finally:
+                cleanup_rules()
+        run_test(name, wrapped)
+
+    run_clean("Rewrite rule: inject request header", t_rule_add_request_header)
+    run_clean("Rewrite rule: inject response header", t_rule_response_header)
+    run_clean("Rewrite rule CRUD lifecycle", t_rule_crud)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -31,6 +31,40 @@ class RewriteChecksTests(unittest.TestCase):
             suite.ECHO_SERVER.shutdown()
             suite.ECHO_SERVER.server_close()
 
+    def test_interruption_cleans_only_owned_rules(self):
+        with patch.object(sys, "argv", ["e2e_protocol_test.py"]):
+            suite = importlib.import_module("e2e_protocol_test")
+        with IsolatedProxy() as proxy:
+            endpoint = proxy.url + "/admin/rule-sets"
+            response = proxy.client.post(endpoint, json={
+                "id": "", "name": "ua-rw-preserved", "enabled": True,
+                "applies_to": "request",
+                "location": {"host": None, "path": "/preserved",
+                             "port": None, "protocol": None, "query": None,
+                             "methods": [], "mode": "glob"},
+                "actions": [{"type": "set_header", "name": "x-kept", "value": "1"}],
+            }, timeout=5)
+            response.raise_for_status()
+            initial = proxy.client.get(endpoint, timeout=5).json()
+            names = []
+            for _ in range(2):
+                def admin(method, path, **kwargs):
+                    response = proxy.client.request(method, proxy.url + "/admin" + path,
+                                                    timeout=5, **kwargs)
+                    response.raise_for_status()
+                    if method == "POST":
+                        names.append(kwargs["json"]["name"])
+                        raise KeyboardInterrupt("interrupted after creation")
+                    return response
+
+                with contextlib.redirect_stdout(io.StringIO()), \
+                     self.assertRaises(KeyboardInterrupt):
+                    suite._run_rewrite_checks(admin, None)
+                remaining = proxy.client.get(endpoint, timeout=5)
+                remaining.raise_for_status()
+                self.assertEqual(remaining.json(), initial)
+            self.assertEqual(len(set(names)), 2)
+
     def test_missing_or_wrong_headers_fail(self):
         with patch.object(sys, "argv", ["e2e_protocol_test.py"]):
             suite = importlib.import_module("e2e_protocol_test")
