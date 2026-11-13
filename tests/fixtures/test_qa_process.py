@@ -33,7 +33,7 @@ class ProfileFailureTests(unittest.TestCase):
                  patch.object(qa_process, "build"), \
                  patch.object(qa_process, "wait_for_health", return_value=True), \
                  patch.object(qa_process.subprocess, "Popen", return_value=process), \
-                 patch.object(qa_process.subprocess, "run", side_effect=
+                 patch.object(qa_process, "run_tester", side_effect=
                               subprocess.TimeoutExpired("test.py", 1)):
                 result = qa_process.run_profile("timeout", profile)
             self.assertNotEqual(result["<execution>"], 0)

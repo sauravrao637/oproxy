@@ -12,6 +12,13 @@ import unittest
 
 
 class RunnerFailureTests(unittest.TestCase):
+    def test_timeout_reaps_live_isolated_proxy_and_scratch(self):
+        result = self.run_fault("timeout")
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, combined)
+        self.assertIn("[FAIL] fault /", combined)
+        self.assertIn("Timeout cleanup verified", combined)
+
     def run_fault(self, fault):
         driver = Path(__file__).with_name("runner_fault_driver.py")
         return subprocess.run([sys.executable, str(driver), "runner", fault],

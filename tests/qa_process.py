@@ -6,8 +6,11 @@ or YAML parsing along with it.
 """
 
 import os
+from pathlib import Path
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 try:
@@ -18,6 +21,59 @@ except ImportError:
 from qa_matrix import REPO_ROOT
 
 HEALTH_TIMEOUT_SECS = 20
+
+
+def run_tester(cmd, env, timeout):
+    """Own tester descendants and scratch, including forced timeout cleanup."""
+    with tempfile.TemporaryDirectory(prefix="qa-tester-") as scratch:
+        env = {**env, "TEMP": scratch, "TMP": scratch, "TMPDIR": scratch}
+        job = child = None
+        try:
+            if os.name == "nt":
+                from fixtures.windows_job import WindowsJob
+                job = WindowsJob()
+                # Wait before launch so no descendants can escape job assignment.
+                bootstrap = ("import subprocess,sys; sys.stdin.buffer.read(1); "
+                             "sys.exit(subprocess.call(sys.argv[1:]))")
+                child = subprocess.Popen([sys.executable, "-c", bootstrap, *cmd],
+                                         cwd=REPO_ROOT, env=env, stdin=subprocess.PIPE)
+                job.assign(child)
+                child.stdin.write(b"1")
+                child.stdin.close()
+            else:
+                child = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, start_new_session=True)
+            return child.wait(timeout=timeout)
+        except BaseException:
+            if job is not None:
+                job.terminate()
+            elif child is not None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=10)
+            for path in sorted(Path(scratch).rglob("startup.log"))[:20]:
+                with path.open("rb") as log:
+                    log.seek(max(0, path.stat().st_size - 16384))
+                    print("Timed-out tester diagnostic:\n" +
+                          log.read().decode("utf-8", errors="replace"), file=sys.stderr)
+            raise
+        finally:
+            if job is not None:
+                try:
+                    job.terminate()
+                finally:
+                    job.close()
+            elif child is not None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if child is not None and child.stdin is not None:
+                child.stdin.close()
 
 
 def binary_path():
@@ -85,10 +141,8 @@ def run_profile(name, profile):
             cmd = [sys.executable, script, *entry.get("args", [])]
             print(f"\n--- {entry['script']} ---\n  $ {' '.join(cmd[1:])}")
             test_env = {**os.environ, "OPROXY_TEST_BINARY": os.path.abspath(binary_path())}
-            result = subprocess.run(cmd, cwd=REPO_ROOT, env=test_env,
-                                    timeout=entry.get("timeout", 300))
-            results[entry["script"]] = result.returncode
-    except (OSError, subprocess.SubprocessError) as exc:
+            results[entry["script"]] = run_tester(cmd, test_env, entry.get("timeout", 300))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"  FAIL: profile execution did not complete: {exc}")
         results["<execution>"] = 1
     finally:

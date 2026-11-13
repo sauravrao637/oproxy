@@ -10,6 +10,8 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import time
+from urllib.parse import urlsplit
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -63,6 +65,11 @@ def https_fault(fault):
         result = request_https(proxy, url)
         validate_response(result, path, "runner-fault")
         wait_capture(proxy, url)
+        if fault == "timeout":
+            Path(os.environ["OPROXY_FAULT_STATE"]).write_text(json.dumps({
+                "pid": proxy.process.pid, "url": proxy.url, "root": str(proxy.root),
+                "scratch": tempfile.gettempdir()}), encoding="utf-8")
+            time.sleep(60)
         path = "/echo?nonce=after-fault"
         url = origin.url + path
         if fault == "stopped-origin":
@@ -92,11 +99,41 @@ def runner(fault):
             "update_check": False, "storage_path": str(root / "storage"),
             "mitm": {"enabled": True, "root_ca_path": str(root / "certs")}}), encoding="utf-8")
         profile = {"config": str(config), "port": port, "run": [{
-            "script": str(Path(__file__).resolve()), "args": ["child", fault], "timeout": 45}]}
+            "script": str(Path(__file__).resolve()), "args": ["child", fault],
+            "timeout": 8 if fault == "timeout" else 45}]}
+        state_path = root / "child-state.json"
         with patch.object(qa_process, "build"), patch.object(qa_process, "REPO_ROOT", directory), \
              patch.object(qa_runner, "load_matrix", return_value={"fault": profile}), \
+             patch.dict(os.environ, {"OPROXY_FAULT_STATE": str(state_path)}), \
              patch.object(sys, "argv", ["qa_runner.py", "fault"]):
-            return qa_runner.main()
+            code = qa_runner.main()
+        if fault == "timeout":
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            assert not Path(state["scratch"]).exists(), "Tester scratch retained"
+            assert not Path(state["root"]).exists(), "Isolated proxy secrets retained"
+            try:
+                connection = socket.create_connection(("127.0.0.1", urlsplit(state["url"]).port), timeout=5)
+            except ConnectionRefusedError:
+                pass
+            else:
+                connection.close()
+                raise AssertionError("Timed-out proxy listener still running")
+            if os.name == "nt":
+                import ctypes
+                from ctypes import wintypes
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.OpenProcess.restype = wintypes.HANDLE
+                kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                handle = kernel.OpenProcess(0x100000, False, state["pid"])
+                if handle:
+                    try:
+                        assert kernel.WaitForSingleObject(handle, 0) == 0, "Proxy process still alive"
+                    finally:
+                        kernel.CloseHandle(handle)
+            print("Timeout cleanup verified: isolated listener stopped and private scratch removed")
+        return code
 
 
 if __name__ == "__main__":
