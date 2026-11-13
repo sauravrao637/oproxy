@@ -1381,18 +1381,53 @@ def section_mappings():
 # SECTION 11: MOCK RULES
 # ──────────────────────────────────────────────────────────────────────────────
 def section_mock():
-    print("\n── 11. Mock Rules ───────────────────────────────────────────────")
+    print("\n── 11. Mock Rules ──────────────────────────────────────")
+
+    from fixtures.isolated_proxy import IsolatedProxy
+
+    names = [name for name in REQUIRED_CASES if name.startswith("Mock rule")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
+
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_mock_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated mock prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_mock_checks(admin, proxied):
+    import uuid
+
+    prefix = "ua-mock-" + uuid.uuid4().hex + "-"
+    request_path = "/" + prefix + "intercept"
 
     def cleanup_mocks():
-        rules = admin("GET", "/mock/rules").json()
+        response = admin("GET", "/mock/rules")
+        response.raise_for_status()
+        rules = response.json()
         for r in rules:
-            if str(r.get("name","")).startswith("ua-mock-"):
-                admin("DELETE", f"/mock/rules/{r['id']}")
+            if str(r.get("name","")).startswith(prefix):
+                admin("DELETE", f"/mock/rules/{r['id']}").raise_for_status()
 
     def t_mock_crud(name):
         cleanup_mocks()
         r = admin("POST", "/mock/rules", json={
-            "id": "", "name": "ua-mock-crud", "enabled": True,
+            "id": "", "name": prefix + "crud", "enabled": True,
             "location": {"host": "mock.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
@@ -1402,11 +1437,11 @@ def section_mock():
         assert r.ok, f"create mock failed: {r.status_code} {r.text}"
         # POST returns {"ok":true}; find by name
         rules = admin("GET", "/mock/rules").json()
-        mock = next((ru for ru in rules if ru.get("name") == "ua-mock-crud"), None)
+        mock = next((ru for ru in rules if ru.get("name") == prefix + "crud"), None)
         assert mock is not None, f"ua-mock-crud not in list: {[ru.get('name') for ru in rules]}"
         mock_id = mock["id"]
 
-        admin("DELETE", f"/mock/rules/{mock_id}")
+        admin("DELETE", f"/mock/rules/{mock_id}").raise_for_status()
         rules2 = admin("GET", "/mock/rules").json()
         assert not any(ru["id"] == mock_id for ru in rules2), "mock not deleted"
         record(name, PASS, "mock CRUD: create → list → delete")
@@ -1414,27 +1449,31 @@ def section_mock():
     def t_mock_intercepts_traffic(name):
         cleanup_mocks()
         r = admin("POST", "/mock/rules", json={
-            "id": "", "name": "ua-mock-intercept", "enabled": True,
-            "location": {"host": None, "path": "/ua-mock-path",
+            "id": "", "name": prefix + "intercept", "enabled": True,
+            "location": {"host": None, "path": request_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
             "responses": [{"status": 202, "headers": {"x-mocked": "true"},
                            "body": '{"mocked":true}', "delay_ms": 0}],
         })
         assert r.ok, f"create mock failed: {r.status_code}"
-        time.sleep(0.3)
-
-        r2 = proxied("GET", echo_url("/ua-mock-path"))
-        if r2.status_code == 202:
-            assert "mocked" in r2.text, f"mock body wrong: {r2.text}"
-            record(name, PASS, f"mock intercepted → 202 with custom body")
-        else:
-            record(name, SKIP,
-                   f"not intercepted (path match?), got {r2.status_code} {r2.text[:60]}")
+        r2 = proxied("GET", echo_url(request_path))
+        assert r2.status_code == 202, f"mock status wrong: {r2.status_code}"
+        assert r2.text == '{"mocked":true}', f"mock body wrong: {r2.text}"
+        assert r2.headers.get("x-mocked") == "true", f"mock header wrong: {r2.headers}"
+        record(name, PASS, "mock intercepted with exact status, body and header")
         cleanup_mocks()
 
-    run_test("Mock rule CRUD lifecycle", t_mock_crud)
-    run_test("Mock rule intercepts proxied traffic", t_mock_intercepts_traffic)
+    def run_clean(name, check):
+        def guarded(case_name):
+            try:
+                check(case_name)
+            finally:
+                cleanup_mocks()
+        run_test(name, guarded)
+
+    run_clean("Mock rule CRUD lifecycle", t_mock_crud)
+    run_clean("Mock rule intercepts proxied traffic", t_mock_intercepts_traffic)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
