@@ -48,6 +48,12 @@ def protocol_report(fault):
 
 
 def https_fault(fault):
+    if fault == "interrupted":
+        import signal
+        import proxy_tester as suite
+        print("Interrupting protocol tester before required summary", flush=True)
+        signal.raise_signal(signal.SIGINT)
+        raise AssertionError("Protocol tester ignored interruption")
     if fault == "rule-cleanup":
         import proxy_tester as suite
         from fixtures.isolated_proxy import IsolatedProxy
@@ -105,7 +111,19 @@ def https_fault(fault):
         if fault == "suppressed-capture":
             proxy.client.post(proxy.url + "/admin/capture-filter", timeout=2,
                               json={"mode": "denylist", "hosts": ["127.0.0.1"]}).raise_for_status()
-        result = request_https(proxy, url, ca_path=origin.ca_path if fault == "client-trust" else None)
+        ca_path = origin.ca_path if fault == "client-trust" else None
+        if fault == "missing-ca":
+            ca_path = proxy.root / 'absent-ca.pem'
+        result = request_https(proxy, url, ca_path=ca_path)
+        if fault == "missing-ca":
+            diagnostic = result.stderr.lower()
+            missing_file = (result.returncode == 2 and
+                            'provided to --cacert does not exist' in diagnostic)
+            unreadable_ca = (result.returncode == 77 and
+                             'error setting certificate' in diagnostic)
+            assert missing_file or unreadable_ca, (
+                f"Expected missing CA diagnostic, got {result.returncode}: {result.stderr}")
+            print(f"Missing client CA rejected: curl exit{result.returncode}", flush=True)
         if fault == "client-trust":
             assert result.returncode == 60, f"Expected untrusted client exit60, got {result.returncode}: {result.stderr}"
             print("Untrusted client certificate rejected: curl exit60", flush=True)
@@ -131,8 +149,23 @@ def runner(fault):
         profile = {"config": str(config), "port": port, "run": [{
             "script": str(Path(__file__).resolve()), "args": ["child", fault],
             "timeout": 8 if fault == "timeout" else 45}]}
+        if fault == 'malformed-config':
+            config.write_text('mitm: [unterminated', encoding='utf-8')
+        if fault == 'malformed-port':
+            contents = yaml.safe_load(config.read_text(encoding='utf-8'))
+            contents['port'] = profile['port'] = 'invalid-port'
+            config.write_text(yaml.safe_dump(contents), encoding='utf-8')
         state_path = root / "child-state.json"
+        prepare = qa_process.run_prepared_profile
+        def prepared(*args, **kwargs):
+            if fault == 'inaccessible-scratch':
+                # A directory occupying the config file is a portable write failure;
+                # chmod-based tests can accidentally succeed as root or on Windows.
+                (args[1] / 'config.yaml').mkdir()
+                print('Injected inaccessible profile scratch config file', flush=True)
+            return prepare(*args, **kwargs)
         with patch.object(qa_process, "build"), patch.object(qa_process, "REPO_ROOT", directory), \
+             patch.object(qa_process, 'run_prepared_profile', side_effect=prepared), \
              patch.object(qa_runner, "load_matrix", return_value={"fault": profile}), \
              patch.dict(os.environ, {"OPROXY_FAULT_STATE": str(state_path)}), \
              patch.object(sys, "argv", ["qa_runner.py", "fault"]):

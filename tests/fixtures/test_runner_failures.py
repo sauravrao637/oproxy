@@ -64,6 +64,27 @@ import qa_runner
                 self.assertEqual(result.returncode, 0 if fault == "report-pass" else 1, combined)
                 self.assertIn("[PASS] fault /" if fault == "report-pass" else "[FAIL] fault /", combined)
 
+    def test_invalid_configuration_and_prerequisites_fail(self):
+        for fault, diagnostic in (
+                ('missing-ca', 'Missing client CA rejected: curl exit'),
+                ('malformed-config', 'while parsing a flow sequence'),
+                ('malformed-port', 'Profile listener port must be an integer'),
+                ('inaccessible-scratch', 'Injected inaccessible profile scratch config file')):
+            with self.subTest(fault=fault):
+                result = self.run_fault(fault)
+                combined = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, combined)
+                self.assertIn(diagnostic, combined)
+                self.assertIn('[FAIL] fault /', combined)
+
+    def test_interrupted_protocol_tester_fails_runner(self):
+        result = self.run_fault('interrupted')
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, combined)
+        self.assertIn('Interrupting protocol tester before required summary', combined)
+        self.assertIn('Shutting down...', combined)
+        self.assertIn('[FAIL] fault /', combined)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,7 +94,7 @@ def _handle_signal(signum, frame):
     _shutdown_event.set()
     if server_manager:
         server_manager.stop_all()
-    sys.exit(0)
+    sys.exit(128 + signum)
 
 signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
@@ -529,6 +529,61 @@ class ServerManager:
     def _add_server(self, name, port, shutdown):
         self.servers.append((name, port, shutdown))
 
+    def _start_async_server(self, name, port, serve, ready=None):
+        """Own an async fixture through startup, graceful shutdown and loop close."""
+        stop = threading.Event()
+        loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_forever()
+            finally:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+
+        thread = threading.Thread(target=run, name=f"fixture-{name}", daemon=True)
+        thread.start()
+        future = asyncio.run_coroutine_threadsafe(serve(stop), loop)
+
+        def shutdown():
+            stop.set()
+            try:
+                future.result(timeout=10)
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    raise RuntimeError(f"{name} fixture thread did not stop")
+
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                if future.done():
+                    future.result()
+                    raise RuntimeError(f"{name} fixture exited before readiness")
+                if ready is not None:
+                    if ready.wait(.02):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"{name} fixture readiness timed out")
+                    continue
+                try:
+                    with socket.create_connection((self.target_host, port), timeout=.2):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"{name} fixture readiness timed out")
+                    time.sleep(.02)
+        except BaseException:
+            shutdown()
+            raise
+        self._add_server(name, port, shutdown)
+
     def stop_all(self):
         servers, self.servers = self.servers, []
         failures = []
@@ -937,64 +992,38 @@ class ServerManager:
         import trustme
         _ca = trustme.CA()
         _server_cert = _ca.issue_cert("127.0.0.1", "localhost", self.target_host)
-        self._http2_cert = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-        self._http2_key = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-        _server_cert.cert_chain_pems[0].write_to_path(self._http2_cert.name)
-        _server_cert.private_key_pem.write_to_path(self._http2_key.name)
-        config.certfile = self._http2_cert.name
-        config.keyfile = self._http2_key.name
+        cert_dir = tempfile.TemporaryDirectory(prefix="http2-origin-")
+        config.certfile = os.path.join(cert_dir.name, "cert.pem")
+        config.keyfile = os.path.join(cert_dir.name, "key.pem")
 
-        loop = asyncio.new_event_loop()
-        t = threading.Thread(target=loop.run_forever, daemon=True)
-        t.start()
-
-        async def _serve():
-            # shutdown_trigger must be an async callable (returns awaitable).
-            # _shutdown_event is a threading.Event; poll it from the async loop.
+        async def _serve(stop):
             async def _shutdown_trigger():
-                while not _shutdown_event.is_set():
+                while not stop.is_set():
                     await asyncio.sleep(0.05)
-
-            await hypercorn_serve(
-                app,
-                config,
-                shutdown_trigger=_shutdown_trigger
-            )
-        asyncio.run_coroutine_threadsafe(_serve(), loop)
-        time.sleep(1)
-
-        def shutdown():
-            # Setting the global event causes _shutdown_trigger to return,
-            # which signals Hypercorn to stop gracefully.
-            _shutdown_event.set()
-        self._add_server("HTTP/2", port, shutdown)
+            await hypercorn_serve(app, config, shutdown_trigger=_shutdown_trigger)
+        try:
+            _server_cert.cert_chain_pems[0].write_to_path(config.certfile)
+            _server_cert.private_key_pem.write_to_path(config.keyfile)
+            self._start_async_server("HTTP/2", port, _serve)
+        except BaseException:
+            cert_dir.cleanup()
+            raise
+        self._add_server("HTTP/2 certificates", port, cert_dir.cleanup)
         return port
 
     # --- WebSocket echo server ---
     def start_websocket(self):
         port = free_port()
-        server_holder = {}
+        ready = threading.Event()
         async def echo(websocket):
             async for message in websocket:
                 await websocket.send(message)
-        async def _serve():
-            server = await websockets.serve(echo, self.target_host, port)
-            server_holder['server'] = server
-            await server.wait_closed()
-        loop = asyncio.new_event_loop()
-        t = threading.Thread(target=loop.run_forever, daemon=True)
-        t.start()
-        asyncio.run_coroutine_threadsafe(_serve(), loop)
-        time.sleep(0.5)
-        def shutdown():
-            async def _stop():
-                server = server_holder.get('server')
-                if server:
-                    server.close()
-                    await server.wait_closed()
-                loop.call_soon_threadsafe(loop.stop)
-            asyncio.run_coroutine_threadsafe(_stop(), loop)
-        self._add_server("WebSocket", port, shutdown)
+        async def _serve(stop):
+            async with websockets.serve(echo, self.target_host, port):
+                ready.set()
+                while not stop.is_set():
+                    await asyncio.sleep(.05)
+        self._start_async_server("WebSocket", port, _serve, ready)
         return port
 
     # --- gRPC echo server ---
@@ -3143,24 +3172,7 @@ def run_tests():
             socks_proxy, http_proxy, target_host, http1_port, timeout, verbose
         ))
 
-        udp_port = free_port()
-        def udp_echo_server():
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(('127.0.0.1', udp_port))
-            while not _shutdown_event.is_set():
-                try:
-                    data, addr = sock.recvfrom(1024)
-                    sock.sendto(data, addr)
-                except socket.timeout:
-                    continue
-                except:
-                    break
-            sock.close()
-        udp_thread = threading.Thread(target=udp_echo_server, daemon=True)
-        udp_thread.start()
-        server_manager._add_server("UDP Echo", udp_port, lambda: None)
-        time.sleep(0.2)
-        socks_add("SOCKS5 UDP", test_socks5_udp(socks_proxy, target_host, udp_port, timeout, verbose))
+        socks_add("SOCKS5 UDP", test_socks5_udp(socks_proxy, target_host, 0, timeout, verbose))
 
     if h3_proxy:
         print("\n=== Testing HTTP/3 proxy:", h3_proxy)

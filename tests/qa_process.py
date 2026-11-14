@@ -140,6 +140,8 @@ def check_listener_ports(config):
     for port, kind in listeners:
         if port is None:
             continue
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError(f"Profile listener port must be an integer from 1 to 65535: {port!r}")
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         with socket.socket(family, kind) as listener:
             if os.name == "nt":
@@ -171,7 +173,10 @@ def run_prepared_profile(profile, root):
     config = yaml.safe_load((Path(REPO_ROOT) / profile["config"]).read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise ValueError("Profile config must be a mapping")
-    if config.get("port") != profile["port"] or not config.get("mitm", {}).get("enabled"):
+    mitm = config.get("mitm")
+    if not isinstance(mitm, dict):
+        raise ValueError("Profile MITM config must be a mapping")
+    if config.get("port") != profile["port"] or mitm.get("enabled") is not True:
         raise ValueError("Profile requires matching listener port and MITM for owned CA readiness")
     check_listener_ports(config)
     config["storage_path"] = str(root / "storage")

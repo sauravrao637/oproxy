@@ -588,11 +588,14 @@ def section_websocket():
                 await ws.send(f"echo:{msg}")
 
         stop_event = threading.Event()
+        ready = threading.Event()
+        errors = []
         port_holder = [None]
 
         async def server_main():
             async with websockets.serve(ws_handler, "127.0.0.1", 0) as srv:
                 port_holder[0] = list(srv.sockets)[0].getsockname()[1]
+                ready.set()
                 # stop_event is a threading.Event set from another thread; a blocking
                 # .wait() here would freeze this coroutine's event loop, so the
                 # server could accept the TCP connection but never service it.
@@ -600,16 +603,31 @@ def section_websocket():
                     await asyncio.sleep(0.05)
 
         def runner():
-            asyncio.run(server_main())
+            try:
+                asyncio.run(server_main())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                ready.set()
 
-        t = threading.Thread(target=runner, daemon=True)
+        t = threading.Thread(target=runner, name='fixture-e2e-websocket', daemon=True)
         t.start()
-        # Wait for port assignment
-        deadline = time.time() + 3
-        while port_holder[0] is None and time.time() < deadline:
-            time.sleep(0.05)
 
-        return port_holder[0], lambda: stop_event.set()
+        def stop():
+            stop_event.set()
+            t.join(timeout=5)
+            if t.is_alive():
+                raise RuntimeError('WebSocket fixture thread did not stop')
+            if errors:
+                raise RuntimeError(f'WebSocket fixture failed: {errors[0]}') from errors[0]
+
+        try:
+            if not ready.wait(timeout=3) or port_holder[0] is None or errors:
+                raise RuntimeError('WebSocket fixture failed to become ready')
+        except BaseException:
+            stop()
+            raise
+        return port_holder[0], stop
 
     def t_ws_http_upgrade_forwarded(name):
         """Test that WebSocket HTTP upgrade headers are forwarded through the proxy.
@@ -619,8 +637,9 @@ def section_websocket():
 
         try:
             ws_port, ws_stop = start_ws_echo_server()
-        except Exception:
-            pass
+        except Exception as exc:
+            record(name, FAIL, f'WebSocket fixture startup failed: {exc}')
+            return
 
         if ws_port is None:
             # Try with simple socket-based "WebSocket" server
@@ -635,6 +654,7 @@ def section_websocket():
             return
 
         # Connect raw socket through HTTP proxy CONNECT
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
@@ -690,6 +710,8 @@ def section_websocket():
         except Exception as e:
             record(name, FAIL, f"{type(e).__name__}: {e}")
         finally:
+            if sock is not None:
+                sock.close()
             if ws_stop:
                 ws_stop()
 
