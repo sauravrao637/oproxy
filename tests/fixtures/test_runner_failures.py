@@ -51,6 +51,8 @@ import qa_runner
                 ("report-skip", "SKIP"),
                 ("missing-curl", "Missing required prerequisite: curl"),
                 ("missing-binary", "Missing tested binary"),
+                ("missing-fixture-module", "injected missing fixture prerequisite: trustme"),
+                ("client-trust", "Untrusted client certificate rejected: curl exit60"),
                 ("stopped-origin", "AssertionError"),
                 ("wrong-response", "Unexpected HTTPS payload"),
                 ("suppressed-capture", "No completed GET capture")):

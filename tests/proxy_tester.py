@@ -63,6 +63,7 @@ import zlib
 import json
 import struct
 from urllib.parse import urlparse
+from uuid import uuid4
 from concurrent import futures
 from io import BytesIO
 
@@ -529,12 +530,17 @@ class ServerManager:
         self.servers.append((name, port, shutdown))
 
     def stop_all(self):
-        for name, port, shutdown in self.servers:
+        servers, self.servers = self.servers, []
+        failures = []
+        for name, port, shutdown in servers:
             try:
                 shutdown()
                 print(f"Stopped {name} server on port {port}")
             except Exception as e:
                 print(f"Error stopping {name} server: {e}")
+                failures.append(f"{name}: {e}")
+        if failures:
+            raise RuntimeError("Fixture cleanup failed: " + "; ".join(failures))
 
     # --- HTTP/1.1 server ---
     def start_http1(self):
@@ -720,7 +726,13 @@ class ServerManager:
         httpd = ThreadingHTTPServer((self.target_host, port), Handler)
         t = threading.Thread(target=httpd.serve_forever, daemon=True)
         t.start()
-        self._add_server("HTTP/1.1", port, lambda: httpd.shutdown())
+        def shutdown():
+            httpd.shutdown()
+            httpd.server_close()
+            t.join(timeout=2)
+            if t.is_alive():
+                raise RuntimeError("HTTP fixture did not stop")
+        self._add_server("HTTP/1.1", port, shutdown)
         return port
 
     # --- HTTPS/1.1 server (TLS, no h2 ALPN) — for CONNECT-tunnel tests ---
@@ -765,7 +777,15 @@ class ServerManager:
         httpsd.socket = ctx.wrap_socket(httpsd.socket, server_side=True)
         t = threading.Thread(target=httpsd.serve_forever, daemon=True)
         t.start()
-        self._add_server("HTTPS/1.1", port, lambda: httpsd.shutdown())
+        def shutdown():
+            httpsd.shutdown()
+            httpsd.server_close()
+            t.join(timeout=2)
+            os.unlink(_cfile.name)
+            os.unlink(_kfile.name)
+            if t.is_alive():
+                raise RuntimeError("HTTPS fixture did not stop")
+        self._add_server("HTTPS/1.1", port, shutdown)
         return port
 
     # --- HTTP/2 server (Hypercorn) ---
@@ -1546,20 +1566,7 @@ def test_grpc(proxy_url, target_host, target_port, timeout, verbose=False,
                     )
                 )
 
-            try:
-                _wait_for_recorded_session(session_admin_proxy, matches, timeout, include_bodies=True)
-            except AssertionError:
-                sessions = _recorded_session_details(session_admin_proxy, timeout, include_bodies=True)
-                tunnel_only = any(
-                    (s.get('request') or {}).get('method') == 'CONNECT'
-                    and f"{target_host}:{target_port}" in ((s.get('request') or {}).get('host') or (s.get('request') or {}).get('uri') or '')
-                    for s in sessions
-                )
-                if tunnel_only:
-                    print("[SKIP] gRPC Session Events: proxy recorded CONNECT tunnel only; enable MITM to assert decoded gRPC messages")
-                    print("[PASS] gRPC (unary, server streaming, client streaming, bidirectional)")
-                    return True
-                raise
+            _wait_for_recorded_session(session_admin_proxy, matches, timeout, include_bodies=True)
 
         print("[PASS] gRPC (unary, server streaming, client streaming, bidirectional)")
         return True
@@ -2511,37 +2518,60 @@ def test_capture_filter(proxy_url, base_url, timeout, verbose):
         print("[SKIP] Capture Filter: requires HTTP proxy for admin API")
         return None
     host = urlparse(base_url).hostname
-    sentinel = f'/capfilter-{int(time.time())}'
+    sentinel = f'/capfilter-{uuid4().hex}'
+    original = None
+    success = False
+
+    def request_and_capture(path):
+        url = make_test_url(base_url, path)
+        r = requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        assert r.status_code == 200 and r.content == b'Hello HTTP/1.1', 'fixture response mismatch'
+        return url
+
+    def matches(url):
+        return lambda d: ((d.get('request') or {}).get('uri') == url
+                          and (d.get('request') or {}).get('method') == 'GET'
+                          and (d.get('response') or {}).get('status') == 200
+                          and (d.get('metrics') or {}).get('status_code') == 200)
+
     try:
+        current = _admin_request(proxy_url, 'GET', '/admin/capture-filter', timeout)
+        current.raise_for_status()
+        original = current.json()
+        before = request_and_capture(sentinel + '-before')
+        _wait_for_recorded_session(proxy_url, matches(before), timeout)
         sr = _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
                             json={'mode': 'denylist', 'hosts': [host]})
-        if sr.status_code not in (200, 201, 204):
-            print(f"[FAIL] Capture Filter: set returned {sr.status_code}")
-            return False
-        r = requests.get(make_test_url(base_url, sentinel),
-                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
-        if r.status_code != 200:
-            print(f"[FAIL] Capture Filter: request returned {r.status_code}")
-            return False
-        # Give the recorder a moment; the filtered request must NOT appear.
-        time.sleep(1.0)
-        details = _recorded_session_details(proxy_url, timeout)
-        if any(sentinel in ((d.get('request') or {}).get('uri') or '') for d in details):
-            print("[FAIL] Capture Filter: filtered request was recorded anyway")
-            return False
-        print("[PASS] Capture Filter (filtered host not recorded)")
-        return True
+        sr.raise_for_status()
+        excluded = request_and_capture(sentinel + '-excluded')
+        deadline = time.monotonic() + min(timeout, 2)
+        while time.monotonic() < deadline:
+            details = _recorded_session_details(proxy_url, timeout)
+            assert not any((d.get('request') or {}).get('uri') == excluded for d in details), \
+                'filtered request was recorded'
+            time.sleep(.1)
+        success = True
     except Exception as e:
         print(f"[FAIL] Capture Filter: {e}")
         if verbose:
             traceback.print_exc()
-        return False
     finally:
-        try:
-            _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
-                           json={'mode': 'disabled', 'hosts': []})
-        except Exception:
-            pass
+        if original is not None:
+            try:
+                restored = _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
+                                          json=original)
+                restored.raise_for_status()
+                current = _admin_request(proxy_url, 'GET', '/admin/capture-filter', timeout)
+                current.raise_for_status()
+                assert current.json() == original, 'capture-filter state not restored'
+                after = request_and_capture(sentinel + '-after')
+                _wait_for_recorded_session(proxy_url, matches(after), timeout)
+            except Exception as exc:
+                print(f"[FAIL] Capture Filter restoration: {exc}")
+                success = False
+    if success:
+        print("[PASS] Capture Filter (forwarding verified; recording excluded and restored)")
+    return success
 
 
 def test_lua_script(proxy_url, target_host, target_port, timeout, verbose):
@@ -2666,13 +2696,15 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
     if not proxy_url.startswith('http://'):
         print("[SKIP] Breakpoint: requires HTTP proxy for admin API")
         return None
-    sentinel = f'/bp-{int(time.time())}'
+    sentinel = f'/bp-{uuid4().hex}'
     rule = {
         'location': {'path': sentinel, 'mode': 'glob'},
         'bp_type': 'Request',
         'enabled': True,
     }
     rule_id = None
+    pending_id = None
+    worker = None
     result = {}
 
     def fire():
@@ -2696,13 +2728,14 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
 
         # Wait for the request to show up as paused.
         pending_id = None
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             pr = _admin_request(proxy_url, 'GET', '/admin/breakpoints/pending', timeout)
             if pr.status_code == 200:
                 for p in (pr.json() or []):
-                    uri = p.get('uri') or (p.get('request') or {}).get('uri') or ''
-                    if sentinel in uri or len(pr.json()) == 1:
+                    request = (p.get('context') or {}).get('Request') or {}
+                    if (p.get('bp_type') == 'Request' and request.get('method') == 'GET'
+                            and request.get('uri') == f"http://{target_host}:{target_port}{sentinel}"):
                         pending_id = p.get('id')
                         break
             if pending_id:
@@ -2710,8 +2743,9 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
             time.sleep(0.2)
 
         if not pending_id:
-            print("[SKIP] Breakpoint: request did not pause (breakpoints may be disabled in this build)")
-            return None
+            raise AssertionError("matching request did not enter the pending breakpoint queue")
+
+        assert worker.is_alive() and not result, 'request completed before breakpoint release'
 
         rr = _admin_request(proxy_url, 'POST',
                             f'/admin/breakpoints/pending/{pending_id}/resolve', timeout,
@@ -2719,9 +2753,10 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
         if rr.status_code not in (200, 204):
             print(f"[FAIL] Breakpoint: resolve returned {rr.status_code}")
             return False
+        pending_id = None
 
         worker.join(timeout + 5)
-        if result.get('status') == 200 and b'Hello' in result.get('body', b''):
+        if not worker.is_alive() and result.get('status') == 200 and result.get('body') == b'Hello HTTP/1.1':
             print("[PASS] Breakpoint (pause + resume continued upstream)")
             return True
         print(f"[FAIL] Breakpoint: resumed request result={result}")
@@ -2732,11 +2767,24 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
+        if pending_id:
+            try:
+                _admin_request(proxy_url, 'POST',
+                               f'/admin/breakpoints/pending/{pending_id}/resolve', timeout,
+                               json={'action': 'continue'}).raise_for_status()
+            except Exception as exc:
+                print(f"[FAIL] Breakpoint pending cleanup: {exc}")
         if rule_id:
             try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/breakpoints/{rule_id}', timeout)
-            except Exception:
-                pass
+                _admin_request(proxy_url, 'DELETE', f'/admin/breakpoints/{rule_id}', timeout).raise_for_status()
+            except Exception as exc:
+                print(f"[FAIL] Breakpoint rule cleanup: {exc}")
+                return False
+        if worker is not None:
+            worker.join(timeout + 11)
+            if worker.is_alive():
+                print("[FAIL] Breakpoint request worker did not stop")
+                return False
 
 
 # HTTP/3 tests — all skip gracefully when aioquic is absent or H3 is disabled

@@ -48,6 +48,16 @@ def protocol_report(fault):
 
 
 def https_fault(fault):
+    if fault == "missing-fixture-module":
+        import builtins
+        importing = builtins.__import__
+        def missing(name, *args, **kwargs):
+            if name == "trustme":
+                raise ModuleNotFoundError("injected missing fixture prerequisite: trustme")
+            return importing(name, *args, **kwargs)
+        with patch.object(builtins, "__import__", side_effect=missing):
+            from fixtures.https_origin import HttpsOrigin
+        raise AssertionError("Missing fixture prerequisite was ignored")
     from fixtures.https_checks import check_local_https, request_https, validate_response, wait_capture
     from fixtures.https_origin import HttpsOrigin
     from fixtures.isolated_proxy import IsolatedProxy
@@ -78,7 +88,10 @@ def https_fault(fault):
         if fault == "suppressed-capture":
             proxy.client.post(proxy.url + "/admin/capture-filter", timeout=2,
                               json={"mode": "denylist", "hosts": ["127.0.0.1"]}).raise_for_status()
-        result = request_https(proxy, url)
+        result = request_https(proxy, url, ca_path=origin.ca_path if fault == "client-trust" else None)
+        if fault == "client-trust":
+            assert result.returncode == 60, f"Expected untrusted client exit60, got {result.returncode}: {result.stderr}"
+            print("Untrusted client certificate rejected: curl exit60", flush=True)
         if fault == "wrong-response":
             result.stdout = json.dumps({"method": "GET", "path": path, "nonce": "wrong"}) + "\n200"
         validate_response(result, path, "after-fault")
