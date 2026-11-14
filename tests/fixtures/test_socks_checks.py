@@ -76,6 +76,25 @@ class SocksReplyTests(unittest.TestCase):
     def test_complete_rejection(self):
         self.execute([b"\x05", b"\x00", b"\x05\x07\x00\x01", b"\x00" * 6])
 
+    def test_fragmented_requests_require_complete_reply(self):
+        for split_at in (4, 9):
+            for response in (b"\x05\x07\x00\x01" + b"\x00" * 6,
+                             ConnectionResetError(), socket.timeout(), b""):
+                with self.subTest(split_at=split_at, response=response):
+                    connection = MagicMock()
+                    connection.__enter__.return_value = connection
+                    connection.recv.side_effect = [b"\x05\x00", response]
+                    with patch("fixtures.socks_checks.socket.create_connection", return_value=connection), \
+                         patch("fixtures.socks_checks.time.sleep"):
+                        if isinstance(response, bytes) and response:
+                            assert_udp_rejected("127.0.0.1", 1080, 1, split_at=split_at)
+                        else:
+                            with self.assertRaises((AssertionError, ConnectionResetError, socket.timeout)):
+                                assert_udp_rejected("127.0.0.1", 1080, 1, split_at=split_at)
+                    fragments = [call.args[0] for call in connection.sendall.call_args_list][1:]
+                    self.assertEqual(len(fragments[0]), split_at)
+                    self.assertEqual(b"".join(fragments), b"\x05\x03\x00\x01" + b"\x00" * 6)
+
     def test_wrong_truncated_and_timed_out_replies_fail(self):
         for chunks in ([b"\x05\x00", b"\x05\x00\x00\x01" + b"\x00" * 6],
                        [b"\x05\x00", b"\x05\x07", b""],

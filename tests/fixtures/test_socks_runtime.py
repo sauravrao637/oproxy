@@ -24,6 +24,11 @@ class SocksRuntimeTests(unittest.TestCase):
                 port = reservation.getsockname()[1]
             proxy.configure(socks5_port=port)
             proxy.restart()
+            # Repeated rejection must leave the same listener able to CONNECT
+            # and capture a terminal tunnel in the required section below.
+            for split_at in (None, 4, 9):
+                for _ in range(10):
+                    assert_udp_rejected("127.0.0.1", port, 3, split_at=split_at)
             results = []
             suite.start_echo_server()
             try:
@@ -82,7 +87,8 @@ class SocksRuntimeTests(unittest.TestCase):
             proxy.configure(socks5_port=port)
             proxy.restart()
             # A valid negotiation verifies the listener before testing rejection.
-            assert_udp_rejected("127.0.0.1", port, 3)
+            for split_at in (None, 4, 9):
+                assert_udp_rejected("127.0.0.1", port, 3, split_at=split_at)
             assert_invalid_version_rejected("127.0.0.1", port, 3)
 
 

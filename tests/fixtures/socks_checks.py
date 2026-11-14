@@ -61,12 +61,19 @@ def receive_exact(connection, size):
     return data
 
 
-def assert_udp_rejected(host, port, timeout):
+def assert_udp_rejected(host, port, timeout, split_at=None):
     with socket.create_connection((host, port), timeout=timeout) as connection:
         connection.settimeout(timeout)
         connection.sendall(b"\x05\x01\x00")
         assert receive_exact(connection, 2) == b"\x05\x00", "Invalid SOCKS5 negotiation"
-        connection.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+        request = b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00"
+        if split_at is None:
+            connection.sendall(request)
+        else:
+            assert 0 < split_at < len(request), "Invalid request fragment boundary"
+            connection.sendall(request[:split_at])
+            time.sleep(.025)
+            connection.sendall(request[split_at:])
         reply = receive_exact(connection, 10)
         assert reply == b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00", \
             f"Expected complete command-not-supported reply, got {reply!r}"

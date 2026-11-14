@@ -269,14 +269,6 @@ pub async fn handshake(stream: &mut TcpStream) -> Result<Socks5Target, Socks5Err
         return Err(Socks5Error::BadVersion(hdr[0]));
     }
     let cmd = hdr[1];
-    if cmd != 0x01 {
-        // Only CONNECT (0x01) supported; send COMMAND NOT SUPPORTED
-        stream
-            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            .await
-            .ok();
-        return Err(Socks5Error::UnsupportedCommand(cmd));
-    }
     let addr_type = hdr[3];
 
     let host = match addr_type {
@@ -314,6 +306,13 @@ pub async fn handshake(stream: &mut TcpStream) -> Result<Socks5Target, Socks5Err
     let port_hi = stream.read_u8().await.map_err(|_| Socks5Error::Io)?;
     let port_lo = stream.read_u8().await.map_err(|_| Socks5Error::Io)?;
     let port = u16::from_be_bytes([port_hi, port_lo]);
+
+    if cmd != 0x01 {
+        // Consume the declared frame before closing so unread address/port
+        // bytes cannot reset the connection and discard the rejection reply.
+        send_failure_reply(stream, 0x07).await?;
+        return Err(Socks5Error::UnsupportedCommand(cmd));
+    }
 
     debug!("SOCKS5 CONNECT {} {}", host, port);
 
@@ -622,25 +621,202 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_command_rejected() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+    async fn unsupported_request_waits_for_complete_frame() {
+        for mut packet in [
+            build_connect_packet([127, 0, 0, 1], 80),
+            build_ipv6_connect_packet(Ipv6Addr::LOCALHOST.octets(), 80),
+            build_domain_connect_packet("example.test", 80),
+            build_domain_connect_packet(&"a".repeat(255), 80),
+        ] {
+            for command in [2, 3] {
+                packet[4] = command;
+                for split in [7, packet.len() - 1, packet.len()] {
+                    timeout(Duration::from_secs(3), async {
+                        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+                        let (mut stream, _) = listener.accept().await.unwrap();
+                        let server = tokio::spawn(async move { handshake(&mut stream).await });
+                        client.write_all(&packet[..split]).await.unwrap();
+                        let mut greeting = [0; 2];
+                        client.read_exact(&mut greeting).await.unwrap();
+                        assert_eq!(greeting, [5, 0]);
+                        let early_reply = if split < packet.len() {
+                            let mut byte = [0];
+                            let result = timeout(Duration::from_millis(25), client.read(&mut byte)).await;
+                            // Save the observation, then finish and join the server before asserting.
+                            let _ = client.write_all(&packet[split..]).await;
+                            result.is_ok()
+                        } else {
+                            false
+                        };
+                        let mut reply = [0; 10];
+                        let received = client.read_exact(&mut reply).await;
+                        let result = server.await.unwrap();
+                        assert!(!early_reply, "replied before address/port completed: command={command}, split={split}");
+                        received.unwrap();
+                        assert_eq!(reply, [5, 7, 0, 1, 0, 0, 0, 0, 0, 0]);
+                        assert!(matches!(result, Err(Socks5Error::UnsupportedCommand(c)) if c == command));
+                    }).await.expect("bounded unsupported-command exchange");
+                }
+            }
+        }
+    }
 
-        tokio::spawn(async move {
+    #[tokio::test]
+    async fn unsupported_truncated_frames_obey_handshake_deadline() {
+        for packet in [
+            build_connect_packet([127, 0, 0, 1], 80),
+            build_ipv6_connect_packet(Ipv6Addr::LOCALHOST.octets(), 80),
+            build_domain_connect_packet("example.test", 80),
+        ] {
+            for split in [4, 7, 8, packet.len() - 1] {
+                timeout(Duration::from_secs(3), async {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                        .await
+                        .unwrap();
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let service = test_service_with_mock_rules(vec![]);
+                    let server = tokio::spawn(async move {
+                        assert!(service.prepare_target(&mut stream).await.is_none());
+                    });
+                    let mut partial = packet[..split].to_vec();
+                    if partial.len() > 4 {
+                        partial[4] = 3;
+                    }
+                    client.write_all(&partial).await.unwrap();
+                    let mut greeting = [0; 2];
+                    client.read_exact(&mut greeting).await.unwrap();
+                    assert_eq!(greeting, [5, 0]);
+                    let mut reply = Vec::new();
+                    client.read_to_end(&mut reply).await.unwrap();
+                    server.await.unwrap();
+                    assert!(reply.is_empty(), "incomplete request must not get a reply");
+                })
+                .await
+                .expect("partial request must close within handshake deadline");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fragmented_request_does_not_restart_handshake_deadline() {
+        timeout(Duration::from_secs(3), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
             let (mut stream, _) = listener.accept().await.unwrap();
-            let result = handshake(&mut stream).await;
-            assert!(matches!(result, Err(Socks5Error::UnsupportedCommand(0x02))));
-        });
+            let mut service = test_service_with_mock_rules(vec![]);
+            service.handshake_timeout = Duration::from_millis(150);
+            let started = tokio::time::Instant::now();
+            let mut server = tokio::spawn(async move {
+                assert!(service.prepare_target(&mut stream).await.is_none());
+            });
+            // An incomplete maximum-length domain keeps every fragment valid.
+            client.write_all(&[5, 1, 0, 5, 3, 0, 3, 255]).await.unwrap();
+            let mut greeting = [0; 2];
+            client.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 0]);
+            let (_reader, mut writer) = client.into_split();
+            let sender = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if writer.write_all(b"a").await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let finished = timeout(Duration::from_millis(500), &mut server).await;
+            sender.abort();
+            let _ = sender.await;
+            if finished.is_err() {
+                server.abort();
+                let _ = server.await;
+            }
+            finished
+                .expect("fragments must not extend total deadline")
+                .unwrap();
+            assert!(started.elapsed() >= Duration::from_millis(150));
+        })
+        .await
+        .expect("bounded slow handshake");
+    }
 
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        // Greeting with no-auth
-        client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
-        // BIND command (0x02) instead of CONNECT
-        client
-            .write_all(&[0x05, 0x02, 0x00, 0x01, 127, 0, 0, 1, 0, 80])
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    async fn completed_handshake(packet: &[u8]) -> (Vec<u8>, Result<Socks5Target, Socks5Error>) {
+        timeout(Duration::from_secs(3), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let server = tokio::spawn(async move { handshake(&mut stream).await });
+            client.write_all(packet).await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut reply = Vec::new();
+            let received = client.read_to_end(&mut reply).await;
+            let result = server.await.unwrap();
+            received.unwrap();
+            (reply, result)
+        })
+        .await
+        .expect("bounded complete or malformed handshake")
+    }
+
+    #[tokio::test]
+    async fn connect_and_authentication_results_are_preserved() {
+        for (packet, host) in [
+            (build_connect_packet([127, 0, 0, 1], 80), "127.0.0.1"),
+            (
+                build_ipv6_connect_packet(Ipv6Addr::LOCALHOST.octets(), 80),
+                "::1",
+            ),
+            (
+                build_domain_connect_packet("example.test", 80),
+                "example.test",
+            ),
+        ] {
+            let (reply, result) = completed_handshake(&packet).await;
+            assert_eq!(reply, [5, 0]);
+            let target = result.unwrap();
+            assert_eq!(target.host, host);
+            assert_eq!(target.port, 80);
+        }
+        let (reply, result) = completed_handshake(&[5, 1, 2]).await;
+        assert_eq!(reply, [5, 255]);
+        assert!(matches!(result, Err(Socks5Error::NoAcceptableMethod)));
+    }
+
+    #[tokio::test]
+    async fn malformed_unsupported_frames_fail_without_command_reply() {
+        for (packet, expected) in [
+            (vec![5, 1, 0, 4, 3, 0, 1], "version"),
+            (vec![5, 1, 0, 5, 3, 0, 9], "address type"),
+            (vec![5, 1, 0, 5, 3, 0, 3, 1, 255], "encoding"),
+            (vec![5, 1, 0, 5, 3, 0, 1, 127], "eof"),
+        ] {
+            let (reply, result) = completed_handshake(&packet).await;
+            assert_eq!(reply, [5, 0]);
+            assert!(
+                match expected {
+                    "version" => matches!(result, Err(Socks5Error::BadVersion(4))),
+                    "address type" => matches!(result, Err(Socks5Error::UnsupportedAddrType(9))),
+                    "encoding" => matches!(result, Err(Socks5Error::InvalidAddress)),
+                    "eof" => matches!(result, Err(Socks5Error::Io)),
+                    _ => unreachable!(),
+                },
+                "unexpected {expected} result: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_command_rejected() {
+        let mut packet = build_connect_packet([127, 0, 0, 1], 80);
+        packet[4] = 2;
+        let (reply, result) = completed_handshake(&packet).await;
+        assert_eq!(reply, [5, 0, 5, 7, 0, 1, 0, 0, 0, 0, 0, 0]);
+        assert!(matches!(result, Err(Socks5Error::UnsupportedCommand(2))));
     }
 
     #[tokio::test]
@@ -698,7 +874,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let target = Socks5Target {
                 host: "127.0.0.1".to_string(),
@@ -714,5 +890,9 @@ mod tests {
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(reply[0], 0x05);
         assert_eq!(reply[1], 0x05);
+        timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

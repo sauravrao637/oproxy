@@ -1689,7 +1689,8 @@ def test_socks5_udp(proxy_url, target_host, target_port, timeout, verbose):
     proxy_port = parsed.port or 1080
     try:
         from fixtures.socks_checks import assert_udp_rejected
-        assert_udp_rejected(proxy_host, proxy_port, timeout)
+        for split_at in (None, 4, 9):
+            assert_udp_rejected(proxy_host, proxy_port, timeout, split_at=split_at)
         print("[PASS] SOCKS5 UDP: verified unsupported-command rejection")
         return True
     except Exception as e:
