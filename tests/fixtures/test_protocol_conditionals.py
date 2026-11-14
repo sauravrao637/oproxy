@@ -49,6 +49,21 @@ class ConditionalProtocolTests(unittest.TestCase):
         self.assertTrue(suite.test_capture_filter(self.proxy.url, self.base, 2, True))
         self.assertEqual(self.proxy.client.get(self.proxy.url + "/admin/capture-filter", timeout=2).json(), initial)
 
+    def test_map_local_and_dns_cleanup_cannot_be_ignored(self):
+        for name, run in (
+            ('map', lambda: suite.test_map_local(self.proxy.url, '127.0.0.1', self.port, 2, True)),
+            ('dns', lambda: suite.test_dns_override(self.proxy.url, '127.0.0.1', self.port, 2, True))):
+            with self.subTest(feature=name):
+                self.assertTrue(run())
+                admin = suite._admin_request
+                def ignore_delete(proxy, method, path, timeout, **kwargs):
+                    if method == 'DELETE':
+                        return Mock(raise_for_status=lambda: None)
+                    return admin(proxy, method, path, timeout, **kwargs)
+                with patch.object(suite, '_admin_request', side_effect=ignore_delete):
+                    with self.assertRaises((AssertionError, RuntimeError)):
+                        run()
+
     def test_throttling_restores_original_settings_and_detects_ignored_restore(self):
         initial = {'enabled': False, 'latency_ms': 31, 'bandwidth_limit_kbps': 123}
         self.proxy.client.put(self.proxy.url + '/admin/throttling', json=initial, timeout=2).raise_for_status()

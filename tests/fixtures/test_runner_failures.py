@@ -53,6 +53,7 @@ import qa_runner
                 ("missing-binary", "Missing tested binary"),
                 ("missing-fixture-module", "injected missing fixture prerequisite: trustme"),
                 ("client-trust", "Untrusted client certificate rejected: curl exit60"),
+                ("rule-cleanup", "Rule cleanup failed (/admin/mock/rules): deleted rule still present"),
                 ("stopped-origin", "AssertionError"),
                 ("wrong-response", "Unexpected HTTPS payload"),
                 ("suppressed-capture", "No completed GET capture")):

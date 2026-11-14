@@ -48,6 +48,23 @@ def protocol_report(fault):
 
 
 def https_fault(fault):
+    if fault == "rule-cleanup":
+        import proxy_tester as suite
+        from fixtures.isolated_proxy import IsolatedProxy
+        with IsolatedProxy("1") as proxy, patch.object(suite, 'ADMIN_TOKEN', proxy.admin_token):
+            manager = suite.ServerManager('127.0.0.1')
+            port = manager.start_http1()
+            admin = suite._admin_request
+            def ignore_delete(url, method, path, timeout, **kwargs):
+                if method == 'DELETE':
+                    return Mock(raise_for_status=lambda: None)
+                return admin(url, method, path, timeout, **kwargs)
+            try:
+                with patch.object(suite, '_admin_request', side_effect=ignore_delete):
+                    suite.test_mock_rule(proxy.url, f'http://127.0.0.1:{port}', 2, True)
+            finally:
+                manager.stop_all()
+        raise AssertionError('Ignored cleanup was not detected')
     if fault == "missing-fixture-module":
         import builtins
         importing = builtins.__import__

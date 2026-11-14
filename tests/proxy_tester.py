@@ -2437,7 +2437,7 @@ def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
         print("[SKIP] Map Local: requires HTTP proxy for admin API")
         return None
     sentinel = _uniq('maplocal')
-    fixture_name = f'gate-{int(time.time())}.txt'
+    fixture_name = f'fixture-{uuid4().hex}.txt'
     content = b'map-local-served-content'
     rule_id = None
     fixture_uploaded = False
@@ -2475,16 +2475,15 @@ def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
-        if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/{rule_id}', timeout)
-            except Exception:
-                pass
-        if fixture_uploaded:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/fixtures/{fixture_name}', timeout)
-            except Exception:
-                pass
+        try:
+            if rule_id:
+                _remove_test_rule(proxy_url, '/admin/map-local-rules', rule_id, timeout)
+        finally:
+            if fixture_uploaded:
+                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/fixtures/{fixture_name}', timeout).raise_for_status()
+                remaining = _admin_request(proxy_url, 'GET', '/admin/map-local-rules/fixtures', timeout)
+                remaining.raise_for_status()
+                assert all(f.get('name') != fixture_name for f in remaining.json()), 'fixture not removed'
 
 
 def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
@@ -2493,7 +2492,7 @@ def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
     if not proxy_url.startswith('http://'):
         print("[SKIP] DNS Override: requires HTTP proxy for admin API")
         return None
-    host = f'dnsgate-{int(time.time())}.test'
+    host = f'dns-{uuid4().hex}.test'
     try:
         sr = _admin_request(proxy_url, 'PUT', f'/admin/dns/{host}', timeout,
                             json={'ip': target_host, 'enabled': True})
@@ -2502,7 +2501,7 @@ def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
             return False
         r = requests.get(f"http://{host}:{target_port}/",
                          proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
-        if r.status_code == 200 and b'Hello' in r.content:
+        if r.status_code == 200 and r.content == b'Hello HTTP/1.1':
             print("[PASS] DNS Override (sentinel host routed to fixture)")
             return True
         print(f"[FAIL] DNS Override: status={r.status_code} body={r.content[:60]!r}")
@@ -2513,10 +2512,10 @@ def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
-        try:
-            _admin_request(proxy_url, 'DELETE', f'/admin/dns/{host}', timeout)
-        except Exception:
-            pass
+        _admin_request(proxy_url, 'DELETE', f'/admin/dns/{host}', timeout).raise_for_status()
+        remaining = _admin_request(proxy_url, 'GET', '/admin/dns', timeout)
+        remaining.raise_for_status()
+        assert host not in remaining.json(), 'DNS override not removed'
 
 
 def test_capture_filter(proxy_url, base_url, timeout, verbose):
