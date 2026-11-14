@@ -2199,6 +2199,21 @@ def _gate_get(proxy_url, url, timeout, http2=False, **kwargs):
     return requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout, **kwargs)
 
 
+def _remove_test_rule(proxy_url, collection, rule_id, timeout):
+    """Deletion must succeed and the owned rule must disappear from its collection."""
+    try:
+        _admin_request(proxy_url, 'DELETE', f'{collection}/{rule_id}', timeout).raise_for_status()
+        remaining = _admin_request(proxy_url, 'GET', collection, timeout)
+        remaining.raise_for_status()
+        rules = remaining.json()
+        assert isinstance(rules, list), 'malformed rule collection'
+        assert all(rule.get('id') != rule_id for rule in rules), 'deleted rule still present'
+        return True
+    except Exception as exc:
+        print(f'[FAIL] Rule cleanup ({collection}): {exc}')
+        raise RuntimeError(f'Rule cleanup failed ({collection}): {exc}') from exc
+
+
 def test_mock_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
     """Install a Mock rule via the admin API, verify the proxy short-circuits a
     matching request with the canned response (never reaching upstream), then
@@ -2241,10 +2256,7 @@ def test_mock_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HT
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/mock/rules/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/mock/rules', rule_id, timeout)
 
 
 def test_access_block(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
@@ -2289,10 +2301,7 @@ def test_access_block(proxy_url, base_url, timeout, verbose, http2=False, label=
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/access-rules/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/access-rules', rule_id, timeout)
 
 
 def test_rewrite_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
@@ -2330,10 +2339,7 @@ def test_rewrite_rule(proxy_url, base_url, timeout, verbose, http2=False, label=
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/rule-sets/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/rule-sets', rule_id, timeout)
 
 
 def test_websocket_mock(proxy_url, ws_base, timeout, verbose):
@@ -2379,10 +2385,7 @@ def test_websocket_mock(proxy_url, ws_base, timeout, verbose):
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/mock/rules/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/mock/rules', rule_id, timeout)
 
 
 def test_throttling(proxy_url, base_url, timeout, verbose):
@@ -2392,16 +2395,20 @@ def test_throttling(proxy_url, base_url, timeout, verbose):
         print("[SKIP] Throttling: requires HTTP proxy for admin API")
         return None
     added_latency_ms = 700
+    original = None
     try:
+        current = _admin_request(proxy_url, 'GET', '/admin/throttling', timeout)
+        current.raise_for_status()
+        original = current.json()
         sr = _admin_request(proxy_url, 'PUT', '/admin/throttling', timeout,
                             json={'latency_ms': added_latency_ms, 'bandwidth_limit_kbps': 0, 'enabled': True})
         if sr.status_code not in (200, 201, 204):
             print(f"[FAIL] Throttling: enable returned {sr.status_code}")
             return False
-        start = time.time()
+        start = time.monotonic()
         r = requests.get(make_test_url(base_url, '/'),
                          proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout + 5)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         if r.status_code == 200 and elapsed >= (added_latency_ms / 1000.0) * 0.7:
             print(f"[PASS] Throttling (latency ~{elapsed*1000:.0f}ms >= {added_latency_ms}ms target)")
             return True
@@ -2413,11 +2420,12 @@ def test_throttling(proxy_url, base_url, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
-        try:
+        if original is not None:
             _admin_request(proxy_url, 'PUT', '/admin/throttling', timeout,
-                           json={'latency_ms': 0, 'bandwidth_limit_kbps': 0, 'enabled': False})
-        except Exception:
-            pass
+                           json=original).raise_for_status()
+            restored = _admin_request(proxy_url, 'GET', '/admin/throttling', timeout)
+            restored.raise_for_status()
+            assert restored.json() == original, 'throttling settings not restored'
 
 
 def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
@@ -2608,10 +2616,7 @@ def test_lua_script(proxy_url, target_host, target_port, timeout, verbose):
         return False
     finally:
         if script_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/scripts/{script_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/scripts', script_id, timeout)
 
 
 def _b64url(obj):
@@ -2779,12 +2784,12 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
                 _admin_request(proxy_url, 'DELETE', f'/admin/breakpoints/{rule_id}', timeout).raise_for_status()
             except Exception as exc:
                 print(f"[FAIL] Breakpoint rule cleanup: {exc}")
-                return False
+                raise RuntimeError("Breakpoint rule cleanup failed") from exc
         if worker is not None:
             worker.join(timeout + 11)
             if worker.is_alive():
                 print("[FAIL] Breakpoint request worker did not stop")
-                return False
+                raise RuntimeError("Breakpoint request worker did not stop")
 
 
 # HTTP/3 tests — all skip gracefully when aioquic is absent or H3 is disabled

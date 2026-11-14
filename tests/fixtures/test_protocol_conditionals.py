@@ -25,12 +25,43 @@ class ConditionalProtocolTests(unittest.TestCase):
             with self.assertRaises(ConnectionRefusedError):
                 socket.create_connection(('127.0.0.1', port), timeout=5)
 
+    def test_rule_cleanup_positive_and_ignored_delete(self):
+        for name, run in (
+            ('mock', lambda: suite.test_mock_rule(self.proxy.url, self.base, 2, True)),
+            ('access', lambda: suite.test_access_block(self.proxy.url, self.base, 2, True)),
+            ('rewrite', lambda: suite.test_rewrite_rule(self.proxy.url, self.base, 2, True)),
+            ('lua', lambda: suite.test_lua_script(self.proxy.url, '127.0.0.1', self.port, 2, True))):
+            with self.subTest(rule=name):
+                self.assertTrue(run())
+                admin = suite._admin_request
+                def ignore_delete(proxy, method, path, timeout, **kwargs):
+                    if method == 'DELETE':
+                        return Mock(raise_for_status=lambda: None)
+                    return admin(proxy, method, path, timeout, **kwargs)
+                with patch.object(suite, '_admin_request', side_effect=ignore_delete):
+                    with self.assertRaisesRegex(RuntimeError, 'deleted rule still present'):
+                        run()
+
     def test_capture_filter_positive_and_restoration(self):
         # Preserve a non-default setting instead of blindly disabling the filter.
         initial = {"mode": "denylist", "hosts": ["unrelated.invalid"]}
         self.proxy.client.post(self.proxy.url + "/admin/capture-filter", json=initial, timeout=2).raise_for_status()
         self.assertTrue(suite.test_capture_filter(self.proxy.url, self.base, 2, True))
         self.assertEqual(self.proxy.client.get(self.proxy.url + "/admin/capture-filter", timeout=2).json(), initial)
+
+    def test_throttling_restores_original_settings_and_detects_ignored_restore(self):
+        initial = {'enabled': False, 'latency_ms': 31, 'bandwidth_limit_kbps': 123}
+        self.proxy.client.put(self.proxy.url + '/admin/throttling', json=initial, timeout=2).raise_for_status()
+        self.assertTrue(suite.test_throttling(self.proxy.url, self.base, 2, True))
+        self.assertEqual(self.proxy.client.get(self.proxy.url + '/admin/throttling', timeout=2).json(), initial)
+        admin = suite._admin_request
+        def ignore_restore(proxy, method, path, timeout, **kwargs):
+            if method == 'PUT' and path == '/admin/throttling' and kwargs['json'] == initial:
+                return Mock(raise_for_status=lambda: None)
+            return admin(proxy, method, path, timeout, **kwargs)
+        with patch.object(suite, '_admin_request', side_effect=ignore_restore):
+            with self.assertRaisesRegex(AssertionError, 'settings not restored'):
+                suite.test_throttling(self.proxy.url, self.base, 2, True)
 
     def test_capture_filter_missing_recording_fails(self):
         with patch.object(suite, "_list_recorded_sessions", return_value=[]):
