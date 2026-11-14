@@ -8,6 +8,8 @@ or YAML parsing along with it.
 import os
 from pathlib import Path
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,7 @@ import time
 
 try:
     import requests
+    import yaml
 except ImportError:
     raise RuntimeError("Missing QA prerequisite: requests; install before running")
 
@@ -91,25 +94,57 @@ def build(profile):
     subprocess.run(cmd, cwd=REPO_ROOT, check=True, timeout=600)
 
 
-def wait_for_health(port, log_path):
-    deadline = time.time() + HEALTH_TIMEOUT_SECS
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"http://127.0.0.1:{port}/health", timeout=1)
-            if r.ok:
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(0.3)
-    print(f"  oproxy did not become healthy within {HEALTH_TIMEOUT_SECS}s. "
-          f"Log tail ({log_path}):")
+def print_log_tail(log_path):
+    print(f"  Proxy diagnostic ({log_path}):")
     try:
-        with open(log_path, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        print("".join(lines[-30:]))
+        with open(log_path, "rb") as log:
+            log.seek(max(0, os.path.getsize(log_path) - 16384))
+            print(log.read().decode("utf-8", errors="replace"))
     except OSError:
         pass
+
+
+def wait_for_health(port, proc, ca_path, admin_token=None):
+    deadline = time.monotonic() + HEALTH_TIMEOUT_SECS
+    with requests.Session() as client:
+        client.trust_env = False
+        if admin_token:
+            client.headers["x-oproxy-admin-token"] = admin_token
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                print(f"  Proxy exited before readiness: {proc.returncode}")
+                return False
+            try:
+                url = f"http://127.0.0.1:{port}"
+                if client.get(url + "/health", timeout=1).ok:
+                    response = client.get(url + "/admin/ca", timeout=1)
+                    response.raise_for_status()
+                    owned = Path(ca_path).read_text(encoding="utf-8")
+                    if ssl.PEM_cert_to_DER_cert(response.text) != ssl.PEM_cert_to_DER_cert(owned):
+                        raise RuntimeError("Readiness CA does not belong to the launched proxy")
+                    return proc.poll() is None
+            except (requests.RequestException, FileNotFoundError):
+                pass
+            time.sleep(0.1)
+    print(f"  Proxy readiness timed out after {HEALTH_TIMEOUT_SECS}s")
     return False
+
+
+def check_listener_ports(config):
+    """Reject existing TCP/QUIC listeners before starting the tested process."""
+    host = config.get("bind_host", "127.0.0.1")
+    listeners = [(config.get(key), socket.SOCK_STREAM)
+                 for key in ("port", "https_port", "socks5_port")]
+    if config.get("http3_enabled"):
+        listeners.append((config.get("http3_port"), socket.SOCK_DGRAM))
+    for port, kind in listeners:
+        if port is None:
+            continue
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        with socket.socket(family, kind) as listener:
+            if os.name == "nt":
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            listener.bind((host, port))
 
 
 def run_profile(name, profile):
@@ -124,15 +159,39 @@ def run_profile(name, profile):
         print(f"  BLOCKED: build failed: {exc}")
         return {"<build>": 1}
 
-    env = {**os.environ, "OPROXY_CONFIG": profile["config"], **profile.get("env", {})}
-    log_path = os.path.join(REPO_ROOT, f"qa-runner-{name}.log")
-    log_file = open(log_path, "w", encoding="utf-8")
+    try:
+        with tempfile.TemporaryDirectory(prefix="qa-profile-") as scratch:
+            return run_prepared_profile(profile, Path(scratch))
+    except (OSError, ValueError, RuntimeError, yaml.YAMLError, subprocess.SubprocessError) as exc:
+        print(f"  FAIL: profile preparation did not complete: {exc}")
+        return {"<preparation>": 1}
+
+
+def run_prepared_profile(profile, root):
+    config = yaml.safe_load((Path(REPO_ROOT) / profile["config"]).read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("Profile config must be a mapping")
+    if config.get("port") != profile["port"] or not config.get("mitm", {}).get("enabled"):
+        raise ValueError("Profile requires matching listener port and MITM for owned CA readiness")
+    check_listener_ports(config)
+    config["storage_path"] = str(root / "storage")
+    config["mitm"]["root_ca_path"] = str(root / "certs")
+    config.setdefault("log", {}).update(dir=str(root), file="proxy.log")
+    config["update_check"] = False
+    config_path = root / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("OPROXY_")}
+    env.update(profile.get("env", {}))
+    env.update(OPROXY_CONFIG=str(config_path), OPROXY_UPDATE_CHECK="false")
+    log_path = root / "startup.log"
+    log_file = log_path.open("w", encoding="utf-8")
     proc = None
     results = {}
     try:
-        proc = subprocess.Popen([binary_path()], cwd=REPO_ROOT, env=env,
+        proc = subprocess.Popen([os.path.abspath(binary_path())], cwd=root, env=env,
                                 stdout=log_file, stderr=subprocess.STDOUT)
-        if not wait_for_health(profile["port"], log_path):
+        if not wait_for_health(profile["port"], proc, root / "certs" / "root.crt",
+                               config.get("admin_token")):
             results["<startup>"] = 1
             return results
 
@@ -142,7 +201,7 @@ def run_profile(name, profile):
             print(f"\n--- {entry['script']} ---\n  $ {' '.join(cmd[1:])}")
             test_env = {**os.environ, "OPROXY_TEST_BINARY": os.path.abspath(binary_path())}
             results[entry["script"]] = run_tester(cmd, test_env, entry.get("timeout", 300))
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"  FAIL: profile execution did not complete: {exc}")
         results["<execution>"] = 1
     finally:
@@ -154,5 +213,7 @@ def run_profile(name, profile):
                 proc.kill()
                 proc.wait(timeout=10)
         log_file.close()
+        if any(code != 0 for code in results.values()):
+            print_log_tail(log_path)
 
     return results

@@ -29,8 +29,10 @@ class ProfileFailureTests(unittest.TestCase):
         profile = {"config": "test.yaml", "port": 1234,
                    "run": [{"script": "test.py", "timeout": 1}]}
         with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "test.yaml").write_text("port: 1234\nmitm:\n  enabled: true\n", encoding="utf-8")
             with patch.object(qa_process, "REPO_ROOT", directory), \
                  patch.object(qa_process, "build"), \
+                 patch.object(qa_process, "check_listener_ports"), \
                  patch.object(qa_process, "wait_for_health", return_value=True), \
                  patch.object(qa_process.subprocess, "Popen", return_value=process), \
                  patch.object(qa_process, "run_tester", side_effect=

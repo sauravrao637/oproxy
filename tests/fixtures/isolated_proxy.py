@@ -5,6 +5,7 @@ from pathlib import Path
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 from uuid import uuid4
@@ -70,6 +71,27 @@ class IsolatedProxy:
         return self.start()
 
     def start(self):
+        try:
+            return self._start()
+        except BaseException:
+            self.print_diagnostic()
+            raise
+
+    def print_diagnostic(self):
+        if self.log is not None and not self.log.closed:
+            self.log.flush()
+        if self.directory is None:
+            return
+        path = self.root / "startup.log"
+        try:
+            with path.open("rb") as log:
+                log.seek(max(0, path.stat().st_size - 16384))
+                print("Isolated proxy diagnostic:\n" +
+                      log.read().decode("utf-8", errors="replace"), file=sys.stderr)
+        except OSError:
+            pass
+
+    def _start(self):
         with socket.socket() as listener:
             if os.name == "nt":
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -120,6 +142,8 @@ class IsolatedProxy:
         try:
             self.stop()
         finally:
+            if args and args[0] is not None:
+                self.print_diagnostic()
             self.client.close()
             if self.log is not None:
                 self.log.close()
