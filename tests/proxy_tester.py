@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive Proxy Tester – auto‑venv, installs deps, runs all tests, cleans up.
+Comprehensive Proxy Tester – uses preinstalled dependencies and local fixtures.
 Tests HTTP/1.1, HTTP/2, HTTP/3 (QUIC), WebSocket, gRPC, SOCKS5 TCP/UDP.
 
 Note: HTTP/2 and HTTP/3 tests connect to a local test server via the proxy.
@@ -33,104 +33,18 @@ import atexit
 import time
 import argparse
 
-# ----------------------------------------------------------------------
-# Check if we are running inside the temporary venv (flag --run-tests)
-# ----------------------------------------------------------------------
+# Dependencies must be provisioned before execution; never install at runtime.
+# Retain --run-tests for compatibility with existing invocations.
 RUN_TESTS_FLAG = '--run-tests'
-
-if RUN_TESTS_FLAG not in sys.argv:
-    # --------------- BOOTSTRAP: create venv, install deps, re-launch ---------------
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--http-proxy')
-    parser.add_argument('--socks-proxy')
-    parser.add_argument('--h3-proxy', default=None,
-        help='HTTP/3 (QUIC) proxy URL, e.g. h3://localhost:8443. '
-             'Pass this only for profiles that enable the H3 listener.')
-    parser.add_argument('--target-host', default='127.0.0.1')
-    parser.add_argument('--timeout', type=int, default=10)
-    parser.add_argument('--verbose', action='store_true')
-    parser.add_argument('--expect-limits', action='store_true')
-    parser.add_argument('--admin-token', default=os.environ.get('OPROXY_ADMIN_TOKEN'))
-    args, unknown = parser.parse_known_args()
-
-    temp_dir = tempfile.mkdtemp(prefix='proxy_tester_venv_')
-    venv_dir = os.path.join(temp_dir, 'venv')
-
-    print(f"Creating temporary virtual environment at {venv_dir} ...")
-    subprocess.run([sys.executable, '-m', 'venv', venv_dir], check=True)
-
-    if os.name == 'nt':
-        pip_path = os.path.join(venv_dir, 'Scripts', 'pip.exe')
-        python_path = os.path.join(venv_dir, 'Scripts', 'python.exe')
-    else:
-        pip_path = os.path.join(venv_dir, 'bin', 'pip')
-        python_path = os.path.join(venv_dir, 'bin', 'python')
-
-    packages = [
-        'requests',
-        'httpx[http2]',
-        'websockets',
-        'grpcio',
-        'grpcio-tools',
-        'PySocks',
-        'hypercorn',
-        'brotli',
-        'zstandard',
-        'certifi',
-        'trustme',
-        'aioquic',  # HTTP/3 (QUIC) support; tests skip gracefully if absent
-    ]
-    print("Installing required packages (this may take a moment) ...")
-    subprocess.run([pip_path, 'install', *packages], check=True)
-
-    cmd = [
-        python_path,
-        os.path.abspath(__file__),
-        RUN_TESTS_FLAG,
-    ]
-    for arg in sys.argv[1:]:
-        if arg != RUN_TESTS_FLAG:
-            cmd.append(arg)
-
-    def cleanup():
-        print("\nCleaning up temporary venv...")
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception as e:
-            print(f"Cleanup error: {e}")
-
-    atexit.register(cleanup)
-
-    inner_process = None
-    def signal_handler(sig, frame):
-        if inner_process and inner_process.poll() is None:
-            inner_process.terminate()
-            try:
-                inner_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                inner_process.kill()
-        cleanup()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    inner_process = subprocess.Popen(cmd)
+import importlib
+for module in ('requests', 'httpx', 'h2', 'websockets', 'grpc', 'grpc_tools',
+               'socks', 'hypercorn', 'brotli', 'zstandard', 'certifi', 'trustme',
+               'aioquic'):
     try:
-        inner_process.wait()
-    except:
-        inner_process.terminate()
-        inner_process.wait()
-        raise
-    finally:
-        cleanup()
-        atexit.unregister(cleanup)
+        importlib.import_module(module)
+    except ImportError as exc:
+        raise SystemExit(f"BLOCKED: missing required prerequisite {module}: {exc}")
 
-    sys.exit(inner_process.returncode)
-
-# ----------------------------------------------------------------------
-# Inside venv: actual tests
-# ----------------------------------------------------------------------
 import argparse
 import asyncio
 import atexit
@@ -149,6 +63,7 @@ import zlib
 import json
 import struct
 from urllib.parse import urlparse
+from uuid import uuid4
 from concurrent import futures
 from io import BytesIO
 
@@ -179,7 +94,7 @@ def _handle_signal(signum, frame):
     _shutdown_event.set()
     if server_manager:
         server_manager.stop_all()
-    sys.exit(0)
+    sys.exit(128 + signum)
 
 signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
@@ -614,13 +529,73 @@ class ServerManager:
     def _add_server(self, name, port, shutdown):
         self.servers.append((name, port, shutdown))
 
+    def _start_async_server(self, name, port, serve, ready=None):
+        """Own an async fixture through startup, graceful shutdown and loop close."""
+        stop = threading.Event()
+        loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_forever()
+            finally:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+
+        thread = threading.Thread(target=run, name=f"fixture-{name}", daemon=True)
+        thread.start()
+        future = asyncio.run_coroutine_threadsafe(serve(stop), loop)
+
+        def shutdown():
+            stop.set()
+            try:
+                future.result(timeout=10)
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    raise RuntimeError(f"{name} fixture thread did not stop")
+
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                if future.done():
+                    future.result()
+                    raise RuntimeError(f"{name} fixture exited before readiness")
+                if ready is not None:
+                    if ready.wait(.02):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"{name} fixture readiness timed out")
+                    continue
+                try:
+                    with socket.create_connection((self.target_host, port), timeout=.2):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"{name} fixture readiness timed out")
+                    time.sleep(.02)
+        except BaseException:
+            shutdown()
+            raise
+        self._add_server(name, port, shutdown)
+
     def stop_all(self):
-        for name, port, shutdown in self.servers:
+        servers, self.servers = self.servers, []
+        failures = []
+        for name, port, shutdown in servers:
             try:
                 shutdown()
                 print(f"Stopped {name} server on port {port}")
             except Exception as e:
                 print(f"Error stopping {name} server: {e}")
+                failures.append(f"{name}: {e}")
+        if failures:
+            raise RuntimeError("Fixture cleanup failed: " + "; ".join(failures))
 
     # --- HTTP/1.1 server ---
     def start_http1(self):
@@ -806,7 +781,13 @@ class ServerManager:
         httpd = ThreadingHTTPServer((self.target_host, port), Handler)
         t = threading.Thread(target=httpd.serve_forever, daemon=True)
         t.start()
-        self._add_server("HTTP/1.1", port, lambda: httpd.shutdown())
+        def shutdown():
+            httpd.shutdown()
+            httpd.server_close()
+            t.join(timeout=2)
+            if t.is_alive():
+                raise RuntimeError("HTTP fixture did not stop")
+        self._add_server("HTTP/1.1", port, shutdown)
         return port
 
     # --- HTTPS/1.1 server (TLS, no h2 ALPN) — for CONNECT-tunnel tests ---
@@ -851,7 +832,15 @@ class ServerManager:
         httpsd.socket = ctx.wrap_socket(httpsd.socket, server_side=True)
         t = threading.Thread(target=httpsd.serve_forever, daemon=True)
         t.start()
-        self._add_server("HTTPS/1.1", port, lambda: httpsd.shutdown())
+        def shutdown():
+            httpsd.shutdown()
+            httpsd.server_close()
+            t.join(timeout=2)
+            os.unlink(_cfile.name)
+            os.unlink(_kfile.name)
+            if t.is_alive():
+                raise RuntimeError("HTTPS fixture did not stop")
+        self._add_server("HTTPS/1.1", port, shutdown)
         return port
 
     # --- HTTP/2 server (Hypercorn) ---
@@ -1003,64 +992,38 @@ class ServerManager:
         import trustme
         _ca = trustme.CA()
         _server_cert = _ca.issue_cert("127.0.0.1", "localhost", self.target_host)
-        self._http2_cert = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-        self._http2_key = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-        _server_cert.cert_chain_pems[0].write_to_path(self._http2_cert.name)
-        _server_cert.private_key_pem.write_to_path(self._http2_key.name)
-        config.certfile = self._http2_cert.name
-        config.keyfile = self._http2_key.name
+        cert_dir = tempfile.TemporaryDirectory(prefix="http2-origin-")
+        config.certfile = os.path.join(cert_dir.name, "cert.pem")
+        config.keyfile = os.path.join(cert_dir.name, "key.pem")
 
-        loop = asyncio.new_event_loop()
-        t = threading.Thread(target=loop.run_forever, daemon=True)
-        t.start()
-
-        async def _serve():
-            # shutdown_trigger must be an async callable (returns awaitable).
-            # _shutdown_event is a threading.Event; poll it from the async loop.
+        async def _serve(stop):
             async def _shutdown_trigger():
-                while not _shutdown_event.is_set():
+                while not stop.is_set():
                     await asyncio.sleep(0.05)
-
-            await hypercorn_serve(
-                app,
-                config,
-                shutdown_trigger=_shutdown_trigger
-            )
-        asyncio.run_coroutine_threadsafe(_serve(), loop)
-        time.sleep(1)
-
-        def shutdown():
-            # Setting the global event causes _shutdown_trigger to return,
-            # which signals Hypercorn to stop gracefully.
-            _shutdown_event.set()
-        self._add_server("HTTP/2", port, shutdown)
+            await hypercorn_serve(app, config, shutdown_trigger=_shutdown_trigger)
+        try:
+            _server_cert.cert_chain_pems[0].write_to_path(config.certfile)
+            _server_cert.private_key_pem.write_to_path(config.keyfile)
+            self._start_async_server("HTTP/2", port, _serve)
+        except BaseException:
+            cert_dir.cleanup()
+            raise
+        self._add_server("HTTP/2 certificates", port, cert_dir.cleanup)
         return port
 
     # --- WebSocket echo server ---
     def start_websocket(self):
         port = free_port()
-        server_holder = {}
+        ready = threading.Event()
         async def echo(websocket):
             async for message in websocket:
                 await websocket.send(message)
-        async def _serve():
-            server = await websockets.serve(echo, self.target_host, port)
-            server_holder['server'] = server
-            await server.wait_closed()
-        loop = asyncio.new_event_loop()
-        t = threading.Thread(target=loop.run_forever, daemon=True)
-        t.start()
-        asyncio.run_coroutine_threadsafe(_serve(), loop)
-        time.sleep(0.5)
-        def shutdown():
-            async def _stop():
-                server = server_holder.get('server')
-                if server:
-                    server.close()
-                    await server.wait_closed()
-                loop.call_soon_threadsafe(loop.stop)
-            asyncio.run_coroutine_threadsafe(_stop(), loop)
-        self._add_server("WebSocket", port, shutdown)
+        async def _serve(stop):
+            async with websockets.serve(echo, self.target_host, port):
+                ready.set()
+                while not stop.is_set():
+                    await asyncio.sleep(.05)
+        self._start_async_server("WebSocket", port, _serve, ready)
         return port
 
     # --- gRPC echo server ---
@@ -1632,20 +1595,7 @@ def test_grpc(proxy_url, target_host, target_port, timeout, verbose=False,
                     )
                 )
 
-            try:
-                _wait_for_recorded_session(session_admin_proxy, matches, timeout, include_bodies=True)
-            except AssertionError:
-                sessions = _recorded_session_details(session_admin_proxy, timeout, include_bodies=True)
-                tunnel_only = any(
-                    (s.get('request') or {}).get('method') == 'CONNECT'
-                    and f"{target_host}:{target_port}" in ((s.get('request') or {}).get('host') or (s.get('request') or {}).get('uri') or '')
-                    for s in sessions
-                )
-                if tunnel_only:
-                    print("[SKIP] gRPC Session Events: proxy recorded CONNECT tunnel only; enable MITM to assert decoded gRPC messages")
-                    print("[PASS] gRPC (unary, server streaming, client streaming, bidirectional)")
-                    return True
-                raise
+            _wait_for_recorded_session(session_admin_proxy, matches, timeout, include_bodies=True)
 
         print("[PASS] gRPC (unary, server streaming, client streaming, bidirectional)")
         return True
@@ -1738,29 +1688,11 @@ def test_socks5_udp(proxy_url, target_host, target_port, timeout, verbose):
     proxy_host = parsed.hostname
     proxy_port = parsed.port or 1080
     try:
-        s = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
-        s.settimeout(timeout)
-        s.bind(('0.0.0.0', 0))
-        message = b'Hello UDP'
-        s.sendto(message, (target_host, target_port))
-        data, addr = s.recvfrom(1024)
-        s.close()
-        if data == message:
-            print("[PASS] SOCKS5 UDP")
-            return True
-        else:
-            print(f"[FAIL] SOCKS5 UDP: received {data}")
-            return False
-    except socks.SOCKS5Error as e:
-        if '0x07' in str(e):
-            # UDP ASSOCIATE (cmd 0x07) is not implemented; skip rather than fail.
-            print(f"[SKIP] SOCKS5 UDP: UDP ASSOCIATE not supported by this proxy")
-            return None
-        print(f"[FAIL] SOCKS5 UDP: {e}")
-        if verbose:
-            traceback.print_exc()
-        return False
+        from fixtures.socks_checks import assert_udp_rejected
+        for split_at in (None, 4, 9):
+            assert_udp_rejected(proxy_host, proxy_port, timeout, split_at=split_at)
+        print("[PASS] SOCKS5 UDP: verified unsupported-command rejection")
+        return True
     except Exception as e:
         print(f"[FAIL] SOCKS5 UDP: {e}")
         if verbose:
@@ -2297,6 +2229,21 @@ def _gate_get(proxy_url, url, timeout, http2=False, **kwargs):
     return requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout, **kwargs)
 
 
+def _remove_test_rule(proxy_url, collection, rule_id, timeout):
+    """Deletion must succeed and the owned rule must disappear from its collection."""
+    try:
+        _admin_request(proxy_url, 'DELETE', f'{collection}/{rule_id}', timeout).raise_for_status()
+        remaining = _admin_request(proxy_url, 'GET', collection, timeout)
+        remaining.raise_for_status()
+        rules = remaining.json()
+        assert isinstance(rules, list), 'malformed rule collection'
+        assert all(rule.get('id') != rule_id for rule in rules), 'deleted rule still present'
+        return True
+    except Exception as exc:
+        print(f'[FAIL] Rule cleanup ({collection}): {exc}')
+        raise RuntimeError(f'Rule cleanup failed ({collection}): {exc}') from exc
+
+
 def test_mock_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
     """Install a Mock rule via the admin API, verify the proxy short-circuits a
     matching request with the canned response (never reaching upstream), then
@@ -2339,10 +2286,7 @@ def test_mock_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HT
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/mock/rules/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/mock/rules', rule_id, timeout)
 
 
 def test_access_block(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
@@ -2387,10 +2331,7 @@ def test_access_block(proxy_url, base_url, timeout, verbose, http2=False, label=
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/access-rules/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/access-rules', rule_id, timeout)
 
 
 def test_rewrite_rule(proxy_url, base_url, timeout, verbose, http2=False, label='HTTP/1.1'):
@@ -2428,10 +2369,7 @@ def test_rewrite_rule(proxy_url, base_url, timeout, verbose, http2=False, label=
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/rule-sets/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/rule-sets', rule_id, timeout)
 
 
 def test_websocket_mock(proxy_url, ws_base, timeout, verbose):
@@ -2477,10 +2415,7 @@ def test_websocket_mock(proxy_url, ws_base, timeout, verbose):
         return False
     finally:
         if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/mock/rules/{rule_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/mock/rules', rule_id, timeout)
 
 
 def test_throttling(proxy_url, base_url, timeout, verbose):
@@ -2490,16 +2425,20 @@ def test_throttling(proxy_url, base_url, timeout, verbose):
         print("[SKIP] Throttling: requires HTTP proxy for admin API")
         return None
     added_latency_ms = 700
+    original = None
     try:
+        current = _admin_request(proxy_url, 'GET', '/admin/throttling', timeout)
+        current.raise_for_status()
+        original = current.json()
         sr = _admin_request(proxy_url, 'PUT', '/admin/throttling', timeout,
                             json={'latency_ms': added_latency_ms, 'bandwidth_limit_kbps': 0, 'enabled': True})
         if sr.status_code not in (200, 201, 204):
             print(f"[FAIL] Throttling: enable returned {sr.status_code}")
             return False
-        start = time.time()
+        start = time.monotonic()
         r = requests.get(make_test_url(base_url, '/'),
                          proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout + 5)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         if r.status_code == 200 and elapsed >= (added_latency_ms / 1000.0) * 0.7:
             print(f"[PASS] Throttling (latency ~{elapsed*1000:.0f}ms >= {added_latency_ms}ms target)")
             return True
@@ -2511,11 +2450,12 @@ def test_throttling(proxy_url, base_url, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
-        try:
+        if original is not None:
             _admin_request(proxy_url, 'PUT', '/admin/throttling', timeout,
-                           json={'latency_ms': 0, 'bandwidth_limit_kbps': 0, 'enabled': False})
-        except Exception:
-            pass
+                           json=original).raise_for_status()
+            restored = _admin_request(proxy_url, 'GET', '/admin/throttling', timeout)
+            restored.raise_for_status()
+            assert restored.json() == original, 'throttling settings not restored'
 
 
 def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
@@ -2527,7 +2467,7 @@ def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
         print("[SKIP] Map Local: requires HTTP proxy for admin API")
         return None
     sentinel = _uniq('maplocal')
-    fixture_name = f'gate-{int(time.time())}.txt'
+    fixture_name = f'fixture-{uuid4().hex}.txt'
     content = b'map-local-served-content'
     rule_id = None
     fixture_uploaded = False
@@ -2565,16 +2505,15 @@ def test_map_local(proxy_url, target_host, target_port, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
-        if rule_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/{rule_id}', timeout)
-            except Exception:
-                pass
-        if fixture_uploaded:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/fixtures/{fixture_name}', timeout)
-            except Exception:
-                pass
+        try:
+            if rule_id:
+                _remove_test_rule(proxy_url, '/admin/map-local-rules', rule_id, timeout)
+        finally:
+            if fixture_uploaded:
+                _admin_request(proxy_url, 'DELETE', f'/admin/map-local-rules/fixtures/{fixture_name}', timeout).raise_for_status()
+                remaining = _admin_request(proxy_url, 'GET', '/admin/map-local-rules/fixtures', timeout)
+                remaining.raise_for_status()
+                assert all(f.get('name') != fixture_name for f in remaining.json()), 'fixture not removed'
 
 
 def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
@@ -2583,7 +2522,7 @@ def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
     if not proxy_url.startswith('http://'):
         print("[SKIP] DNS Override: requires HTTP proxy for admin API")
         return None
-    host = f'dnsgate-{int(time.time())}.test'
+    host = f'dns-{uuid4().hex}.test'
     try:
         sr = _admin_request(proxy_url, 'PUT', f'/admin/dns/{host}', timeout,
                             json={'ip': target_host, 'enabled': True})
@@ -2592,7 +2531,7 @@ def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
             return False
         r = requests.get(f"http://{host}:{target_port}/",
                          proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
-        if r.status_code == 200 and b'Hello' in r.content:
+        if r.status_code == 200 and r.content == b'Hello HTTP/1.1':
             print("[PASS] DNS Override (sentinel host routed to fixture)")
             return True
         print(f"[FAIL] DNS Override: status={r.status_code} body={r.content[:60]!r}")
@@ -2603,10 +2542,10 @@ def test_dns_override(proxy_url, target_host, target_port, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
-        try:
-            _admin_request(proxy_url, 'DELETE', f'/admin/dns/{host}', timeout)
-        except Exception:
-            pass
+        _admin_request(proxy_url, 'DELETE', f'/admin/dns/{host}', timeout).raise_for_status()
+        remaining = _admin_request(proxy_url, 'GET', '/admin/dns', timeout)
+        remaining.raise_for_status()
+        assert host not in remaining.json(), 'DNS override not removed'
 
 
 def test_capture_filter(proxy_url, base_url, timeout, verbose):
@@ -2616,37 +2555,60 @@ def test_capture_filter(proxy_url, base_url, timeout, verbose):
         print("[SKIP] Capture Filter: requires HTTP proxy for admin API")
         return None
     host = urlparse(base_url).hostname
-    sentinel = f'/capfilter-{int(time.time())}'
+    sentinel = f'/capfilter-{uuid4().hex}'
+    original = None
+    success = False
+
+    def request_and_capture(path):
+        url = make_test_url(base_url, path)
+        r = requests.get(url, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
+        assert r.status_code == 200 and r.content == b'Hello HTTP/1.1', 'fixture response mismatch'
+        return url
+
+    def matches(url):
+        return lambda d: ((d.get('request') or {}).get('uri') == url
+                          and (d.get('request') or {}).get('method') == 'GET'
+                          and (d.get('response') or {}).get('status') == 200
+                          and (d.get('metrics') or {}).get('status_code') == 200)
+
     try:
+        current = _admin_request(proxy_url, 'GET', '/admin/capture-filter', timeout)
+        current.raise_for_status()
+        original = current.json()
+        before = request_and_capture(sentinel + '-before')
+        _wait_for_recorded_session(proxy_url, matches(before), timeout)
         sr = _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
                             json={'mode': 'denylist', 'hosts': [host]})
-        if sr.status_code not in (200, 201, 204):
-            print(f"[FAIL] Capture Filter: set returned {sr.status_code}")
-            return False
-        r = requests.get(make_test_url(base_url, sentinel),
-                         proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
-        if r.status_code != 200:
-            print(f"[FAIL] Capture Filter: request returned {r.status_code}")
-            return False
-        # Give the recorder a moment; the filtered request must NOT appear.
-        time.sleep(1.0)
-        details = _recorded_session_details(proxy_url, timeout)
-        if any(sentinel in ((d.get('request') or {}).get('uri') or '') for d in details):
-            print("[FAIL] Capture Filter: filtered request was recorded anyway")
-            return False
-        print("[PASS] Capture Filter (filtered host not recorded)")
-        return True
+        sr.raise_for_status()
+        excluded = request_and_capture(sentinel + '-excluded')
+        deadline = time.monotonic() + min(timeout, 2)
+        while time.monotonic() < deadline:
+            details = _recorded_session_details(proxy_url, timeout)
+            assert not any((d.get('request') or {}).get('uri') == excluded for d in details), \
+                'filtered request was recorded'
+            time.sleep(.1)
+        success = True
     except Exception as e:
         print(f"[FAIL] Capture Filter: {e}")
         if verbose:
             traceback.print_exc()
-        return False
     finally:
-        try:
-            _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
-                           json={'mode': 'disabled', 'hosts': []})
-        except Exception:
-            pass
+        if original is not None:
+            try:
+                restored = _admin_request(proxy_url, 'POST', '/admin/capture-filter', timeout,
+                                          json=original)
+                restored.raise_for_status()
+                current = _admin_request(proxy_url, 'GET', '/admin/capture-filter', timeout)
+                current.raise_for_status()
+                assert current.json() == original, 'capture-filter state not restored'
+                after = request_and_capture(sentinel + '-after')
+                _wait_for_recorded_session(proxy_url, matches(after), timeout)
+            except Exception as exc:
+                print(f"[FAIL] Capture Filter restoration: {exc}")
+                success = False
+    if success:
+        print("[PASS] Capture Filter (forwarding verified; recording excluded and restored)")
+    return success
 
 
 def test_lua_script(proxy_url, target_host, target_port, timeout, verbose):
@@ -2683,10 +2645,7 @@ def test_lua_script(proxy_url, target_host, target_port, timeout, verbose):
         return False
     finally:
         if script_id:
-            try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/scripts/{script_id}', timeout)
-            except Exception:
-                pass
+            _remove_test_rule(proxy_url, '/admin/scripts', script_id, timeout)
 
 
 def _b64url(obj):
@@ -2771,13 +2730,15 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
     if not proxy_url.startswith('http://'):
         print("[SKIP] Breakpoint: requires HTTP proxy for admin API")
         return None
-    sentinel = f'/bp-{int(time.time())}'
+    sentinel = f'/bp-{uuid4().hex}'
     rule = {
         'location': {'path': sentinel, 'mode': 'glob'},
         'bp_type': 'Request',
         'enabled': True,
     }
     rule_id = None
+    pending_id = None
+    worker = None
     result = {}
 
     def fire():
@@ -2801,13 +2762,14 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
 
         # Wait for the request to show up as paused.
         pending_id = None
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             pr = _admin_request(proxy_url, 'GET', '/admin/breakpoints/pending', timeout)
             if pr.status_code == 200:
                 for p in (pr.json() or []):
-                    uri = p.get('uri') or (p.get('request') or {}).get('uri') or ''
-                    if sentinel in uri or len(pr.json()) == 1:
+                    request = (p.get('context') or {}).get('Request') or {}
+                    if (p.get('bp_type') == 'Request' and request.get('method') == 'GET'
+                            and request.get('uri') == f"http://{target_host}:{target_port}{sentinel}"):
                         pending_id = p.get('id')
                         break
             if pending_id:
@@ -2815,8 +2777,9 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
             time.sleep(0.2)
 
         if not pending_id:
-            print("[SKIP] Breakpoint: request did not pause (breakpoints may be disabled in this build)")
-            return None
+            raise AssertionError("matching request did not enter the pending breakpoint queue")
+
+        assert worker.is_alive() and not result, 'request completed before breakpoint release'
 
         rr = _admin_request(proxy_url, 'POST',
                             f'/admin/breakpoints/pending/{pending_id}/resolve', timeout,
@@ -2824,9 +2787,10 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
         if rr.status_code not in (200, 204):
             print(f"[FAIL] Breakpoint: resolve returned {rr.status_code}")
             return False
+        pending_id = None
 
         worker.join(timeout + 5)
-        if result.get('status') == 200 and b'Hello' in result.get('body', b''):
+        if not worker.is_alive() and result.get('status') == 200 and result.get('body') == b'Hello HTTP/1.1':
             print("[PASS] Breakpoint (pause + resume continued upstream)")
             return True
         print(f"[FAIL] Breakpoint: resumed request result={result}")
@@ -2837,11 +2801,24 @@ def test_breakpoint(proxy_url, target_host, target_port, timeout, verbose):
             traceback.print_exc()
         return False
     finally:
+        if pending_id:
+            try:
+                _admin_request(proxy_url, 'POST',
+                               f'/admin/breakpoints/pending/{pending_id}/resolve', timeout,
+                               json={'action': 'continue'}).raise_for_status()
+            except Exception as exc:
+                print(f"[FAIL] Breakpoint pending cleanup: {exc}")
         if rule_id:
             try:
-                _admin_request(proxy_url, 'DELETE', f'/admin/breakpoints/{rule_id}', timeout)
-            except Exception:
-                pass
+                _admin_request(proxy_url, 'DELETE', f'/admin/breakpoints/{rule_id}', timeout).raise_for_status()
+            except Exception as exc:
+                print(f"[FAIL] Breakpoint rule cleanup: {exc}")
+                raise RuntimeError("Breakpoint rule cleanup failed") from exc
+        if worker is not None:
+            worker.join(timeout + 11)
+            if worker.is_alive():
+                print("[FAIL] Breakpoint request worker did not stop")
+                raise RuntimeError("Breakpoint request worker did not stop")
 
 
 # HTTP/3 tests — all skip gracefully when aioquic is absent or H3 is disabled
@@ -3014,7 +2991,7 @@ def test_http3_session_events(h3_proxy_url, http_proxy_url, target_host, target_
 # ----------------------------------------------------------------------
 # Main inner test runner
 # ----------------------------------------------------------------------
-def _print_final_summary(all_results):
+def _print_final_summary(all_results, required_cases):
     print("\n" + "="*40)
     print("FINAL TEST SUMMARY")
     print("-"*40)
@@ -3025,7 +3002,14 @@ def _print_final_summary(all_results):
         status = "PASS" if ok is True else ("SKIP" if ok is None else "FAIL")
         print(f"  [{proxy_type}] {name}: {status}")
     print(f"\n{passed}/{total} tests passed" + (f" ({skipped} skipped)" if skipped else ""))
-    return passed == total
+    names = [(proxy_type, name) for proxy_type, name, _ in all_results]
+    missing = set(required_cases) - set(names)
+    unexpected = set(names) - set(required_cases)
+    if missing or unexpected:
+        print(f"Incomplete required coverage: missing={sorted(missing)}, "
+              f"unexpected={sorted(unexpected)}")
+    return (bool(required_cases) and bool(all_results) and skipped == 0 and passed == total
+            and not missing and not unexpected and len(names) == len(set(names)))
 
 
 def run_tests():
@@ -3072,6 +3056,8 @@ def run_tests():
     http1_base_url = f"http://{target_host}:{http1_port}"
 
     all_results = []
+    from fixtures.protocol_inventory import required_protocol_cases
+    required_cases = required_protocol_cases(http_proxy, socks_proxy, h3_proxy, expect_limits)
 
     if expect_limits:
         print("\n=== Testing limits profile:", http_proxy)
@@ -3089,7 +3075,7 @@ def run_tests():
             http_proxy, http1_base_url, timeout, verbose
         ))
 
-        ok = _print_final_summary(all_results)
+        ok = _print_final_summary(all_results, required_cases)
         server_manager.stop_all()
         if not ok:
             sys.exit(1)
@@ -3187,24 +3173,7 @@ def run_tests():
             socks_proxy, http_proxy, target_host, http1_port, timeout, verbose
         ))
 
-        udp_port = free_port()
-        def udp_echo_server():
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(('127.0.0.1', udp_port))
-            while not _shutdown_event.is_set():
-                try:
-                    data, addr = sock.recvfrom(1024)
-                    sock.sendto(data, addr)
-                except socket.timeout:
-                    continue
-                except:
-                    break
-            sock.close()
-        udp_thread = threading.Thread(target=udp_echo_server, daemon=True)
-        udp_thread.start()
-        server_manager._add_server("UDP Echo", udp_port, lambda: None)
-        time.sleep(0.2)
-        socks_add("SOCKS5 UDP", test_socks5_udp(socks_proxy, target_host, udp_port, timeout, verbose))
+        socks_add("SOCKS5 UDP", test_socks5_udp(socks_proxy, target_host, 0, timeout, verbose))
 
     if h3_proxy:
         print("\n=== Testing HTTP/3 proxy:", h3_proxy)
@@ -3223,7 +3192,7 @@ def run_tests():
             h3_proxy, http_proxy, target_host, http1_port, timeout, verbose
         ))
 
-    ok = _print_final_summary(all_results)
+    ok = _print_final_summary(all_results, required_cases)
     server_manager.stop_all()
     if not ok:
         sys.exit(1)

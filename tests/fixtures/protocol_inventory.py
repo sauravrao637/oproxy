@@ -1,0 +1,86 @@
+"""Required protocol cases by explicitly selected listener or limits contract."""
+
+PROTOCOL_CASES = {
+    'HTTP': (
+        'HTTP/1.1 GET',
+        'HTTP/1.1 gzip',
+        'HTTP/1.1 deflate',
+        'HTTP/1.1 brotli',
+        'HTTP/1.1 zstd',
+        'HTTP/1.1 JSON',
+        'HTTP/1.1 Proto',
+        'HTTP/1.1 Chunked',
+        'HTTP/1.1 Keep-Alive',
+        'HTTP/1.1 Large',
+        'HTTP/1.1 POST JSON',
+        'HTTP/1.1 POST Proto',
+        'HTTP/2 GET',
+        'HTTP/2 gzip',
+        'HTTP/2 deflate',
+        'HTTP/2 brotli',
+        'HTTP/2 zstd',
+        'HTTP/2 JSON',
+        'HTTP/2 Proto',
+        'HTTP/2 POST JSON',
+        'HTTP/2 Chunked',
+        'HTTP/2 Large',
+        'HTTPS CONNECT tunnel',
+        'HTTP/1.1 Session Events',
+        'WebSocket Text',
+        'WebSocket Binary',
+        'WebSocket Close',
+        'WebSocket Session Events',
+        'gRPC',
+        'HTTP/1.1 Status Passthrough',
+        'HTTP/2 Status Passthrough',
+        'HTTP/1.1 Multi Set-Cookie',
+        'HTTP/2 Multi Set-Cookie',
+        'HTTP/1.1 Methods',
+        'HTTP/1.1 Large Upload',
+        'HTTP/1.1 SSE Streaming',
+        'Internal Header Stripping',
+        'Concurrent Requests',
+        'HTTP/1.1 Mock Rule',
+        'HTTP/2 Mock Rule',
+        'HTTP/1.1 Access Block',
+        'HTTP/2 Access Block',
+        'HTTP/1.1 Rewrite Rule',
+        'HTTP/2 Rewrite Rule',
+        'WebSocket Mock',
+        'Map Local',
+        'DNS Override',
+        'Lua Script',
+        'Breakpoint',
+        'JWT Inspector',
+        'GraphQL Inspector',
+        'Capture Filter',
+        'Throttling',
+    ),
+    'SOCKS5': (
+        'SOCKS5 TCP',
+        'SOCKS5 Session Events',
+        'SOCKS5 UDP',
+    ),
+    'HTTP/3': (
+        'HTTP/3 GET',
+        'HTTP/3 JSON',
+        'HTTP/3 POST JSON',
+        'HTTP/3 Large',
+        'HTTP/3 Session Events',
+    ),
+    'LIMITS': (
+        'Limits config',
+        'Large response streaming',
+        'Large upload streaming',
+        'Session eviction',
+    ),
+}
+
+
+def required_protocol_cases(http_proxy, socks_proxy, h3_proxy, expect_limits):
+    if expect_limits:
+        groups = ["LIMITS"]
+    else:
+        groups = [name for name, enabled in (("HTTP", http_proxy),
+                  ("SOCKS5", socks_proxy), ("HTTP/3", h3_proxy)) if enabled]
+    return {(group, name) for group in groups for name in PROTOCOL_CASES[group]}

@@ -27,9 +27,8 @@ from urllib.parse import urlparse
 
 try:
     import requests
-except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "requests"], check=True)
-    import requests
+except ImportError as exc:
+    raise SystemExit(f"BLOCKED: missing required prerequisite: {exc}")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 import os
@@ -44,6 +43,8 @@ _arg_parser.add_argument(
 _arg_parser.add_argument("--host", default="127.0.0.1", help="oproxy bind/admin host")
 _arg_parser.add_argument("--port", type=int, default=8080, help="oproxy HTTP proxy/admin port")
 _arg_parser.add_argument("--socks-port", type=int, default=1080, help="oproxy SOCKS5 port")
+_arg_parser.add_argument("--upstream-policy", choices=("reject", "accept"),
+                         help="Expected upstream trust policy for a custom port; standard ports use qa-matrix.yaml")
 _args = _arg_parser.parse_args()
 
 PROXY_HOST = _args.host
@@ -52,6 +53,62 @@ SOCKS5_PORT = _args.socks_port
 BASE_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
 PROXY_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
 ADMIN_TOKEN = _args.admin_token  # If set, pass to admin API calls
+
+REQUIRED_CASES = (
+    'health endpoint OK',
+    'CA cert endpoint returns PEM',
+    'config endpoint returns port',
+    'sessions API accessible',
+    'metrics endpoint accessible',
+    'socks5 status endpoint accessible',
+    'setup guide page served',
+    'UI root served',
+    'HTTP GET through proxy',
+    'HTTP POST with body through proxy',
+    'HTTP custom headers forwarded',
+    'HTTP status code passthrough',
+    'HTTP session captured in log',
+    'Root CA cert is valid PEM',
+    'CONNECT tunnel handshake returns 200',
+    'HTTPS MITM intercept with CA cert',
+    'HTTPS session captured after MITM',
+    'SOCKS5 no-auth handshake completes',
+    'SOCKS5 HTTP GET through tunnel',
+    'SOCKS5 traffic session captured',
+    'SOCKS5 rejects invalid version',
+    'WebSocket CONNECT tunnel + upgrade via HTTP proxy',
+    'ws_frames field present in session schema',
+    'admin_token is startup-only config (SKIP: not hot-configurable)',
+    'correct admin token via x-oproxy-admin-token header',
+    'admin token via Bearer Authorization header',
+    'admin token via ?token= query param',
+    'admin API open when no token configured',
+    'admin token enforcement (live isolated instance)',
+    'Lua script CRUD: create',
+    'Lua script list includes created script',
+    'Lua abort() blocks request with custom status',
+    'Lua response header injection',
+    'Lua script CRUD: delete',
+    'Breakpoint CRUD: create and list',
+    'Breakpoint hold request and release',
+    'Breakpoint toggle enabled/disabled',
+    'Rewrite rule: inject request header',
+    'Rewrite rule: inject response header',
+    'Rewrite rule CRUD lifecycle',
+    'Map Remote CRUD lifecycle',
+    'Access block rule returns 403',
+    'Map Local CRUD lifecycle',
+    'Mock rule CRUD lifecycle',
+    'Mock rule intercepts proxied traffic',
+    'Capture filter GET endpoint',
+    'Capture filter excludes host from recording',
+    'SSE /api/sessions/stream endpoint reachable',
+    'Import sessions then export as HAR',
+    'Per-session delete or bulk clear',
+    'Webhook CRUD lifecycle',
+    'DNS override CRUD lifecycle',
+    'DNS override redirects proxied traffic',
+)
 
 RESULTS = []
 PASS = "PASS"
@@ -327,73 +384,16 @@ def section_http_proxy():
 def section_https_mitm():
     print("\n── 3. HTTPS / MITM Interception ─────────────────────────────────")
 
-    # Download CA cert
-    ca_path = None
-    try:
-        ca_path = get_ca_cert()
-    except Exception as e:
-        record("CA cert download", FAIL, str(e))
-        return
-
     def t_mitm_connect(name):
-        # Use curl which works with the CA cert (Python requests rejects cert due to missing AKID)
-        try:
-            result = subprocess.run(
-                # --ssl-revoke-best-effort: Windows curl (Schannel) otherwise rejects
-                # the MITM leaf with CERT_TRUST_REVOCATION_STATUS_UNKNOWN, since
-                # oproxy's generated certs carry no CRL/OCSP URL (see docs/troubleshooting.md).
-                ["curl", "-s", "--max-time", "12",
-                 "--proxy", PROXY_URL,
-                 "--cacert", ca_path,
-                 "--ssl-revoke-best-effort",
-                 "https://httpbin.org/get"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode == 0 and result.stdout:
-                try:
-                    d = json.loads(result.stdout)
-                    assert "headers" in d or "url" in d, f"unexpected: {result.stdout[:80]}"
-                    record(name, PASS, f"MITM intercept OK via curl (httpbin.org)")
-                except json.JSONDecodeError:
-                    record(name, PASS, f"MITM intercept OK, curl returned {len(result.stdout)}B")
-            elif result.returncode in (6, 28):  # curl: couldn't resolve, timeout
-                record(name, SKIP, "httpbin.org unreachable (network/DNS)")
-            else:
-                record(name, FAIL,
-                       f"curl exit={result.returncode} stderr={result.stderr[:100]}")
-        except subprocess.TimeoutExpired:
-            record(name, SKIP, "curl timed out (network)")
-        except Exception as e:
-            record(name, FAIL, str(e))
+        from fixtures.https_checks import (check_local_https, check_primary_https,
+                                          primary_upstream_policy)
+        expected = primary_upstream_policy(PROXY_PORT, _args.upstream_policy)
+        primary = check_primary_https(BASE_URL, ADMIN_TOKEN, expected)
+        record(name, PASS, primary + "; " + check_local_https())
 
     def t_mitm_session_captured(name):
-        try:
-            clear_sessions()
-            result = subprocess.run(
-                ["curl", "-s", "--max-time", "12",
-                 "--proxy", PROXY_URL,
-                 "--cacert", ca_path,
-                 "--ssl-revoke-best-effort",
-                 "https://httpbin.org/ip"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode in (6, 28):
-                record(name, SKIP, "httpbin.org unreachable (network/DNS)")
-                return
-            if result.returncode != 0:
-                record(name, FAIL,
-                       f"curl exit={result.returncode} stderr={result.stderr[:100]}")
-                return
-            sess = wait_for_session("httpbin.org", timeout=8)
-            if sess is None:
-                record(name, FAIL, "curl succeeded but no session captured for httpbin.org")
-                return
-            assert sess.get("request", {}).get("method") == "GET"
-            record(name, PASS, f"HTTPS session captured id={sess.get('id','?')[:16]}")
-        except subprocess.TimeoutExpired:
-            record(name, SKIP, "curl timed out (network)")
-        except Exception as e:
-            record(name, FAIL, str(e))
+        from fixtures.https_checks import check_local_https
+        record(name, PASS, check_local_https())
 
     def t_connect_tunnel_created(name):
         # Raw CONNECT to a local TCP port (doesn't need internet)
@@ -434,13 +434,36 @@ def section_https_mitm():
 def section_socks5():
     print("\n── 4. SOCKS5 Proxy ──────────────────────────────────────────────")
 
-    if not socks5_enabled():
-        for t in ("SOCKS5 no-auth handshake completes", "SOCKS5 HTTP GET through tunnel",
-                  "SOCKS5 traffic session captured", "SOCKS5 rejects invalid version"):
-            record(t, SKIP, "SOCKS5 not enabled on this oproxy instance")
+    if socks5_enabled():
+        _run_socks5_cases(PROXY_HOST, SOCKS5_PORT, BASE_URL, ADMIN_TOKEN)
         return
 
-    def socks5_connect_raw(target_host, target_port, src_host=PROXY_HOST, src_port=SOCKS5_PORT):
+    from fixtures.isolated_proxy import IsolatedProxy
+    names = ("SOCKS5 no-auth handshake completes", "SOCKS5 HTTP GET through tunnel",
+             "SOCKS5 traffic session captured", "SOCKS5 rejects invalid version")
+    print("Primary SOCKS5 listener is disabled; checking isolated tested binary")
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            proxy.configure(socks5_port=port)
+            proxy.restart()
+            _run_socks5_cases("127.0.0.1", port, proxy.url, proxy.admin_token)
+    except Exception as exc:
+        # Setup or cleanup failure invalidates the entire isolated execution.
+        del RESULTS[start:]
+        for name in names:
+            record(name, FAIL, f"isolated SOCKS5 prerequisite/lifecycle failed: {exc}")
+    else:
+        for result in RESULTS[start:]:
+            result["detail"] = ("primary listener disabled; isolated tested binary: "
+                                + result.get("detail", ""))
+
+
+def _run_socks5_cases(host, port, base_url, admin_token):
+    def socks5_connect_raw(target_host, target_port, src_host=host, src_port=port):
         """Perform RFC 1928 no-auth SOCKS5 handshake. Return connected socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
@@ -503,51 +526,42 @@ def section_socks5():
         record(name, PASS, "HTTP GET over SOCKS5 succeeded")
 
     def t_socks5_session_captured(name):
-        clear_sessions()
+        from fixtures.socks_checks import wait_tunnel_capture
+        from uuid import uuid4
+        # A fresh destination distinguishes this tunnel from prior captures.
+        origin = HTTPServer(("127.0.0.1", 0), EchoHandler)
+        worker = threading.Thread(target=origin.serve_forever, daemon=True)
+        worker.start()
+        port = origin.server_address[1]
+        marker = uuid4().hex
         try:
-            sock = socks5_connect_raw(PROXY_HOST, ECHO_PORT)
-            marker = f"socks5-marker-{int(time.time())}"
-            req = f"GET /{marker} HTTP/1.1\r\nHost: 127.0.0.1:{ECHO_PORT}\r\nConnection: close\r\n\r\n"
-            sock.sendall(req.encode())
-            sock.settimeout(3)
-            response = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
-            sock.close()
-            sess = wait_for_session(marker)
-            if sess is not None:
-                record(name, PASS, f"SOCKS5 session captured, id={sess.get('id','?')[:16]}")
-            else:
-                # SOCKS5 tunnels may not be MITM'd (no MITM host cert),
-                # so session capture depends on whether MITM is active
-                record(name, SKIP, "session not captured (MITM may not apply to plain TCP via SOCKS5)")
-        except Exception as e:
-            record(name, FAIL, str(e))
+            with socks5_connect_raw("127.0.0.1", port) as sock:
+                sock.sendall((f"GET /{marker} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                              "Connection: close\r\n\r\n").encode())
+                response = b""
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+            headers, body = response.split(b"\r\n\r\n", 1)
+            assert headers.split(b"\r\n", 1)[0].endswith(b" 200 OK"), headers
+            payload = json.loads(body)
+            assert payload["method"] == "GET" and payload["path"] == f"/{marker}", payload
+            def capture_api(method, path):
+                headers = {"x-oproxy-admin-token": admin_token} if admin_token else {}
+                return requests.request(method, base_url + path, headers=headers, timeout=10)
+            wait_tunnel_capture(capture_api, "127.0.0.1", port)
+            record(name, PASS, "unique destination, terminal SOCKS5 tunnel and bidirectional bytes verified")
+        finally:
+            origin.shutdown()
+            origin.server_close()
+            worker.join(timeout=3)
 
     def t_socks5_refuses_invalid_version(name):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        sock.connect((PROXY_HOST, SOCKS5_PORT))
-        try:
-            # Send SOCKS4 greeting (version 4)
-            sock.sendall(b"\x04\x01\x00\x50\x7f\x00\x00\x01\x00")
-            resp = sock.recv(8)
-            # Should get a SOCKS5 error or connection close
-            # Any response that's not SOCKS4 confirmation is OK
-            if len(resp) == 0:
-                record(name, PASS, "connection closed on invalid version")
-            elif resp[0] == 5:
-                # SOCKS5 error response
-                record(name, PASS, f"SOCKS5 error response: {resp.hex()}")
-            else:
-                record(name, PASS, f"rejected or closed: {resp.hex()[:20]}")
-        except Exception as e:
-            record(name, PASS, f"connection reset/closed: {type(e).__name__}")
-        finally:
-            sock.close()
+        from fixtures.socks_checks import assert_invalid_version_rejected
+        assert_invalid_version_rejected(host, port, 3)
+        record(name, PASS, "invalid version connection closed/reset")
 
     run_test("SOCKS5 no-auth handshake completes", t_socks5_handshake)
     run_test("SOCKS5 HTTP GET through tunnel", t_socks5_http_request)
@@ -574,11 +588,14 @@ def section_websocket():
                 await ws.send(f"echo:{msg}")
 
         stop_event = threading.Event()
+        ready = threading.Event()
+        errors = []
         port_holder = [None]
 
         async def server_main():
             async with websockets.serve(ws_handler, "127.0.0.1", 0) as srv:
                 port_holder[0] = list(srv.sockets)[0].getsockname()[1]
+                ready.set()
                 # stop_event is a threading.Event set from another thread; a blocking
                 # .wait() here would freeze this coroutine's event loop, so the
                 # server could accept the TCP connection but never service it.
@@ -586,16 +603,31 @@ def section_websocket():
                     await asyncio.sleep(0.05)
 
         def runner():
-            asyncio.run(server_main())
+            try:
+                asyncio.run(server_main())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                ready.set()
 
-        t = threading.Thread(target=runner, daemon=True)
+        t = threading.Thread(target=runner, name='fixture-e2e-websocket', daemon=True)
         t.start()
-        # Wait for port assignment
-        deadline = time.time() + 3
-        while port_holder[0] is None and time.time() < deadline:
-            time.sleep(0.05)
 
-        return port_holder[0], lambda: stop_event.set()
+        def stop():
+            stop_event.set()
+            t.join(timeout=5)
+            if t.is_alive():
+                raise RuntimeError('WebSocket fixture thread did not stop')
+            if errors:
+                raise RuntimeError(f'WebSocket fixture failed: {errors[0]}') from errors[0]
+
+        try:
+            if not ready.wait(timeout=3) or port_holder[0] is None or errors:
+                raise RuntimeError('WebSocket fixture failed to become ready')
+        except BaseException:
+            stop()
+            raise
+        return port_holder[0], stop
 
     def t_ws_http_upgrade_forwarded(name):
         """Test that WebSocket HTTP upgrade headers are forwarded through the proxy.
@@ -605,8 +637,9 @@ def section_websocket():
 
         try:
             ws_port, ws_stop = start_ws_echo_server()
-        except Exception:
-            pass
+        except Exception as exc:
+            record(name, FAIL, f'WebSocket fixture startup failed: {exc}')
+            return
 
         if ws_port is None:
             # Try with simple socket-based "WebSocket" server
@@ -621,6 +654,7 @@ def section_websocket():
             return
 
         # Connect raw socket through HTTP proxy CONNECT
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
@@ -676,6 +710,8 @@ def section_websocket():
         except Exception as e:
             record(name, FAIL, f"{type(e).__name__}: {e}")
         finally:
+            if sock is not None:
+                sock.close()
             if ws_stop:
                 ws_stop()
 
@@ -726,176 +762,88 @@ def section_websocket():
 def section_admin_token():
     print("\n── 6. Admin Token Authentication ────────────────────────────────")
 
-    TEST_TOKEN = f"ua-test-token-{int(time.time())}"
+    from fixtures.isolated_proxy import IsolatedProxy
+    from uuid import uuid4
+
+    def expect(client, url, expected, **kwargs):
+        # Query authentication can establish a cookie; test each credential independently.
+        client.cookies.clear()
+        response = client.get(url + "/admin/sessions", timeout=5, **kwargs)
+        assert response.status_code == expected, (
+            f"expected admin status {expected}, got {response.status_code}")
+        return response
 
     def t_set_token(name):
-        # admin_token is startup config (YAML/env), not hot-configurable.
-        # HotConfig only supports max_body_bytes.
-        # Test by checking /admin/config reports admin_auth_enabled.
-        r = admin("GET", "/config")
-        assert r.ok, f"config endpoint failed: {r.status_code}"
-        cfg = r.json()
-        # admin_auth_enabled reflects whether token is enforced
-        assert "admin_auth_enabled" in cfg, f"admin_auth_enabled missing from config: {cfg}"
-        record(name, SKIP,
-               f"admin_token is startup config only (admin_auth_enabled={cfg.get('admin_auth_enabled')}). "
-               "Tested via /admin/config. Token tests below require a restart with OPROXY_ADMIN_TOKEN env.")
+        token_a, token_b = uuid4().hex, uuid4().hex
+        with IsolatedProxy(admin_token=token_a) as proxy, requests.Session() as client:
+            client.trust_env = False
+            cfg = proxy.client.get(proxy.url + "/admin/config", timeout=5)
+            assert cfg.status_code == 200, f"config status={cfg.status_code}"
+            assert cfg.json()["admin_auth_enabled"] is True
+            def check(active, inactive):
+                expect(client, proxy.url, 200, headers={"x-oproxy-admin-token": active})
+                expect(client, proxy.url, 401, headers={"x-oproxy-admin-token": inactive})
+                expect(client, proxy.url, 401)
+            check(token_a, token_b)
+            proxy.configure(admin_token=token_b)
+            response = proxy.client.post(proxy.url + "/admin/config/reload", timeout=5)
+            assert response.status_code == 200, f"reload status={response.status_code}"
+            assert response.json()["reloaded"] is True
+            check(token_a, token_b)
+            proxy.restart()
+            check(token_b, token_a)
+        record(name, PASS, "isolated instance: reload preserves token A; restart activates B")
 
-    def t_token_via_header(name):
-        # Read the current config to check if token is configured
-        r = admin("GET", "/config")
-        assert r.ok, f"config endpoint returned {r.status_code}"
-        cfg = r.json()
-        # Config doesn't expose token value; use ADMIN_TOKEN env var if available
-        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
-        if not configured_token:
-            record(name, SKIP, "no admin_token configured in running instance")
-            return
-        # Test with correct token
-        r2 = requests.get(f"{BASE_URL}/admin/sessions",
-                          headers={"x-oproxy-admin-token": configured_token},
-                          timeout=10)
-        assert r2.ok, f"token auth failed: {r2.status_code}"
-        # Test with wrong token
-        r3 = requests.get(f"{BASE_URL}/admin/sessions",
-                          headers={"x-oproxy-admin-token": "wrong-token"},
-                          timeout=10)
-        assert r3.status_code == 401, f"expected 401 with wrong token, got {r3.status_code}"
-        record(name, PASS, "correct token passes, wrong token → 401")
-
-    def t_token_via_bearer(name):
-        r = admin("GET", "/config")
-        assert r.ok
-        cfg = r.json()
-        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
-        if not configured_token:
-            record(name, SKIP, "no admin_token configured")
-            return
-        r2 = requests.get(f"{BASE_URL}/admin/sessions",
-                          headers={"Authorization": f"Bearer {configured_token}"},
-                          timeout=10)
-        assert r2.ok, f"Bearer auth failed: {r2.status_code}"
-        record(name, PASS, "Bearer token accepted")
-
-    def t_token_via_query_param(name):
-        r = admin("GET", "/config")
-        assert r.ok
-        cfg = r.json()
-        configured_token = cfg.get("admin_token") or ADMIN_TOKEN or ""
-        if not configured_token:
-            record(name, SKIP, "no admin_token configured")
-            return
-        r2 = requests.get(f"{BASE_URL}/admin/sessions?token={configured_token}",
-                          timeout=10)
-        assert r2.ok, f"query param auth failed: {r2.status_code}"
-        record(name, PASS, "?token= query param accepted")
+    def check_transport(name, transport):
+        with IsolatedProxy() as proxy, requests.Session() as client:
+            client.trust_env = False
+            for token, expected in ((proxy.admin_token, 200), ("wrong-token", 401)):
+                kwargs = ({"params": {"token": token}} if transport == "query" else
+                          {"headers": {"Authorization": f"Bearer {token}"}} if transport == "bearer" else
+                          {"headers": {"x-oproxy-admin-token": token}})
+                expect(client, proxy.url, expected, **kwargs)
+            expect(client, proxy.url, 401)
+        # Keep the primary profile's applicable authentication assertion as well.
+        cfg = admin("GET", "/config")
+        assert cfg.status_code == 200, f"primary config status={cfg.status_code}"
+        if cfg.json()["admin_auth_enabled"]:
+            assert ADMIN_TOKEN, "primary admin token required"
+            with requests.Session() as client:
+                client.trust_env = False
+                kwargs = ({"params": {"token": ADMIN_TOKEN}} if transport == "query" else
+                          {"headers": {"Authorization": f"Bearer {ADMIN_TOKEN}"}} if transport == "bearer" else
+                          {"headers": {"x-oproxy-admin-token": ADMIN_TOKEN}})
+                expect(client, BASE_URL, 200, **kwargs)
+                expect(client, BASE_URL, 401)
+            context = "primary authenticated profile also verified"
+        else:
+            context = "primary authentication inapplicable (open profile)"
+        record(name, PASS, f"isolated {transport}: valid=200, wrong/missing=401; {context}")
 
     def t_no_token_required_when_unset(name):
-        r = admin("GET", "/config")
-        assert r.ok
-        cfg = r.json()
-        if cfg.get("admin_auth_enabled"):
-            record(name, SKIP, "token is enforced; skipping open-access test")
-            return
-        r2 = admin("GET", "/sessions")
-        assert r2.ok, f"open access failed: {r2.status_code}"
-        record(name, PASS, "admin API accessible without token when none configured")
+        with IsolatedProxy(open_admin=True) as proxy, requests.Session() as client:
+            client.trust_env = False
+            cfg = client.get(proxy.url + "/admin/config", timeout=5)
+            assert cfg.status_code == 200, f"config status={cfg.status_code}"
+            assert cfg.json()["admin_auth_enabled"] is False
+            expect(client, proxy.url, 200)
+        record(name, PASS, "isolated token-free loopback instance accepts unauthenticated access")
 
     def t_token_enforcement_live(name):
-        """Spin up a temporary oproxy on a free port with admin token set."""
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        exe_name = "oproxy.exe" if os.name == "nt" else "oproxy"
-        binary = os.path.join(repo_root, "target", "debug", exe_name)
-        if not os.path.exists(binary):
-            binary = os.path.join(repo_root, "target", "release", exe_name)
-        if not os.path.exists(binary):
-            record(name, SKIP, "oproxy binary not found for live token test (run `cargo build` first)")
-            return
-
-        # Find free port
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            test_port = s.getsockname()[1]
-
-        token = "ua-test-secret-token-12345"
-        import tempfile
-        tmpdir = tempfile.mkdtemp(prefix="oproxy_token_test_")
-
-        proc = subprocess.Popen(
-            [binary],
-            env={**os.environ,
-                 "OPROXY_PORT": str(test_port),
-                 "OPROXY_ADMIN_TOKEN": token,
-                 "OPROXY_STORAGE_PATH": tmpdir,
-                 "OPROXY_MITM_ENABLED": "false",
-                 "RUST_LOG": "error"},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-
-        base = f"http://127.0.0.1:{test_port}"
-        # Wait for startup
-        deadline = time.time() + 8
-        started = False
-        while time.time() < deadline:
-            try:
-                r = requests.get(f"{base}/health", timeout=1)
-                if r.ok:
-                    started = True
-                    break
-            except Exception:
-                pass
-            time.sleep(0.2)
-
-        if not started:
-            proc.terminate()
-            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
-            record(name, SKIP, "token-protected instance failed to start")
-            return
-
-        try:
-            # Without token → 401
-            r_unauth = requests.get(f"{base}/admin/sessions", timeout=5)
-            assert r_unauth.status_code == 401, \
-                f"expected 401 without token, got {r_unauth.status_code}"
-
-            # With wrong token → 401
-            r_wrong = requests.get(f"{base}/admin/sessions",
-                                   headers={"x-oproxy-admin-token": "wrong"},
-                                   timeout=5)
-            assert r_wrong.status_code == 401, \
-                f"expected 401 with wrong token, got {r_wrong.status_code}"
-
-            # With correct token via x-oproxy-admin-token → 200
-            r_ok = requests.get(f"{base}/admin/sessions",
-                                 headers={"x-oproxy-admin-token": token},
-                                 timeout=5)
-            assert r_ok.ok, f"correct token rejected: {r_ok.status_code}"
-
-            # With correct token via Bearer → 200
-            r_bearer = requests.get(f"{base}/admin/sessions",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                    timeout=5)
-            assert r_bearer.ok, f"Bearer token rejected: {r_bearer.status_code}"
-
-            # With correct token via ?token= → 200
-            r_qp = requests.get(f"{base}/admin/sessions?token={token}", timeout=5)
-            assert r_qp.ok, f"query param token rejected: {r_qp.status_code}"
-
-            record(name, PASS,
-                   "no-token→401, wrong-token→401, correct x-header→200, Bearer→200, ?token=→200")
-        except AssertionError:
-            raise
-        except Exception as e:
-            record(name, FAIL, str(e))
-        finally:
-            proc.terminate()
-            proc.wait(timeout=3)
-            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+        with IsolatedProxy() as proxy, requests.Session() as client:
+            client.trust_env = False
+            expect(client, proxy.url, 401)
+            expect(client, proxy.url, 401, headers={"x-oproxy-admin-token": "wrong"})
+            expect(client, proxy.url, 200, headers={"x-oproxy-admin-token": proxy.admin_token})
+        record(name, PASS, "isolated instance: missing/wrong token=401, correct token=200")
 
     run_test("admin_token is startup-only config (SKIP: not hot-configurable)", t_set_token)
-    run_test("correct admin token via x-oproxy-admin-token header", t_token_via_header)
-    run_test("admin token via Bearer Authorization header", t_token_via_bearer)
-    run_test("admin token via ?token= query param", t_token_via_query_param)
+    run_test("correct admin token via x-oproxy-admin-token header",
+             lambda name: check_transport(name, "header"))
+    run_test("admin token via Bearer Authorization header",
+             lambda name: check_transport(name, "bearer"))
+    run_test("admin token via ?token= query param",
+             lambda name: check_transport(name, "query"))
     run_test("admin API open when no token configured", t_no_token_required_when_unset)
     run_test("admin token enforcement (live isolated instance)", t_token_enforcement_live)
 
@@ -905,25 +853,56 @@ def section_admin_token():
 # ──────────────────────────────────────────────────────────────────────────────
 def section_lua():
     print("\n── 7. Lua Scripting ─────────────────────────────────────────────")
+    from fixtures.isolated_proxy import IsolatedProxy
 
-    # Clean up any stale ua-test scripts from previous runs
-    stale = admin("GET", "/scripts").json()
-    for s in stale:
-        if s.get("name", "").startswith("ua-test") or s.get("name") == "probe-test":
-            admin("DELETE", f"/scripts/{s['id']}")
+    names = [name for name in REQUIRED_CASES if name.startswith("Lua ")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
 
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_lua_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated Lua prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_lua_checks(admin, proxied):
+    """Run Lua assertions with explicitly owned administration and traffic clients."""
+
+    from uuid import uuid4
+    prefix = "lua-check-" + uuid4().hex
+    noop_name = prefix + "-noop"
+    abort_name = prefix + "-abort"
+    header_name = prefix + "-header"
+    abort_path = "/" + prefix + "/lua-abort-test"
+    header_path = "/" + prefix + "/lua-header-test"
+    owned_names = {noop_name, abort_name, header_name}
     created_ids = []
 
     def t_lua_create(name):
         r = admin("POST", "/scripts", json={
-            "id": "", "name": "ua-test-noop", "enabled": True,
+            "id": "", "name": noop_name, "enabled": True,
             "code": "-- noop script",
         })
         assert r.ok, f"create failed: {r.status_code} {r.text}"
         # POST returns {"ok":true}; find the script by name in the list
         scripts = admin("GET", "/scripts").json()
-        script = next((s for s in scripts if s.get("name") == "ua-test-noop"), None)
-        assert script is not None, "ua-test-noop not found after create"
+        script = next((s for s in scripts if s.get("name") == noop_name), None)
+        assert script is not None, f"{noop_name} not found after create"
         created_ids.append(script["id"])
         record(name, PASS, f"script id={script['id'][:16]}")
 
@@ -932,29 +911,29 @@ def section_lua():
         assert r.ok, f"list failed: {r.status_code}"
         scripts = r.json()
         assert isinstance(scripts, list), f"not a list: {type(scripts)}"
-        assert any(s.get("name") == "ua-test-noop" for s in scripts), \
-            "ua-test-noop not in list"
-        record(name, PASS, f"found ua-test-noop in {len(scripts)} scripts")
+        assert any(s.get("name") == noop_name for s in scripts), \
+            f"{noop_name} not in list"
+        record(name, PASS, f"found created script in {len(scripts)} scripts")
 
     def t_lua_abort_script(name):
         """Create a script that aborts requests to a specific path."""
         r = admin("POST", "/scripts", json={
-            "id": "", "name": "ua-test-abort", "enabled": True,
+            "id": "", "name": abort_name, "enabled": True,
             # Lua gets request.uri (full URI), not request.path — check by string.find.
             # `-` is a Lua pattern quantifier (lazy repeat), not a literal dash, so the
             # 4th arg (plain-text find) is required for a path containing dashes to
             # ever match. Scripts run on both the request and response pass, so guard
             # on `request` being non-nil (it's nil during the response pass).
-            "code": """
-if request and string.find(request.uri, "/lua-abort-test", 1, true) then
+            "code": f"""
+if request and string.find(request.uri, "{abort_path}", 1, true) then
   abort(418, "lua blocked this")
 end
 """,
         })
         assert r.ok, f"create abort script failed: {r.status_code}"
         scripts = admin("GET", "/scripts").json()
-        script = next((s for s in scripts if s.get("name") == "ua-test-abort"), None)
-        assert script is not None, "ua-test-abort not found"
+        script = next((s for s in scripts if s.get("name") == abort_name), None)
+        assert script is not None, f"{abort_name} not found"
         script_id = script["id"]
         created_ids.append(script_id)
 
@@ -962,20 +941,16 @@ end
         time.sleep(0.3)
 
         # Proxy a request to the abort path
-        r2 = proxied("GET", echo_url("/lua-abort-test"))
-        if r2.status_code == 418:
-            assert "lua blocked" in r2.text, f"wrong body: {r2.text[:100]}"
-            record(name, PASS, "Lua abort() returned 418 with custom body")
-        elif r2.status_code == 200:
-            # Script may not be active yet or path matching different
-            record(name, SKIP, f"script didn't abort (path matching? echo returned 200)")
-        else:
-            record(name, SKIP, f"unexpected status {r2.status_code}: {r2.text[:80]}")
+        r2 = proxied("GET", echo_url(abort_path))
+        assert r2.status_code == 418, \
+            f"Lua abort expected 418, got {r2.status_code}: {r2.text[:100]}"
+        assert r2.text == "lua blocked this", f"wrong body: {r2.text[:100]}"
+        record(name, PASS, "Lua abort() returned 418 with exact custom body")
 
     def t_lua_header_injection(name):
         """Create a script that injects a response header."""
         r = admin("POST", "/scripts", json={
-            "id": "", "name": "ua-test-header-inject", "enabled": True,
+            "id": "", "name": header_name, "enabled": True,
             # Scripts run on both the request and response pass; guard on `response`
             # being non-nil (it's nil during the request pass) to avoid a spurious
             # "nil value" warning every request.
@@ -987,42 +962,46 @@ end
         })
         assert r.ok, f"create header inject script failed: {r.status_code}"
         scripts = admin("GET", "/scripts").json()
-        script = next((s for s in scripts if s.get("name") == "ua-test-header-inject"), None)
-        assert script is not None, "ua-test-header-inject not found"
+        script = next((s for s in scripts if s.get("name") == header_name), None)
+        assert script is not None, f"{header_name} not found"
         created_ids.append(script["id"])
         time.sleep(0.3)
 
-        r2 = proxied("GET", echo_url("/lua-header-test"))
+        r2 = proxied("GET", echo_url(header_path))
         # The echo server returns 200, the header should be injected by Lua
         injected = r2.headers.get("x-lua-injected")
-        if injected == "yes":
-            record(name, PASS, "Lua response header injection confirmed")
-        else:
-            record(name, SKIP,
-                   f"header not injected (may need inline path filter). Got: {dict(r2.headers)}")
+        assert r2.status_code == 200, \
+            f"Lua header request expected 200, got {r2.status_code}"
+        assert injected == "yes", \
+            f"Lua response header missing or incorrect: {dict(r2.headers)}"
+        record(name, PASS, "Lua response header injection confirmed")
 
     def t_lua_delete(name):
-        # Delete scripts from this run
-        for sid in created_ids:
+        # Recover IDs even when creation succeeded but its follow-up check failed.
+        response = admin("GET", "/scripts")
+        assert response.ok, f"cleanup list failed: {response.status_code}"
+        owned_ids = set(created_ids)
+        owned_ids.update(s["id"] for s in response.json()
+                         if s.get("name") in owned_names)
+        errors = []
+        for sid in owned_ids:
             r = admin("DELETE", f"/scripts/{sid}")
-            assert r.ok or r.status_code == 404, f"delete {sid} failed: {r.status_code}"
-        created_ids.clear()
-        # Also clean up any leftover ua-test scripts from previous runs
-        all_scripts = admin("GET", "/scripts").json()
-        for s in all_scripts:
-            if s.get("name", "").startswith("ua-test"):
-                admin("DELETE", f"/scripts/{s['id']}")
-        # Verify clean
-        final = admin("GET", "/scripts").json()
-        assert not any(s.get("name", "").startswith("ua-test") for s in final), \
-            f"ua-test scripts still present: {[s['name'] for s in final if s.get('name','').startswith('ua-test')]}"
-        record(name, PASS, "all ua-test scripts deleted")
+            if not (r.ok or r.status_code == 404):
+                errors.append(f"delete {sid} failed: {r.status_code}")
+        response = admin("GET", "/scripts")
+        assert response.ok, f"cleanup verification failed: {response.status_code}"
+        remaining = [s["id"] for s in response.json()
+                     if s.get("name") in owned_names or s["id"] in owned_ids]
+        assert not errors and not remaining, f"cleanup errors={errors}; remaining={remaining}"
+        record(name, PASS, "all scripts created by this run deleted")
 
-    run_test("Lua script CRUD: create", t_lua_create)
-    run_test("Lua script list includes created script", t_lua_list)
-    run_test("Lua abort() blocks request with custom status", t_lua_abort_script)
-    run_test("Lua response header injection", t_lua_header_injection)
-    run_test("Lua script CRUD: delete", t_lua_delete)
+    try:
+        run_test("Lua script CRUD: create", t_lua_create)
+        run_test("Lua script list includes created script", t_lua_list)
+        run_test("Lua abort() blocks request with custom status", t_lua_abort_script)
+        run_test("Lua response header injection", t_lua_header_injection)
+    finally:
+        run_test("Lua script CRUD: delete", t_lua_delete)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1030,6 +1009,40 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 def section_breakpoints():
     print("\n── 8. Breakpoints ───────────────────────────────────────────────")
+    from fixtures.isolated_proxy import IsolatedProxy
+
+    names = [name for name in REQUIRED_CASES if name.startswith("Breakpoint ")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
+
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_breakpoint_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated breakpoint prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_breakpoint_checks(admin, proxied):
+    """Exercise breakpoints using administration and traffic for an owned instance."""
+
+    from uuid import uuid4
+    marker = uuid4().hex
+    hold_path = "/bp-hold-test-" + marker
+    hold_url = echo_url(hold_path)
 
     def cleanup_bp():
         rules = admin("GET", "/breakpoints").json()
@@ -1046,7 +1059,7 @@ def section_breakpoints():
         cleanup_bp()
         r = admin("POST", "/breakpoints", json={
             "id": "", "enabled": True, "bp_type": "Request",
-            "location": {"host": "bp-test.example.com", "path": None,
+            "location": {"host": f"bp-{marker}.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
         })
@@ -1055,7 +1068,7 @@ def section_breakpoints():
         rules = admin("GET", "/breakpoints").json()
         bp = next(
             (ru for ru in rules
-             if ru.get("location", {}).get("host") == "bp-test.example.com"),
+             if ru.get("location", {}).get("host") == f"bp-{marker}.example.com"),
             None,
         )
         assert bp is not None, f"BP not in list: {rules}"
@@ -1066,7 +1079,7 @@ def section_breakpoints():
         # Create breakpoint matching our echo server path
         r = admin("POST", "/breakpoints", json={
             "id": "", "enabled": True, "bp_type": "Request",
-            "location": {"host": None, "path": "/bp-hold-test",
+            "location": {"host": None, "path": hold_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
         })
@@ -1077,7 +1090,7 @@ def section_breakpoints():
         result = [None]
         def do_req():
             try:
-                result[0] = proxied("GET", echo_url("/bp-hold-test"), timeout=15)
+                result[0] = proxied("GET", hold_url, timeout=15)
             except Exception as e:
                 result[0] = e
 
@@ -1089,15 +1102,21 @@ def section_breakpoints():
         pending = []
         while time.time() < deadline:
             pending = admin("GET", "/breakpoints/pending").json()
+            pending = [p for p in pending
+                       if p.get("bp_type") == "Request"
+                       and p.get("context", {}).get("Request", {}).get("method") == "GET"
+                       and p.get("context", {}).get("Request", {}).get("uri") == hold_url]
             if pending:
+                assert len(pending) == 1, f"duplicate pending request: {pending}"
                 break
             time.sleep(0.3)
 
         if not pending:
             t.join(1)
-            record(name, SKIP, "request not held (path matching may differ)")
             cleanup_bp()
-            return
+            raise AssertionError("request did not enter the pending breakpoint queue")
+
+        assert t.is_alive() and result[0] is None, "request completed before release"
 
         p_id = pending[0]["id"]
         # Release it
@@ -1109,7 +1128,10 @@ def section_breakpoints():
         t.join(5)
         assert result[0] is not None and not isinstance(result[0], Exception), \
             f"proxied request failed after release: {result[0]}"
-        assert result[0].ok, f"status after release: {result[0].status_code}"
+        assert result[0].status_code == 200, f"status after release: {result[0].status_code}"
+        body = result[0].json()
+        assert body.get("method") == "GET", f"wrong released method: {body}"
+        assert body.get("path") == hold_path, f"wrong released path: {body}"
         record(name, PASS, f"held and released; response status={result[0].status_code}")
         cleanup_bp()
 
@@ -1117,7 +1139,7 @@ def section_breakpoints():
         cleanup_bp()
         r = admin("POST", "/breakpoints", json={
             "id": "", "enabled": True, "bp_type": "Request",
-            "location": {"host": "toggle.example.com", "path": None,
+            "location": {"host": f"toggle-{marker}.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
         })
@@ -1126,7 +1148,7 @@ def section_breakpoints():
         rules = admin("GET", "/breakpoints").json()
         rule = next(
             (ru for ru in rules
-             if ru.get("location", {}).get("host") == "toggle.example.com"),
+             if ru.get("location", {}).get("host") == f"toggle-{marker}.example.com"),
             None,
         )
         assert rule is not None, "BP not found after create"
@@ -1147,9 +1169,17 @@ def section_breakpoints():
         record(name, PASS, "BP toggle enabled→disabled confirmed")
         cleanup_bp()
 
-    run_test("Breakpoint CRUD: create and list", t_bp_crud)
-    run_test("Breakpoint hold request and release", t_bp_hold_and_release)
-    run_test("Breakpoint toggle enabled/disabled", t_bp_toggle)
+    def checked_case(check):
+        def execute(name):
+            try:
+                check(name)
+            finally:
+                cleanup_bp()
+        return execute
+
+    run_test("Breakpoint CRUD: create and list", checked_case(t_bp_crud))
+    run_test("Breakpoint hold request and release", checked_case(t_bp_hold_and_release))
+    run_test("Breakpoint toggle enabled/disabled", checked_case(t_bp_toggle))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1158,18 +1188,55 @@ def section_breakpoints():
 def section_rewrites():
     print("\n── 9. Rewrites & Rule Sets ──────────────────────────────────────")
 
-    def cleanup_rules(prefix="ua-rw-"):
-        rules = admin("GET", "/rule-sets").json()
+    from fixtures.isolated_proxy import IsolatedProxy
+
+    names = [name for name in REQUIRED_CASES if name.startswith("Rewrite rule")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
+
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_rewrite_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated rewrite prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_rewrite_checks(admin, proxied):
+    import uuid
+
+    prefix = "ua-rw-" + uuid.uuid4().hex + "-"
+    request_path = "/" + prefix + "/rw-req-hdr-test"
+    response_path = "/" + prefix + "/rw-resp-hdr-test"
+
+    def cleanup_rules():
+        response = admin("GET", "/rule-sets")
+        response.raise_for_status()
+        rules = response.json()
         for r in rules:
             if str(r.get("name", "")).startswith(prefix):
-                admin("DELETE", f"/rule-sets/{r['id']}")
+                response = admin("DELETE", f"/rule-sets/{r['id']}")
+                response.raise_for_status()
 
     def t_rule_add_request_header(name):
         cleanup_rules()
         r = admin("POST", "/rule-sets", json={
-            "id": "", "name": "ua-rw-req-header", "enabled": True,
+            "id": "", "name": prefix + "req-header", "enabled": True,
             "applies_to": "request",
-            "location": {"host": None, "path": "/rw-req-hdr-test",
+            "location": {"host": None, "path": request_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
             "actions": [{"type": "set_header", "name": "x-rewritten", "value": "yes"}],
@@ -1177,23 +1244,20 @@ def section_rewrites():
         assert r.ok, f"create rule failed: {r.status_code} {r.text}"
         time.sleep(0.3)
 
-        r2 = proxied("GET", echo_url("/rw-req-hdr-test"))
+        r2 = proxied("GET", echo_url(request_path))
         assert r2.ok, f"proxied request failed: {r2.status_code}"
         d = r2.json()
         hdrs = {k.lower(): v for k, v in d["headers"].items()}
-        if "x-rewritten" in hdrs:
-            assert hdrs["x-rewritten"] == "yes", f"wrong value: {hdrs['x-rewritten']}"
-            record(name, PASS, "request header injected by rewrite rule")
-        else:
-            record(name, SKIP, f"header not injected (path match?). Headers: {list(hdrs.keys())[:8]}")
+        assert hdrs.get("x-rewritten") == "yes", f"wrong or absent request header: {hdrs}"
+        record(name, PASS, "request header injected by rewrite rule")
         cleanup_rules()
 
     def t_rule_response_header(name):
         cleanup_rules()
         r = admin("POST", "/rule-sets", json={
-            "id": "", "name": "ua-rw-resp-header", "enabled": True,
+            "id": "", "name": prefix + "resp-header", "enabled": True,
             "applies_to": "response",
-            "location": {"host": None, "path": "/rw-resp-hdr-test",
+            "location": {"host": None, "path": response_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
             "actions": [{"type": "set_header", "name": "x-resp-rewritten", "value": "injected"}],
@@ -1201,19 +1265,18 @@ def section_rewrites():
         assert r.ok, f"create rule failed: {r.status_code}"
         time.sleep(0.3)
 
-        r2 = proxied("GET", echo_url("/rw-resp-hdr-test"))
+        r2 = proxied("GET", echo_url(response_path))
         injected = r2.headers.get("x-resp-rewritten")
-        if injected == "injected":
-            record(name, PASS, "response header injected by rewrite rule")
-        else:
-            record(name, SKIP, f"header not injected. Response headers: {dict(list(r2.headers.items())[:6])}")
+        assert r2.status_code == 200, f"proxied request failed: {r2.status_code}"
+        assert injected == "injected", f"wrong or absent response header: {injected!r}"
+        record(name, PASS, "response header injected by rewrite rule")
         cleanup_rules()
 
     def t_rule_crud(name):
-        cleanup_rules("ua-rw-crud-")
+        cleanup_rules()
         # Create
         r = admin("POST", "/rule-sets", json={
-            "id": "", "name": "ua-rw-crud-1", "enabled": True,
+            "id": "", "name": prefix + "crud-1", "enabled": True,
             "applies_to": "request",
             "location": {"host": "crud.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
@@ -1234,14 +1297,60 @@ def section_rewrites():
         assert not any(ru["id"] == rule_id for ru in rules2), "rule still in list"
         record(name, PASS, "rule CRUD: create → list → delete")
 
-    run_test("Rewrite rule: inject request header", t_rule_add_request_header)
-    run_test("Rewrite rule: inject response header", t_rule_response_header)
-    run_test("Rewrite rule CRUD lifecycle", t_rule_crud)
+    def run_clean(name, check):
+        def wrapped(case_name):
+            try:
+                check(case_name)
+            finally:
+                cleanup_rules()
+        run_test(name, wrapped)
+
+    run_clean("Rewrite rule: inject request header", t_rule_add_request_header)
+    run_clean("Rewrite rule: inject response header", t_rule_response_header)
+    run_clean("Rewrite rule CRUD lifecycle", t_rule_crud)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 10: MAP REMOTE & ACCESS RULES
 # ──────────────────────────────────────────────────────────────────────────────
+def _check_access_block(admin, proxied):
+    import uuid
+
+    rule_name = "ua-access-" + uuid.uuid4().hex
+    request_path = "/" + rule_name
+    url = echo_url(request_path)
+
+    def assert_forwarded():
+        response = proxied("GET", url)
+        assert response.status_code == 200, f"forwarding status: {response.status_code}"
+        body = response.json()
+        assert body.get("method") == "GET", f"forwarding method: {body}"
+        assert body.get("path") == request_path, f"forwarding path: {body}"
+
+    def cleanup():
+        response = admin("GET", "/access-rules")
+        response.raise_for_status()
+        for rule in response.json():
+            if rule.get("name") == rule_name:
+                admin("DELETE", f"/access-rules/{rule['id']}").raise_for_status()
+
+    assert_forwarded()
+    try:
+        response = admin("POST", "/access-rules", json={
+            "id": "", "name": rule_name, "enabled": True,
+            "location": {"host": "127.0.0.1", "path": request_path,
+                         "port": ECHO_PORT, "protocol": "http", "query": None,
+                         "methods": ["GET"], "mode": "glob"},
+            "action": "block",
+        })
+        response.raise_for_status()
+        blocked = proxied("GET", url)
+        assert blocked.status_code == 403, f"access rule did not block: {blocked.status_code}"
+    finally:
+        cleanup()
+    assert_forwarded()
+
+
 def section_mappings():
     print("\n── 10. Map Remote & Access Rules ────────────────────────────────")
 
@@ -1270,35 +1379,21 @@ def section_mappings():
         record(name, PASS, "map-remote CRUD: create → list → delete")
 
     def t_access_block_rule(name):
-        # Cleanup
-        rules = admin("GET", "/access-rules").json()
-        for r in rules:
-            if str(r.get("name","")).startswith("ua-access-"):
-                admin("DELETE", f"/access-rules/{r['id']}")
+        from fixtures.isolated_proxy import IsolatedProxy
 
-        # Create block rule
-        r = admin("POST", "/access-rules", json={
-            "id": "", "name": "ua-access-block", "enabled": True,
-            "location": {"host": None, "path": "/ua-blocked-path",
-                         "port": None, "protocol": None, "query": None,
-                         "methods": [], "mode": "glob"},
-            "action": "block",
-        })
-        assert r.ok, f"create access rule failed: {r.status_code} {r.text}"
-        time.sleep(0.3)
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
 
-        r2 = proxied("GET", echo_url("/ua-blocked-path"))
-        if r2.status_code == 403:
-            record(name, PASS, "access block rule: blocked with 403")
-        else:
-            record(name, SKIP,
-                   f"not blocked (path match?), got {r2.status_code}")
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
 
-        # Cleanup
-        rules = admin("GET", "/access-rules").json()
-        for r in rules:
-            if str(r.get("name","")).startswith("ua-access-"):
-                admin("DELETE", f"/access-rules/{r['id']}")
+            def isolated_request(method, url):
+                return traffic.request(method, url, proxies={"http": proxy.url},
+                                       timeout=10)
+
+            _check_access_block(isolated_admin, isolated_request)
+        record(name, PASS, "isolated access rule blocks with 403 and restores local forwarding")
 
     def t_map_local_crud(name):
         rules = admin("GET", "/map-local-rules").json()
@@ -1337,18 +1432,53 @@ def section_mappings():
 # SECTION 11: MOCK RULES
 # ──────────────────────────────────────────────────────────────────────────────
 def section_mock():
-    print("\n── 11. Mock Rules ───────────────────────────────────────────────")
+    print("\n── 11. Mock Rules ──────────────────────────────────────")
+
+    from fixtures.isolated_proxy import IsolatedProxy
+
+    names = [name for name in REQUIRED_CASES if name.startswith("Mock rule")]
+    start = len(RESULTS)
+    try:
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
+
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=10, **kwargs)
+
+            def isolated_request(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return traffic.request(method, url, proxies={
+                    "http": proxy.url, "https": proxy.url}, **kwargs)
+
+            _run_mock_checks(isolated_admin, isolated_request)
+    except Exception as exc:
+        completed = {r["name"] for r in RESULTS[start:]}
+        for name in names:
+            if name not in completed:
+                record(name, FAIL, f"Isolated mock prerequisite/lifecycle failed: {exc}")
+        if all(name in completed for name in names):
+            raise
+
+
+def _run_mock_checks(admin, proxied):
+    import uuid
+
+    prefix = "ua-mock-" + uuid.uuid4().hex + "-"
+    request_path = "/" + prefix + "intercept"
 
     def cleanup_mocks():
-        rules = admin("GET", "/mock/rules").json()
+        response = admin("GET", "/mock/rules")
+        response.raise_for_status()
+        rules = response.json()
         for r in rules:
-            if str(r.get("name","")).startswith("ua-mock-"):
-                admin("DELETE", f"/mock/rules/{r['id']}")
+            if str(r.get("name","")).startswith(prefix):
+                admin("DELETE", f"/mock/rules/{r['id']}").raise_for_status()
 
     def t_mock_crud(name):
         cleanup_mocks()
         r = admin("POST", "/mock/rules", json={
-            "id": "", "name": "ua-mock-crud", "enabled": True,
+            "id": "", "name": prefix + "crud", "enabled": True,
             "location": {"host": "mock.example.com", "path": None,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
@@ -1358,11 +1488,11 @@ def section_mock():
         assert r.ok, f"create mock failed: {r.status_code} {r.text}"
         # POST returns {"ok":true}; find by name
         rules = admin("GET", "/mock/rules").json()
-        mock = next((ru for ru in rules if ru.get("name") == "ua-mock-crud"), None)
+        mock = next((ru for ru in rules if ru.get("name") == prefix + "crud"), None)
         assert mock is not None, f"ua-mock-crud not in list: {[ru.get('name') for ru in rules]}"
         mock_id = mock["id"]
 
-        admin("DELETE", f"/mock/rules/{mock_id}")
+        admin("DELETE", f"/mock/rules/{mock_id}").raise_for_status()
         rules2 = admin("GET", "/mock/rules").json()
         assert not any(ru["id"] == mock_id for ru in rules2), "mock not deleted"
         record(name, PASS, "mock CRUD: create → list → delete")
@@ -1370,27 +1500,31 @@ def section_mock():
     def t_mock_intercepts_traffic(name):
         cleanup_mocks()
         r = admin("POST", "/mock/rules", json={
-            "id": "", "name": "ua-mock-intercept", "enabled": True,
-            "location": {"host": None, "path": "/ua-mock-path",
+            "id": "", "name": prefix + "intercept", "enabled": True,
+            "location": {"host": None, "path": request_path,
                          "port": None, "protocol": None, "query": None,
                          "methods": [], "mode": "glob"},
             "responses": [{"status": 202, "headers": {"x-mocked": "true"},
                            "body": '{"mocked":true}', "delay_ms": 0}],
         })
         assert r.ok, f"create mock failed: {r.status_code}"
-        time.sleep(0.3)
-
-        r2 = proxied("GET", echo_url("/ua-mock-path"))
-        if r2.status_code == 202:
-            assert "mocked" in r2.text, f"mock body wrong: {r2.text}"
-            record(name, PASS, f"mock intercepted → 202 with custom body")
-        else:
-            record(name, SKIP,
-                   f"not intercepted (path match?), got {r2.status_code} {r2.text[:60]}")
+        r2 = proxied("GET", echo_url(request_path))
+        assert r2.status_code == 202, f"mock status wrong: {r2.status_code}"
+        assert r2.text == '{"mocked":true}', f"mock body wrong: {r2.text}"
+        assert r2.headers.get("x-mocked") == "true", f"mock header wrong: {r2.headers}"
+        record(name, PASS, "mock intercepted with exact status, body and header")
         cleanup_mocks()
 
-    run_test("Mock rule CRUD lifecycle", t_mock_crud)
-    run_test("Mock rule intercepts proxied traffic", t_mock_intercepts_traffic)
+    def run_clean(name, check):
+        def guarded(case_name):
+            try:
+                check(case_name)
+            finally:
+                cleanup_mocks()
+        run_test(name, guarded)
+
+    run_clean("Mock rule CRUD lifecycle", t_mock_crud)
+    run_clean("Mock rule intercepts proxied traffic", t_mock_intercepts_traffic)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1410,33 +1544,28 @@ def section_capture_filter():
         r = admin("GET", "/capture-filter")
         assert r.ok, f"GET failed: {r.status_code}"
         current = r.json()
-        # Restore function
-        def restore():
-            admin("POST", "/capture-filter", json=current)
-
-        # Schema: {"mode": "Disabled"|"Allowlist"|"Denylist", "hosts": [...]}
-        marker_host = f"filtered-host-{int(time.time())}.internal"
-        # FilterMode serializes as lowercase: "disabled", "allowlist", "denylist"
-        new_cfg = {"mode": "denylist", "hosts": [marker_host]}
-
-        update_r = admin("POST", "/capture-filter", json=new_cfg)
-        if not update_r.ok:
-            record(name, SKIP, f"capture filter update returned {update_r.status_code}")
-            return
-
-        clear_sessions()
-        proxied("GET", f"http://{marker_host}/")
-        time.sleep(0.5)
-
-        sess = wait_for_session(marker_host, timeout=2)
-        filtered = sess is None
-        # Restore
-        restore()
-
-        if filtered:
-            record(name, PASS, f"{marker_host} excluded from capture (Denylist)")
-        else:
-            record(name, SKIP, "session appeared despite filter (host DNS lookup may fail)")
+        from uuid import uuid4
+        marker = uuid4().hex
+        before = f"/capture-before-{marker}"
+        response = proxied("GET", echo_url(before))
+        assert response.status_code == 200 and response.json()["path"] == before
+        assert wait_for_session(before) is not None, "positive capture missing before filter"
+        try:
+            update = admin("POST", "/capture-filter",
+                           json={"mode": "denylist", "hosts": ["127.0.0.1"]})
+            assert update.ok, f"filter update failed: {update.status_code}"
+            excluded = f"/capture-excluded-{marker}"
+            response = proxied("GET", echo_url(excluded))
+            assert response.status_code == 200 and response.json()["path"] == excluded
+            assert wait_for_session(excluded, timeout=2) is None, "excluded request captured"
+        finally:
+            restored = admin("POST", "/capture-filter", json=current)
+            assert restored.ok, f"filter restore failed: {restored.status_code}"
+        after = f"/capture-after-{marker}"
+        response = proxied("GET", echo_url(after))
+        assert response.status_code == 200 and response.json()["path"] == after
+        assert wait_for_session(after) is not None, "capture not restored"
+        record(name, PASS, "reachable origin forwarded; capture excluded and restored")
 
     run_test("Capture filter GET endpoint", t_capture_filter_crud)
     run_test("Capture filter excludes host from recording", t_capture_filter_exclude)
@@ -1466,60 +1595,12 @@ def section_misc():
             record(name, FAIL, str(e))
 
     def t_import_export(name):
-        clear_sessions()
-        sid = f"import-export-{int(time.time())}"
-        sample = {
-            "id": sid,
-            "timestamp": utc_iso_z(),
-            "request": {"method": "GET", "uri": "http://export.test/path",
-                        "headers": {}, "body": "", "host": "export.test",
-                        "body_bytes": None},
-            "response": {"status": 200, "headers": {}, "body": "ok",
-                         "request_uri": "http://export.test/path",
-                         "session_id": sid,
-                         "ttfb_ms": 5, "body_ms": 3, "body_bytes": None},
-            "metrics": {"latency_ms": 42, "request_size_bytes": 0,
-                        "response_size_bytes": 2, "status_code": 200,
-                        "ttfb_ms": 5, "body_ms": 3},
-            "ws_frames": [],
-        }
-        r = admin("POST", "/sessions/import", json={"sessions": [sample], "merge": False})
-        assert r.ok, f"import failed: {r.status_code} {r.text}"
-
-        sess = wait_for_session("export.test")
-        assert sess is not None, "imported session not found"
-
-        # Export as HAR — correct path is /admin/sessions/export/har
-        har_r = admin("GET", "/sessions/export/har")
-        if har_r.ok:
-            har = har_r.json()
-            assert "log" in har, f"HAR missing 'log': {list(har.keys())}"
-            assert len(har["log"].get("entries", [])) >= 1
-            record(name, PASS, f"import→session→HAR export: {len(har['log']['entries'])} entries")
-        else:
-            record(name, SKIP, f"HAR export endpoint returned {har_r.status_code}")
-        clear_sessions()
+        from fixtures.har_checks import check_har_export
+        record(name, PASS, check_har_export())
 
     def t_session_delete(name):
-        sample_id = f"del-test-{int(time.time())}"
-        sample = {
-            "id": sample_id,
-            "timestamp": utc_iso_z(),
-            "request": {"method": "GET", "uri": "http://del.test/",
-                        "headers": {}, "body": "", "host": "del.test",
-                        "body_bytes": None},
-            "response": None, "metrics": None, "ws_frames": [],
-        }
-        admin("POST", "/sessions/import", json={"sessions": [sample], "merge": False})
-        del_r = admin("DELETE", f"/sessions/{sample_id}")
-        if del_r.ok:
-            sessions = get_sessions()
-            assert not any(s["id"] == sample_id for s in sessions), "session not deleted"
-            record(name, PASS, "individual session delete works")
-        elif del_r.status_code == 404:
-            record(name, SKIP, "per-session DELETE not supported (bulk only)")
-        else:
-            record(name, FAIL, f"delete returned {del_r.status_code}")
+        from fixtures.session_checks import check_session_deletion
+        record(name, PASS, check_session_deletion())
 
     def t_webhooks_crud(name):
         hooks = admin("GET", "/webhooks").json()
@@ -1555,58 +1636,56 @@ def section_misc():
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 14: DNS OVERRIDES
 # ──────────────────────────────────────────────────────────────────────────────
+def _check_dns(admin, proxied=None):
+    from uuid import uuid4
+
+    host = "dns-" + uuid4().hex + ".test"
+    path = "/" + uuid4().hex
+
+    def rules():
+        response = admin("GET", "/dns")
+        response.raise_for_status()
+        return response.json()
+
+    original = rules()
+    expected = dict(original, **{host: "127.0.0.1"})
+    try:
+        response = admin("POST", "/dns", json=expected)
+        response.raise_for_status()
+        assert rules() == expected, "DNS override map did not preserve exact values"
+        if proxied is not None:
+            response = proxied("GET", f"http://{host}:{ECHO_PORT}{path}")
+            assert response.status_code == 200, f"DNS redirect status: {response.status_code}"
+            body = response.json()
+            assert body.get("method") == "GET", f"DNS redirect method: {body}"
+            assert body.get("path") == path, f"DNS redirect path: {body}"
+    finally:
+        admin("DELETE", "/dns/" + host).raise_for_status()
+        assert rules() == original, "DNS cleanup did not restore original map"
+
+
 def section_dns():
     print("\n── 14. DNS Overrides ────────────────────────────────────────────")
 
-    def t_dns_crud(name):
-        # DNS uses /admin/dns with {host: ip} map, DELETE by /admin/dns/{host}
-        r = admin("GET", "/dns")
-        assert r.ok, f"DNS GET failed: {r.status_code}"
-        existing = r.json()
+    def check(name, redirect):
+        from fixtures.isolated_proxy import IsolatedProxy
 
-        # Add our test entry
-        new_map = dict(existing)
-        new_map["ua-dns-test.example.com"] = "127.0.0.1"
-        r2 = admin("POST", "/dns", json=new_map)
-        assert r2.ok or r2.status_code in (200, 201, 204), \
-            f"DNS POST failed: {r2.status_code} {r2.text}"
+        with IsolatedProxy() as proxy, requests.Session() as traffic:
+            traffic.trust_env = False
 
-        rules2 = admin("GET", "/dns").json()
-        assert "ua-dns-test.example.com" in rules2, f"key missing: {rules2}"
+            def isolated_admin(method, path, **kwargs):
+                return proxy.client.request(method, proxy.url + "/admin" + path,
+                                            timeout=5, **kwargs)
 
-        del_r = admin("DELETE", "/dns/ua-dns-test.example.com")
-        assert del_r.ok, f"DNS DELETE failed: {del_r.status_code}"
+            def isolated_request(method, url):
+                return traffic.request(method, url, proxies={"http": proxy.url}, timeout=5)
 
-        rules3 = admin("GET", "/dns").json()
-        assert "ua-dns-test.example.com" not in rules3, "key not deleted"
-        record(name, PASS, "DNS override CRUD: add to map → list → delete by host")
+            _check_dns(isolated_admin, isolated_request if redirect else None)
+        record(name, PASS, "isolated unique DNS override verified and removed" +
+               ("; exact local GET response verified" if redirect else ""))
 
-    def t_dns_redirect_traffic(name):
-        # Set DNS override: ua-dns-target.example.com → 127.0.0.1
-        existing = admin("GET", "/dns").json()
-        new_map = dict(existing)
-        new_map["ua-dns-target.example.com"] = "127.0.0.1"
-        r = admin("POST", "/dns", json=new_map)
-        assert r.ok or r.status_code in (200, 201, 204), \
-            f"DNS POST failed: {r.status_code}"
-        time.sleep(0.3)
-
-        # Request to ua-dns-target.example.com:<ECHO_PORT> via proxy
-        r2 = proxied("GET", f"http://ua-dns-target.example.com:{ECHO_PORT}/dns-redir-test")
-        # Cleanup
-        admin("DELETE", "/dns/ua-dns-target.example.com")
-
-        if r2.ok:
-            d = r2.json()
-            assert d["path"] == "/dns-redir-test"
-            record(name, PASS, "DNS override redirected traffic to echo server")
-        elif r2.status_code in (502, 503, 504):
-            record(name, SKIP, f"DNS redirect may need same port as echo (status={r2.status_code})")
-        else:
-            record(name, SKIP, f"unexpected status {r2.status_code} {r2.text[:60]}")
-
-    run_test("DNS override CRUD lifecycle", t_dns_crud)
-    run_test("DNS override redirects proxied traffic", t_dns_redirect_traffic)
+    run_test("DNS override CRUD lifecycle", lambda name: check(name, False))
+    run_test("DNS override redirects proxied traffic", lambda name: check(name, True))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1630,7 +1709,7 @@ def print_report():
 
     print(f"\n  PASS:  {len(passed):3d}  ✅")
     print(f"  FAIL:  {len(failed):3d}  ❌")
-    print(f"  SKIP:  {len(skipped):3d}  ⚠️ (infra limit / optional)")
+    print(f"  SKIP:  {len(skipped):3d}  ⚠️ (required coverage unavailable)")
     print(f"  TOTAL: {total:3d}")
     print(f"\n  Pass rate: {len(passed)/total*100:.1f}%  (excl. skips: "
           f"{len(passed)/(len(passed)+len(failed))*100:.1f}%)" if (len(passed)+len(failed)) > 0
@@ -1649,8 +1728,14 @@ def print_report():
 
     print("\n" + "═" * 72)
 
-    # Return exit code
-    return 1 if failed else 0
+    names = [r["name"] for r in RESULTS]
+    missing = set(REQUIRED_CASES) - set(names)
+    duplicate = {name for name in names if names.count(name) != 1}
+    invalid = [r for r in RESULTS if r["status"] not in (PASS, FAIL, SKIP)]
+    if missing or duplicate or invalid:
+        print(f"Incomplete required coverage: missing={sorted(missing)}, "
+              f"duplicate={sorted(duplicate)}, invalid={invalid}")
+    return 1 if failed or skipped or missing or duplicate or invalid or not RESULTS else 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
